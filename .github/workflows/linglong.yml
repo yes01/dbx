@@ -1,0 +1,82 @@
+name: Linglong
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'linglong.yaml'
+      - 'packaging/linglong/**'
+      - 'docs/linglong.zh-CN.md'
+      - '.github/workflows/linglong.yml'
+      - '.github/scripts/*linglong*.sh'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'linglong.yaml'
+      - 'packaging/linglong/**'
+      - 'docs/linglong.zh-CN.md'
+      - '.github/workflows/linglong.yml'
+      - '.github/scripts/*linglong*.sh'
+  workflow_dispatch:
+    inputs:
+      build_uab:
+        description: 'Build and upload a UAB artifact'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y appstream desktop-file-utils libxml2-utils ruby
+
+      - name: Validate Linglong manifest
+        run: ruby -e 'require "yaml"; data = YAML.load_file("linglong.yaml"); abort("missing package.id") unless data.dig("package", "id"); abort("missing build") unless data["build"]'
+
+      - name: Validate desktop entry
+        run: desktop-file-validate packaging/linglong/com.dbx.app.desktop
+
+      - name: Validate AppStream metadata
+        run: appstreamcli validate --no-net packaging/linglong/com.dbx.app.metainfo.xml
+
+      - name: Validate build script syntax
+        run: bash -n packaging/linglong/build.sh .github/scripts/install-linglong-builder.sh .github/scripts/build-linglong-uab.sh
+
+  build-uab:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_uab == 'true'
+    runs-on: ubuntu-24.04
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linyaps builder
+        run: .github/scripts/install-linglong-builder.sh
+
+      - name: Build UAB
+        run: .github/scripts/build-linglong-uab.sh
+
+      - name: Upload UAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbx-linglong-uab
+          path: |
+            dist/linglong/*.uab
+            dist/linglong/*.sha256
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,55 @@
+version: "1"
+
+package:
+  id: com.dbx.app
+  name: dbx
+  version: 0.5.27.0
+  kind: app
+  description: |
+    DBX is a lightweight open-source database management tool built with Tauri.
+
+command:
+  - /opt/apps/com.dbx.app/files/bin/dbx
+
+base: org.deepin.base/23.1.0
+runtime: org.deepin.runtime.dtk/23.1.0
+
+sources:
+  - kind: git
+    url: https://github.com/t8y2/dbx.git
+    commit: main
+    name: dbx.git
+
+build: |
+  cd /project/linglong/sources/dbx.git
+  bash packaging/linglong/build.sh
+
+buildext:
+  apt:
+    build_depends:
+      - ca-certificates
+      - curl
+      - git
+      - build-essential
+      - pkg-config
+      - libwebkit2gtk-4.1-dev
+      - libgtk-3-dev
+      - libappindicator3-dev
+      - librsvg2-dev
+      - patchelf
+      - libssl-dev
+      - xz-utils
+    depends:
+      - libwebkit2gtk-4.1-0
+      - libgtk-3-0
+      - libappindicator3-1
+      - librsvg2-2
+      - libssl3
+
+modules:
+  - name: main
+    files:
+      - bin/
+      - share/applications/
+      - share/icons/
+      - share/metainfo/

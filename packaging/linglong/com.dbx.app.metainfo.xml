@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.dbx.app</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>AGPL-3.0-only</project_license>
+  <name>DBX</name>
+  <summary>Lightweight database management tool</summary>
+  <summary xml:lang="zh-CN">轻量级数据库管理工具</summary>
+  <description>
+    <p>DBX is an open-source desktop database client for MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, and more.</p>
+    <p xml:lang="zh-CN">DBX 是开源桌面数据库客户端，支持 MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle 等数据库。</p>
+  </description>
+  <launchable type="desktop-id">com.dbx.app.desktop</launchable>
+  <categories>
+    <category>Development</category>
+    <category>Database</category>
+  </categories>
+  <url type="homepage">https://github.com/t8y2/dbx</url>
+  <url type="bugtracker">https://github.com/t8y2/dbx/issues</url>
+  <provides>
+    <binary>dbx</binary>
+  </provides>
+</component>

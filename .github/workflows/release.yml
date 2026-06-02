@@ -229,6 +229,26 @@ jobs:
               --yes
           done
 
+  linglong-uab:
+    needs: cleanup-release-signatures
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linyaps builder
+        run: .github/scripts/install-linglong-builder.sh
+
+      - name: Build Linglong UAB
+        run: .github/scripts/build-linglong-uab.sh "${GITHUB_REF_NAME}"
+
+      - name: Upload Linglong UAB to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/linglong/*.uab dist/linglong/*.sha256 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
   jdbc-plugin:
     needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
     runs-on: ubuntu-latest
