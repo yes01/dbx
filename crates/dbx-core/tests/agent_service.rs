@@ -3,7 +3,7 @@ use dbx_core::agent_manager::{
     JreInfo, DEFAULT_JRE_KEY,
 };
 use dbx_core::agent_service::{
-    build_agent_list, github_url_to_r2_path, import_agent_jar, import_agents_from_zip, is_app_version_compatible,
+    asset_url_to_r2_path, build_agent_list, import_agent_jar, import_agents_from_zip, is_app_version_compatible,
     jre_needs_install, local_agent_jar_candidates, replace_download, uninstall_agent_driver, AgentProgressEvent,
 };
 
@@ -204,13 +204,13 @@ fn local_agent_jar_candidates_include_sibling_build_output() {
 }
 
 #[test]
-fn github_agent_asset_urls_map_to_r2_paths_by_category() {
+fn agent_asset_urls_map_to_r2_paths_by_category() {
     assert_eq!(
-        github_url_to_r2_path("https://github.com/t8y2/dbx-agents/releases/download/v1/dbx-jre-21.tar.gz", "jre"),
+        asset_url_to_r2_path("https://downloads.testteam.local/agents/dbx-jre-21.tar.gz", "jre"),
         "agents/jre/dbx-jre-21.tar.gz"
     );
     assert_eq!(
-        github_url_to_r2_path("https://github.com/t8y2/dbx-agents/releases/download/v1/dbx-agent-h2.jar", "driver"),
+        asset_url_to_r2_path("https://downloads.testteam.local/agents/dbx-agent-h2.jar", "driver"),
         "agents/drivers/dbx-agent-h2.jar"
     );
 }

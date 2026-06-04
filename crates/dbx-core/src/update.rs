@@ -1,9 +1,8 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 
-const LATEST_JSON_PATH: &str = "https://github.com/t8y2/dbx/releases/latest/download/latest.json";
+const LATEST_JSON_PATH: &str = "https://dl.dbxio.com/releases/latest/latest.json";
 const LATEST_JSON_R2_PATH: &str = "releases/latest/latest.json";
-const GITHUB_RELEASE_API_PREFIX: &str = "https://api.github.com/repos/t8y2/dbx/releases/tags/v";
-const RELEASE_URL_PREFIX: &str = "https://github.com/t8y2/dbx/releases/tag/v";
+const RELEASE_URL_PREFIX: &str = "https://dl.dbxio.com/releases/latest/";
 
 #[derive(Debug, Deserialize)]
 pub struct TauriRelease {
@@ -12,8 +11,6 @@ pub struct TauriRelease {
     pub notes: Option<String>,
     #[serde(default)]
     pub jdbc_plugin: Option<JdbcPluginLatest>,
-    #[serde(skip)]
-    pub github: Option<GithubReleaseMetadata>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -21,13 +18,6 @@ pub struct JdbcPluginLatest {
     pub version: String,
     pub protocol_version: u32,
     pub url: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GithubReleaseMetadata {
-    pub name: Option<String>,
-    pub html_url: Option<String>,
-    pub body: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,11 +38,7 @@ pub async fn fetch_latest_release() -> Result<TauriRelease, String> {
         .await
         .map_err(|e| format!("Failed to check updates: {e}"))?;
 
-    let mut release = resp.json::<TauriRelease>().await.map_err(|e| format!("Failed to parse update response: {e}"))?;
-    if let Ok(github) = fetch_github_release_metadata(&client, &release.version).await {
-        release.github = Some(github);
-    }
-    Ok(release)
+    resp.json::<TauriRelease>().await.map_err(|e| format!("Failed to parse update response: {e}"))
 }
 
 fn build_update_http_client() -> Result<reqwest::Client, String> {
@@ -192,39 +178,11 @@ fn proxy_url(host: &str, port: &str) -> Option<String> {
     Some(format!("http://{host}:{port}"))
 }
 
-async fn fetch_github_release_metadata(
-    client: &reqwest::Client,
-    version: &str,
-) -> Result<GithubReleaseMetadata, String> {
-    let url = format!("{GITHUB_RELEASE_API_PREFIX}{}", normalize_version(version));
-    client
-        .get(url)
-        .header(reqwest::header::USER_AGENT, "dbx-update-checker")
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("{e}"))?
-        .json::<GithubReleaseMetadata>()
-        .await
-        .map_err(|e| format!("Failed to parse GitHub release response: {e}"))
-}
-
 pub fn build_update_info(release: TauriRelease, current_version: &str) -> UpdateInfo {
     let latest_version = normalize_version(&release.version);
-    let github = release.github.as_ref();
-    let release_notes = github
-        .and_then(|metadata| non_empty(metadata.body.as_deref()))
-        .map(ToOwned::to_owned)
-        .or(release.notes)
-        .unwrap_or_default();
-    let release_name = github
-        .and_then(|metadata| non_empty(metadata.name.as_deref()))
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("DBX v{latest_version}"));
-    let release_url = github
-        .and_then(|metadata| non_empty(metadata.html_url.as_deref()))
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("{RELEASE_URL_PREFIX}{latest_version}"));
+    let release_notes = release.notes.unwrap_or_default();
+    let release_name = format!("TestTeam DBX v{latest_version}");
+    let release_url = RELEASE_URL_PREFIX.to_string();
 
     UpdateInfo {
         update_available: is_newer_version(&latest_version, current_version),
@@ -279,7 +237,7 @@ pub fn is_newer_version(latest: &str, current: &str) -> bool {
 mod tests {
     use super::{
         build_update_info, is_newer_version, normalize_version, system_proxy_url_from_scutil_output,
-        system_proxy_url_from_windows_registry_output, GithubReleaseMetadata, TauriRelease,
+        system_proxy_url_from_windows_registry_output, TauriRelease,
     };
 
     #[test]
@@ -361,7 +319,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
               "jdbc_plugin": {
                 "version": "0.1.3",
                 "protocol_version": 1,
-                "url": "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip"
+                "url": "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip"
               },
               "platforms": {}
             }"#,
@@ -372,27 +330,22 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
 
         assert_eq!(jdbc.version, "0.1.3");
         assert_eq!(jdbc.protocol_version, 1);
-        assert_eq!(jdbc.url, "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip");
+        assert_eq!(jdbc.url, "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip");
     }
 
     #[test]
-    fn update_info_prefers_github_release_metadata() {
+    fn update_info_uses_internal_release_metadata() {
         let release = TauriRelease {
             version: "0.5.3".to_string(),
-            notes: Some("See the assets below to download and install.".to_string()),
+            notes: Some("Internal release notes".to_string()),
             jdbc_plugin: None,
-            github: Some(GithubReleaseMetadata {
-                name: Some("DBX v0.5.3".to_string()),
-                html_url: Some("https://github.com/t8y2/dbx/releases/tag/v0.5.3".to_string()),
-                body: Some("### 新功能\n\n真实发布说明".to_string()),
-            }),
         };
 
         let info = build_update_info(release, "0.5.2");
 
-        assert_eq!(info.release_name, "DBX v0.5.3");
-        assert_eq!(info.release_url, "https://github.com/t8y2/dbx/releases/tag/v0.5.3");
-        assert_eq!(info.release_notes, "### 新功能\n\n真实发布说明");
+        assert_eq!(info.release_name, "TestTeam DBX v0.5.3");
+        assert_eq!(info.release_url, "https://dl.dbxio.com/releases/latest/");
+        assert_eq!(info.release_notes, "Internal release notes");
         assert!(!info.portable_mode);
-    }
-}
+    }}
+

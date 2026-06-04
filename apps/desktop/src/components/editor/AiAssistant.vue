@@ -97,10 +97,12 @@ const emit = defineEmits<{
 const prompt = ref("");
 const messages = ref<ChatMessage[]>([]);
 const isGenerating = ref(false);
+const isCancelling = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
 const activeAction = ref<AiAction>("generate");
 const assistantMode = ref<"ask" | "agent">("ask");
 const currentSessionId = ref("");
+const cancelledSessionIds = new Set<string>();
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
 const showConversationList = ref(false);
@@ -510,6 +512,7 @@ async function send() {
   const requestedAction = activeAction.value;
   const requestedMode = assistantMode.value;
   isGenerating.value = true;
+  isCancelling.value = false;
   messages.value.push({ role: "assistant", content: "" });
   const assistantIdx = messages.value.length - 1;
   const sessionId = uuid();
@@ -518,6 +521,7 @@ async function send() {
     const context = await buildAiContext(props.tab, props.connection, {
       mentionedTables,
     });
+    if (cancelledSessionIds.has(sessionId)) return;
     const history: AiMessage[] = messages.value.slice(0, -2).map((m) => ({
       role: m.role,
       content: m.content,
@@ -532,39 +536,51 @@ async function send() {
       },
       history,
       (delta) => {
+        if (cancelledSessionIds.has(sessionId)) return;
         appendAssistantDelta(assistantIdx, delta);
       },
       sessionId,
       (reasoningDelta) => {
+        if (cancelledSessionIds.has(sessionId)) return;
         appendAssistantReasoning(assistantIdx, reasoningDelta);
       },
     );
   } catch (e: any) {
-    messages.value[assistantIdx].content = `Error: ${e.message || e}`;
+    if (!cancelledSessionIds.has(sessionId)) {
+      messages.value[assistantIdx].content = `Error: ${e.message || e}`;
+    }
   } finally {
+    const wasCancelled = cancelledSessionIds.delete(sessionId);
     const msg = messages.value[assistantIdx];
     if (msg) msg.isThinking = false;
     isGenerating.value = false;
-    const agentPlan = buildAiAgentPlan({
-      mode: requestedMode,
-      action: requestedAction,
-      instruction: displayText,
-      assistantContent: msg?.content || "",
-      connection: props.connection,
-    });
-    if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
-    if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
+    isCancelling.value = false;
+    if (!wasCancelled) {
+      const agentPlan = buildAiAgentPlan({
+        mode: requestedMode,
+        action: requestedAction,
+        instruction: displayText,
+        assistantContent: msg?.content || "",
+        connection: props.connection,
+      });
+      if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
+      if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
+    } else if (msg && !msg.content && !msg.reasoning) {
+      messages.value.splice(assistantIdx, 1);
+    }
     activeAction.value = "generate";
     currentSessionId.value = "";
-    persistConversation();
+    if (!wasCancelled) persistConversation();
     scrollToBottom();
   }
 }
 
 async function cancelStream() {
-  if (currentSessionId.value) {
-    await aiCancelStream(currentSessionId.value).catch(() => {});
-  }
+  const sessionId = currentSessionId.value;
+  if (!sessionId || isCancelling.value) return;
+  isCancelling.value = true;
+  cancelledSessionIds.add(sessionId);
+  await aiCancelStream(sessionId).catch(() => {});
 }
 
 function applySql(code: string) {
@@ -989,10 +1005,13 @@ const messageRenderer = computed(() => {
           <button
             v-if="isGenerating"
             class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center"
+            :class="{ 'opacity-70': isCancelling }"
             :title="t('ai.stopGenerating')"
+            :disabled="isCancelling"
             @click="cancelStream"
           >
-            <Square class="h-3.5 w-3.5" />
+            <Loader2 v-if="isCancelling" class="h-3.5 w-3.5 animate-spin" />
+            <Square v-else class="h-3.5 w-3.5" />
           </button>
           <button
             v-else

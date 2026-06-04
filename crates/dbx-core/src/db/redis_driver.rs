@@ -444,6 +444,7 @@ pub async fn scan_cluster_keys_page(
     cursor: u64,
     pattern: &str,
     count: usize,
+    include_details: bool,
 ) -> Result<RedisScanResult, String> {
     let master_nodes = cluster_master_nodes(pool).await?;
     if master_nodes.is_empty() {
@@ -461,7 +462,7 @@ pub async fn scan_cluster_keys_page(
         let mut con =
             connect_direct_node(endpoint, pool.tls, pool.tls_insecure, &pool.username, &pool.password).await?;
         let current_cursor = if index == node_index { node_cursor } else { 0 };
-        let result = scan_keys_page(&mut con, current_cursor, pattern, count).await?;
+        let result = scan_keys_page(&mut con, current_cursor, pattern, count, include_details).await?;
         if !result.keys.is_empty() {
             let next_cursor = if result.cursor != 0 {
                 encode_cluster_cursor(index, result.cursor)?
@@ -817,7 +818,13 @@ where
     Ok(RedisCommandResult { command, safety, value: redis_command_raw_to_json(raw) })
 }
 
-pub async fn scan_keys_page<C>(con: &mut C, cursor: u64, pattern: &str, count: usize) -> Result<RedisScanResult, String>
+pub async fn scan_keys_page<C>(
+    con: &mut C,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    include_details: bool,
+) -> Result<RedisScanResult, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -835,6 +842,21 @@ where
     let total_keys: u64 = redis::cmd("DBSIZE").query_async(con).await.unwrap_or(0);
     if keys.is_empty() {
         return Ok(RedisScanResult { cursor: next_cursor, keys: Vec::new(), total_keys });
+    }
+
+    if !include_details {
+        let result = keys
+            .iter()
+            .map(|key| RedisKeyInfo {
+                key_display: redis_key_bytes_to_display(key),
+                key_raw: redis_key_bytes_to_raw(key),
+                key_type: "unknown".to_string(),
+                ttl: -2,
+                size: 0,
+                value_preview: String::new(),
+            })
+            .collect();
+        return Ok(RedisScanResult { cursor: next_cursor, keys: result, total_keys });
     }
 
     let mut pipe = redis::pipe();

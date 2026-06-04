@@ -1,0 +1,88 @@
+name: Desktop Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: dbx-windows-x64
+            bundle_path: target/x86_64-pc-windows-msvc/release/bundle
+          - label: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: dbx-linux-x64
+            bundle_path: target/x86_64-unknown-linux-gnu/release/bundle
+          - label: macOS Apple Silicon
+            os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: dbx-macos-arm64
+            bundle_path: target/aarch64-apple-darwin/release/bundle
+          - label: macOS Intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: dbx-macos-x64
+            bundle_path: target/x86_64-apple-darwin/release/bundle
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './ -> target'
+          shared-key: desktop-build-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Install system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev xdg-utils
+
+      - name: Typecheck frontend
+        run: pnpm typecheck
+
+      - name: Build desktop bundle
+        run: pnpm tauri build --ci --no-sign --config src-tauri/tauri.ci.conf.json --target ${{ matrix.target }}
+
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.bundle_path }}
+          if-no-files-found: error
+          retention-days: 14

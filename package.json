@@ -93,7 +93,8 @@
     "onlyBuiltDependencies": [
       "better-sqlite3",
       "esbuild",
-      "keytar"
+      "keytar",
+      "vue-demi"
     ]
   },
   "lint-staged": {

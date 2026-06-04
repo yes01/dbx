@@ -1,6 +1,6 @@
-export default {
+﻿export default {
   app: {
-    name: "DBX",
+    name: "TestTeam DBX",
   },
   auth: {
     setupTitle: "设置访问密码",
@@ -51,7 +51,7 @@ export default {
     availableMessage: "DBX {latest} 已发布，当前版本为 {current}。",
     upToDate: "DBX 已是最新版本 ({version})。",
     failed: "检查更新失败：{error}",
-    rateLimited: "GitHub 更新检查暂时触发频率限制。你仍然可以打开下载页手动查看。",
+    rateLimited: "内部更新服务暂时不可用。你仍然可以通过内部下载渠道手动查看。",
     openRelease: "打开下载页",
     downloadAndInstall: "下载并安装",
     portableManualUpdate:
@@ -1215,6 +1215,8 @@ export default {
     searchByValue: "值",
     keys: "{count} 个 key",
     loadingKeys: "正在加载 key...",
+    searchProgress: "已找到 {count} 个，继续搜索中...",
+    stopSearch: "停止搜索",
     searchingValues: "正在按值搜索...",
     loadMoreKeys: "加载更多",
     items: "{count} 个元素",
@@ -1734,14 +1736,14 @@ export default {
     mcpNpmBoundary: "DBX 只检测和提示 MCP 状态；安装与升级仍由 npm 完成。",
     mcpRefresh: "重新检查",
     mcpGuide: "MCP 指南",
-    aboutDescription: "开源、轻量的数据库管理工具。",
-    community: "社区",
+    aboutDescription: "TestTeam 出品的内部数据库管理工具。",
+    community: "内部",
     qqGroup: "QQ 群",
     wechatGroup: "微信交流群",
     wechatGroupInvite: "腾讯文档邀请",
     project: "项目",
-    openSource: "开源仓库",
-    officialDocs: "官方文档",
+    openSource: "内部工具",
+    officialDocs: "内部文档",
   },
   driverStore: {
     progressJreExtract: "解压 JRE...",

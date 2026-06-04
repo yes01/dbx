@@ -27,7 +27,6 @@ import {
   ArrowUp,
   ChevronRight,
   Copy,
-  ExternalLink,
   FilePlus2,
   FolderOpen,
   GripVertical,
@@ -1621,14 +1620,6 @@ function onJdbcDriverSelect(path: any) {
   selectedJdbcDriverPath.value = path;
   addJdbcDriverPath(path);
 }
-
-function openExternalUrl(url: string) {
-  if (isTauriRuntime()) {
-    import("@tauri-apps/plugin-shell").then(({ open }) => open(url));
-  } else {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
 </script>
 
 <template>
@@ -1946,12 +1937,6 @@ function openExternalUrl(url: string) {
                       <p class="text-xs text-muted-foreground">
                         {{ t("connection.jdbcPluginHint") }}
                       </p>
-                      <div class="flex flex-wrap gap-2">
-                        <Button type="button" variant="outline" size="sm" @click="openExternalUrl('https://dbxio.com')">
-                          <ExternalLink class="h-3.5 w-3.5" />
-                          {{ t("connection.jdbcDocs") }}
-                        </Button>
-                      </div>
                     </div>
                   </div>
                 </template>

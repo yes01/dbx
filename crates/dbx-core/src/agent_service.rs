@@ -7,7 +7,7 @@ use crate::agent_manager::{
     AgentDriverInfo, AgentManager, AgentRegistry, InstalledDriver, JavaRuntimeMode, DEFAULT_JRE_KEY,
 };
 
-const REGISTRY_PATH: &str = "https://github.com/t8y2/dbx-agents/releases/latest/download/agent-registry.json";
+const REGISTRY_PATH: &str = "https://dl.dbxio.com/agents/agent-registry.json";
 const REGISTRY_R2_PATH: &str = "agents/agent-registry.json";
 
 static REGISTRY_CACHE: std::sync::LazyLock<tokio::sync::Mutex<Option<(std::time::Instant, AgentRegistry)>>> =
@@ -263,7 +263,7 @@ pub async fn reinstall_agent_jre(
         &progress,
         "jre",
         &platform_jre.url,
-        &github_url_to_r2_path(&platform_jre.url, "jre"),
+        &asset_url_to_r2_path(&platform_jre.url, "jre"),
         &jre_archive,
         platform_jre.size,
         None,
@@ -364,7 +364,7 @@ async fn install_agent_driver_from_registry(
             progress,
             "jre",
             &platform_jre.url,
-            &github_url_to_r2_path(&platform_jre.url, "jre"),
+            &asset_url_to_r2_path(&platform_jre.url, "jre"),
             &jre_archive,
             platform_jre.size,
             Some(db_type),
@@ -392,7 +392,7 @@ async fn install_agent_driver_from_registry(
         progress,
         "driver",
         &driver.jar.url,
-        &github_url_to_r2_path(&driver.jar.url, "driver"),
+        &asset_url_to_r2_path(&driver.jar.url, "driver"),
         &jar_path,
         driver.jar.size,
         Some(db_type),
@@ -524,8 +524,8 @@ fn prune_download_cache(am: &AgentManager) -> Result<(), String> {
     Ok(())
 }
 
-pub fn github_url_to_r2_path(github_url: &str, category: &str) -> String {
-    let filename = github_url.rsplit('/').next().unwrap_or(github_url);
+pub fn asset_url_to_r2_path(asset_url: &str, category: &str) -> String {
+    let filename = asset_url.rsplit('/').next().unwrap_or(asset_url);
     match category {
         "jre" => format!("agents/jre/{filename}"),
         "driver" => format!("agents/drivers/{filename}"),

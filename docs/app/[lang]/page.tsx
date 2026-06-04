@@ -25,45 +25,19 @@ import {
   Zap,
 } from 'lucide-react';
 
-const fallbackStarLabel = '1.3k+';
-
-function formatStars(count: number) {
-  if (count >= 1000) {
-    return `${(Math.floor(count / 100) / 10).toFixed(1)}k+`;
-  }
-
-  return `${count}+`;
-}
-
-async function getGitHubStarLabel() {
-  try {
-    const response = await fetch('https://api.github.com/repos/t8y2/dbx', {
-      headers: { Accept: 'application/vnd.github+json' },
-      next: { revalidate: 60 * 60 * 6 },
-    });
-
-    if (!response.ok) return fallbackStarLabel;
-
-    const data = (await response.json()) as { stargazers_count?: number };
-    return typeof data.stargazers_count === 'number' ? formatStars(data.stargazers_count) : fallbackStarLabel;
-  } catch {
-    return fallbackStarLabel;
-  }
-}
-
-function metrics(starLabel: string) {
+function metrics() {
   return {
     en: [
     { value: '~15 MB', label: 'desktop installer' },
     { value: '40+', label: 'database engines' },
     { value: '2 modes', label: 'desktop and Docker' },
-      { value: starLabel, label: 'GitHub stars, fully open-source' },
+      { value: 'Internal', label: 'TestTeam maintained' },
     ],
     cn: [
     { value: '~15 MB', label: '桌面安装包' },
     { value: '40+', label: '数据库引擎' },
     { value: '2 种模式', label: '桌面与 Docker' },
-      { value: starLabel, label: 'GitHub Star，完全开源' },
+      { value: '内部', label: 'TestTeam 维护' },
     ],
   };
 }
@@ -283,7 +257,7 @@ const testimonials = {
       quote: 'MCP Server 很实用，能让编码 Agent 读取数据库上下文，不需要再额外搭桥。',
     },
     {
-      name: '逛逛GitHub',
+      name: 'TestTeam',
       role: '结构导航',
       avatar: '/avatars/guangguang.jpg',
       quote: '侧边栏搜索和分组浏览让大型 Schema 也不会迷路，不用在几百张表里翻来翻去。',
@@ -410,8 +384,8 @@ export default async function LandingPage({
   const t = i18nText[l];
   const workflowItems = workflows[l];
   const capabilityItems = capabilities[l];
-  const starLabel = await getGitHubStarLabel();
-  const metricItems = metrics(starLabel)[l];
+
+  const metricItems = metrics()[l];
   const appVersion = getAppVersion();
   const [initialChangelog, initialLatestRelease] = await Promise.all([fetchChangelog(l), fetchLatestReleaseInfo()]);
   const initialDownloadVersion = initialLatestRelease?.version ?? appVersion;
@@ -545,7 +519,7 @@ export default async function LandingPage({
           <p className="mt-2 text-landing-muted text-sm leading-[1.65]">{t.footerDesc}</p>
         </div>
         <div className="flex items-center gap-2.5 flex-wrap justify-end max-[760px]:mt-[18px]">
-          <Link href="https://github.com/t8y2/dbx/releases/latest" target="_blank" className="landing-final-link inline-flex items-center justify-center min-h-[42px] rounded-[7px] px-[15px] text-sm font-[650]">
+          <Link href="https://dl.dbxio.com/releases/latest/" target="_blank" className="landing-final-link inline-flex items-center justify-center min-h-[42px] rounded-[7px] px-[15px] text-sm font-[650]">
             {t.release}
           </Link>
           <Link href={`/${l}/docs/getting-started#docker`} target="_blank" className="landing-final-link inline-flex items-center justify-center min-h-[42px] rounded-[7px] px-[15px] text-sm font-[650]">
@@ -556,3 +530,6 @@ export default async function LandingPage({
     </main>
   );
 }
+
+
+

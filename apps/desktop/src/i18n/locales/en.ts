@@ -1,6 +1,6 @@
-export default {
+﻿export default {
   app: {
-    name: "DBX",
+    name: "TestTeam DBX",
   },
   auth: {
     setupTitle: "Set up access password",
@@ -52,7 +52,7 @@ export default {
     upToDate: "DBX is up to date ({version}).",
     failed: "Failed to check updates: {error}",
     rateLimited:
-      "GitHub update checks are temporarily rate limited. You can still open the release page to check manually.",
+      "The internal update service is temporarily unavailable. You can check the internal download channel manually.",
     openRelease: "Open Release",
     downloadAndInstall: "Download & Install",
     portableManualUpdate:
@@ -1239,6 +1239,8 @@ export default {
     searchByValue: "Value",
     keys: "{count} keys",
     loadingKeys: "Loading keys...",
+    searchProgress: "{count} found, still searching...",
+    stopSearch: "Stop search",
     searchingValues: "Searching values...",
     loadMoreKeys: "Load more keys",
     items: "{count} items",
@@ -1776,14 +1778,14 @@ export default {
     mcpNpmBoundary: "DBX only checks and explains MCP status; installation and upgrades still run through npm.",
     mcpRefresh: "Check again",
     mcpGuide: "MCP guide",
-    aboutDescription: "An open-source, lightweight database management tool.",
-    community: "Community",
+    aboutDescription: "An internal database management tool from TestTeam.",
+    community: "Internal",
     qqGroup: "QQ Group",
     wechatGroup: "WeChat Group",
     wechatGroupInvite: "Tencent Docs invite",
     project: "Project",
-    openSource: "Open-source repository",
-    officialDocs: "Official docs",
+    openSource: "Internal tool",
+    officialDocs: "Internal docs",
   },
   driverStore: {
     progressJreExtract: "Extracting JRE...",

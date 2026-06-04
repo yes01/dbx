@@ -1,10 +1,10 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.t8y2/dbx",
-  "description": "Query and manage databases from AI agents using connections configured in DBX.",
+  "name": "com.testteam/dbx",
+  "description": "Query and manage databases from AI agents using connections configured in TestTeam DBX.",
   "repository": {
-    "url": "https://github.com/t8y2/dbx",
-    "source": "github"
+    "url": "",
+    "source": ""
   },
   "version": "0.4.5",
   "packages": [

@@ -21,6 +21,7 @@ pub struct RedisScanRequest {
     pub cursor: u64,
     pub pattern: String,
     pub count: usize,
+    pub include_details: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -124,6 +125,7 @@ pub async fn scan_keys(
         req.cursor,
         &req.pattern,
         req.count,
+        req.include_details.unwrap_or(true),
     )
     .await
     .map_err(AppError)?;

@@ -23,17 +23,7 @@ export type ChangelogData = {
   releases: ChangelogRelease[];
 };
 
-type GitHubRelease = {
-  tag_name: string;
-  name: string | null;
-  published_at: string | null;
-  body: string | null;
-  draft: boolean;
-  prerelease: boolean;
-};
-
 const DEFAULT_BASE_URL = 'https://dl.dbxio.com/changelog';
-const GITHUB_RELEASES_URL = 'https://api.github.com/repos/t8y2/dbx/releases?per_page=30';
 
 const SECTION_MAP: Record<string, string> = {
   新功能: 'added',
@@ -63,7 +53,7 @@ export async function fetchChangelog(lang: 'en' | 'cn'): Promise<ChangelogData> 
   try {
     return await requestJson<ChangelogData>(url);
   } catch {
-    return fetchGitHubChangelog();
+    return { updatedAt: '', releases: [] };
   }
 }
 
@@ -111,24 +101,3 @@ function parseReleaseBody(body: string) {
   return sections.filter((section) => section.items.length > 0);
 }
 
-export async function fetchGitHubChangelog(): Promise<ChangelogData> {
-  try {
-    const releases = await requestJson<GitHubRelease[]>(GITHUB_RELEASES_URL, {
-      headers: { Accept: 'application/vnd.github+json' },
-    });
-
-    return {
-      updatedAt: new Date().toISOString(),
-      releases: releases
-        .filter((release) => !release.draft && !release.prerelease)
-        .map((release) => ({
-          tag: release.tag_name,
-          name: release.name || release.tag_name,
-          date: (release.published_at || '').slice(0, 10),
-          sections: parseReleaseBody(release.body || ''),
-        })),
-    };
-  } catch {
-    return { updatedAt: '', releases: [] };
-  }
-}

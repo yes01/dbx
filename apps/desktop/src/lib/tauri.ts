@@ -1035,8 +1035,9 @@ export async function redisScanKeys(
   cursor: number,
   pattern: string,
   count: number,
+  includeDetails?: boolean,
 ): Promise<RedisScanResult> {
-  return invoke("redis_scan_keys", { connectionId, db, cursor, pattern, count });
+  return invoke("redis_scan_keys", { connectionId, db, cursor, pattern, count, includeDetails });
 }
 
 export async function redisScanValues(

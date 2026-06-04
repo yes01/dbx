@@ -146,6 +146,10 @@ export function collectRedisGroupKeyRaws(group: RedisKeyTreeGroupNode): string[]
   return keyRaws;
 }
 
+export function collectRootRedisGroupIds(nodes: RedisKeyTreeNode[]): Set<string> {
+  return new Set(nodes.filter((node): node is RedisKeyTreeGroupNode => node.kind === "group").map((node) => node.id));
+}
+
 export function flattenVisibleRedisKeyTree(
   nodes: RedisKeyTreeNode[],
   expandedGroupIds: ReadonlySet<string>,

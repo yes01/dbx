@@ -84,15 +84,12 @@ const savedSqlStore = useSavedSqlStore();
 const { message: toastMessage, visible: toastVisible, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode } = useTheme();
 const {
-  checkingUpdates,
   updateInfo,
   updateCheckMessage,
   showUpdateDialog,
   isDownloadingUpdate,
   downloadProgress,
   updateReady,
-  hasUpdateAvailable,
-  openUrl,
   checkUpdates,
   openLatestRelease,
   downloadAndInstallUpdate,
@@ -686,12 +683,6 @@ function changeActiveSchema(schema: string | undefined) {
   const tab = activeTab.value;
   if (tab) queryStore.updateSchema(tab.id, schema);
 }
-function openGitHub() {
-  openUrl("https://github.com/t8y2/dbx");
-}
-function openMcpGuide() {
-  openUrl("https://dbxio.com/cn/docs/mcp");
-}
 
 function setSidebarOpen(open: boolean) {
   sidebarOpen.value = open;
@@ -966,8 +957,6 @@ onUnmounted(() => {
           :show-ai-panel="showAiPanel"
           :show-history="showHistory"
           :show-driver-store="showDriverStore"
-          :checking-updates="checkingUpdates"
-          :has-update-available="hasUpdateAvailable"
           :agent-driver-update-count="agentDriverUpdateCount"
           :has-connections="connectionStore.connections.length > 0"
           :has-sql-file-connections="hasSqlFileConnections"
@@ -976,10 +965,8 @@ onUnmounted(() => {
           @set-theme-mode="setThemeMode"
           @toggle-ai="toggleAiPanel"
           @toggle-history="showHistory = !showHistory"
-          @open-github="openGitHub"
           @open-settings="showSettingsDialog = true"
           @open-driver-store="showDriverStore = !showDriverStore"
-          @check-updates="checkUpdates()"
           @open-transfer="dialogs.showTransferDialog.value = true"
           @open-sql-file="dialogs.showSqlFileDialog.value = true"
           @open-schema-diff="dialogs.showSchemaDiffDialog.value = true"
@@ -1137,8 +1124,6 @@ onUnmounted(() => {
                 @new-query="newQuery"
                 @show-history="showHistory = true"
                 @import-config="dialogs.onImportClick"
-                @open-github="openGitHub"
-                @open-mcp-guide="openMcpGuide"
               />
             </div>
           </div>

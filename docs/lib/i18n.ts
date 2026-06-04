@@ -19,6 +19,7 @@ export const i18nUI = defineI18nUI(i18n, {
     nextPage: '下一页',
     previousPage: '上一页',
     chooseTheme: '选择主题',
-    editOnGithub: '在 GitHub 上编辑',
+    editOnGithub: '编辑此页',
   },
 });
+

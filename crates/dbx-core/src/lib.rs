@@ -47,8 +47,8 @@ pub mod xlsx_export;
 
 pub const R2_CDN_BASE: &str = "https://dl.dbxio.com/";
 
-pub fn download_candidate_urls(github_url: &str, r2_path: &str) -> Vec<String> {
-    vec![format!("{R2_CDN_BASE}{r2_path}"), github_url.to_string()]
+pub fn download_candidate_urls(_fallback_url: &str, r2_path: &str) -> Vec<String> {
+    vec![format!("{R2_CDN_BASE}{r2_path}")]
 }
 
 use std::pin::Pin;
@@ -57,13 +57,13 @@ type ResponseFuture = Pin<Box<dyn std::future::Future<Output = Result<reqwest::R
 
 pub async fn race_download(
     client: &reqwest::Client,
-    github_url: &str,
+    fallback_url: &str,
     r2_path: &str,
     user_agent: &str,
 ) -> Result<reqwest::Response, String> {
     use futures::future::select_ok;
 
-    let urls = download_candidate_urls(github_url, r2_path);
+    let urls = download_candidate_urls(fallback_url, r2_path);
     let mut futs: Vec<ResponseFuture> = Vec::with_capacity(urls.len());
 
     for url in urls {
@@ -91,18 +91,15 @@ mod tests {
     use super::download_candidate_urls;
 
     #[test]
-    fn download_candidates_exclude_third_party_github_proxy() {
+    fn download_candidates_use_internal_cdn_only() {
         let urls = download_candidate_urls(
-            "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+            "https://example.invalid/releases/latest/download/latest.json",
             "releases/latest/latest.json",
         );
 
         assert_eq!(
             urls,
-            vec![
-                "https://dl.dbxio.com/releases/latest/latest.json",
-                "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
-            ]
+            vec!["https://dl.dbxio.com/releases/latest/latest.json"]
         );
     }
 }

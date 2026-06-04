@@ -14,6 +14,7 @@ import {
   KeyRound,
   TerminalSquare,
   Asterisk,
+  X,
 } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
@@ -34,6 +35,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import {
   buildRedisKeyTree,
   collectExpandedGroupIds,
+  collectRootRedisGroupIds,
   collectRedisGroupKeyRaws,
   flattenVisibleRedisKeyTree,
   type RedisKeyTreeNode,
@@ -43,7 +45,7 @@ import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from
 import { formatRedisCommandResult, formatRedisStringValue } from "@/lib/redisValuePresentation";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
-import { redisKeySearchPattern } from "@/lib/redisKeyPattern";
+import { redisKeyScanCount, redisKeySearchPattern } from "@/lib/redisKeyPattern";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -74,10 +76,11 @@ const rootRef = ref<HTMLElement>();
 const commandTerminalRef = ref<HTMLElement>();
 const searchPattern = ref("");
 const searchMode = ref<RedisSearchMode>("key");
-const fuzzyKeySearch = ref(false);
+const fuzzyKeySearch = ref(true);
 const selectedKeyRaw = ref<string | null>(null);
 const hasMore = ref(false);
 const scanCursor = ref(0);
+const backgroundKeySearchRunning = ref(false);
 const expandedGroupIds = ref<Set<string>>(new Set());
 const checkedKeys = ref<Set<string>>(new Set());
 const pendingDanger = ref<
@@ -160,8 +163,13 @@ function rebuildTree(expandAll = false) {
 
   const nextExpanded = new Set<string>();
   const availableExpanded = collectExpandedGroupIds(nextTree);
-  if (expandAll) {
+  if (expandAll && !isSearchMode.value) {
     for (const id of availableExpanded) nextExpanded.add(id);
+  } else if (isSearchMode.value) {
+    for (const id of collectRootRedisGroupIds(nextTree)) nextExpanded.add(id);
+    for (const id of expandedGroupIds.value) {
+      if (availableExpanded.has(id)) nextExpanded.add(id);
+    }
   } else {
     for (const id of expandedGroupIds.value) {
       if (availableExpanded.has(id)) nextExpanded.add(id);
@@ -175,10 +183,18 @@ function rebuildTree(expandAll = false) {
 }
 
 async function fetchScanPage(): Promise<RedisScanResult> {
-  const pageSize = settingsStore.editorSettings.redisScanPageSize;
+  const resultLimit = settingsStore.editorSettings.redisScanPageSize;
+  const pageSize = redisKeyScanCount(resultLimit, isSearchMode.value);
   return searchMode.value === "value"
     ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize)
-    : await api.redisScanKeys(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize);
+    : await api.redisScanKeys(
+        props.connectionId,
+        props.db,
+        scanCursor.value,
+        effectivePattern.value,
+        pageSize,
+        !isSearchMode.value,
+      );
 }
 
 function appendScanResult(result: RedisScanResult) {
@@ -208,21 +224,30 @@ async function streamValueSearch(requestId: number) {
 }
 
 async function fillInitialKeyBatch(requestId: number) {
-  const targetCount = Math.max(1, settingsStore.editorSettings.redisScanPageSize);
-  let rounds = 0;
+  const targetCount = isSearchMode.value ? 1 : Math.max(1, settingsStore.editorSettings.redisScanPageSize);
   while (
     requestId === searchRequestId &&
     searchMode.value === "key" &&
     hasMore.value &&
     flatKeys.value.length < targetCount
   ) {
-    const beforeCount = flatKeys.value.length;
     const applied = await scanNextPage(requestId);
     if (!applied) return;
-    rounds += 1;
     if (flatKeys.value.length >= targetCount) return;
-    if (rounds >= 12 && flatKeys.value.length === beforeCount) return;
-    if (rounds >= 24) return;
+  }
+}
+
+async function streamKeySearch(requestId: number) {
+  backgroundKeySearchRunning.value = true;
+  try {
+    while (requestId === searchRequestId && searchMode.value === "key" && isSearchMode.value && hasMore.value) {
+      const applied = await scanNextPage(requestId);
+      if (!applied) return;
+    }
+  } finally {
+    if (requestId === searchRequestId) {
+      backgroundKeySearchRunning.value = false;
+    }
   }
 }
 
@@ -247,6 +272,10 @@ async function loadKeys() {
         await streamValueSearch(requestId);
       } else {
         await fillInitialKeyBatch(requestId);
+        if (requestId === searchRequestId) {
+          loading.value = false;
+          void streamKeySearch(requestId);
+        }
       }
     }
   } finally {
@@ -564,6 +593,13 @@ function toggleFuzzyKeySearch() {
   if (searchMode.value === "key") void loadKeys();
 }
 
+function stopBackgroundKeySearch() {
+  searchRequestId++;
+  backgroundKeySearchRunning.value = false;
+  loading.value = false;
+  loadingMore.value = false;
+}
+
 function getSearchInput(): HTMLInputElement | null {
   return rootRef.value?.querySelector<HTMLInputElement>("[data-redis-search-input]") ?? null;
 }
@@ -614,6 +650,7 @@ function pauseRedisBrowserBackgroundWork() {
   searchRequestId++;
   loading.value = false;
   loadingMore.value = false;
+  backgroundKeySearchRunning.value = false;
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = null;
   unregisterRedisDbFlushedListener();
@@ -714,9 +751,25 @@ defineExpose({ focusSearch });
             >
               <Plus class="h-3 w-3" />
             </Button>
-            <span class="text-xs text-muted-foreground shrink-0 ml-1">{{
-              loading && flatKeys.length === 0 ? loadingEmptyText : t("redis.keys", { count: flatKeys.length })
-            }}</span>
+            <span class="text-xs text-muted-foreground shrink-0 ml-1">
+              {{
+                backgroundKeySearchRunning
+                  ? t("redis.searchProgress", { count: flatKeys.length })
+                  : loading && flatKeys.length === 0
+                    ? loadingEmptyText
+                    : t("redis.keys", { count: flatKeys.length })
+              }}
+            </span>
+            <Button
+              v-if="backgroundKeySearchRunning"
+              variant="ghost"
+              size="icon"
+              class="h-6 w-6 shrink-0"
+              :title="t('redis.stopSearch')"
+              @click="stopBackgroundKeySearch"
+            >
+              <X class="h-3 w-3" />
+            </Button>
             <Button
               v-if="checkedKeys.size > 0"
               variant="ghost"
@@ -793,7 +846,7 @@ defineExpose({ focusSearch });
 
                 <div class="flex shrink-0 items-center justify-end gap-1">
                   <Badge
-                    v-if="row.node.kind === 'leaf'"
+                    v-if="row.node.kind === 'leaf' && row.node.keyType !== 'unknown'"
                     variant="outline"
                     class="text-xs px-1.5 py-0"
                     :class="typeColor(row.node.keyType)"

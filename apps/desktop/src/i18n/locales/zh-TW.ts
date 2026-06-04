@@ -1,6 +1,6 @@
-export default {
+﻿export default {
   app: {
-    name: "DBX",
+    name: "TestTeam DBX",
   },
   auth: {
     setupTitle: "設定存取密碼",
@@ -51,7 +51,7 @@ export default {
     availableMessage: "DBX {latest} 已發布，目前版本為 {current}。",
     upToDate: "DBX 已是最新版本 ({version})。",
     failed: "檢查更新失敗：{error}",
-    rateLimited: "GitHub 更新檢查暫時觸發頻率限制。你仍然可以開啟下載頁手動檢視。",
+    rateLimited: "內部更新服務暫時不可用。你仍然可以透過內部下載管道手動檢視。",
     openRelease: "開啟下載頁",
     downloadAndInstall: "下載並安裝",
     portableManualUpdate:
@@ -1195,6 +1195,8 @@ export default {
     searchByValue: "值",
     keys: "{count} 個 key",
     loadingKeys: "正在載入 key……",
+    searchProgress: "已找到 {count} 個，繼續搜尋中……",
+    stopSearch: "停止搜尋",
     searchingValues: "正在按值搜尋……",
     loadMoreKeys: "載入更多",
     items: "{count} 個元素",
@@ -1681,14 +1683,14 @@ export default {
     jdbcImportSuccess: "已匯入 {count} 個驅動程式檔",
     jdbcDeleteSuccess: "驅動程式已刪除",
     jdbcNoDrivers: "還沒有匯入 JDBC 驅動程式。",
-    aboutDescription: "開源、輕量的資料庫管理工具。",
-    community: "社群",
+    aboutDescription: "TestTeam 出品的內部資料庫管理工具。",
+    community: "內部",
     qqGroup: "QQ 群",
     wechatGroup: "微信交流群",
     wechatGroupInvite: "騰訊文件邀請",
     project: "專案",
-    openSource: "開源倉庫",
-    officialDocs: "官方文件",
+    openSource: "內部工具",
+    officialDocs: "內部文件",
   },
   driverStore: {
     progressJreExtract: "解壓縮 JRE……",

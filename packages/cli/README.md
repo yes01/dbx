@@ -1,6 +1,6 @@
-# DBX CLI
+# TestTeam DBX CLI
 
-Command line interface for DBX database connections, schema inspection, safe queries, and prompt-ready schema context.
+Command line interface for TestTeam DBX database connections, schema inspection, safe queries, and prompt-ready schema context.
 
 ## Install
 

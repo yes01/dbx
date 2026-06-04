@@ -4,8 +4,8 @@ import Link from 'next/link';
 import { useEffect, useRef } from 'react';
 
 const i18n = {
-  en: { home: 'Home', docs: 'Docs', changelog: 'Changelog', community: 'Community', lang: '中文' },
-  cn: { home: '首页', docs: '文档', changelog: '更新日志', community: '交流群', lang: 'English' },
+  en: { home: 'Home', docs: 'Docs', changelog: 'Changelog', lang: '中文' },
+  cn: { home: '首页', docs: '文档', changelog: '更新日志', lang: 'English' },
 };
 
 export function LandingNav({
@@ -41,8 +41,8 @@ export function LandingNav({
     <nav ref={ref} className="landing-nav">
       <div className="flex items-center justify-between max-w-[1180px] h-16 mx-auto px-7 max-[760px]:min-h-[58px] max-[760px]:h-auto max-[760px]:px-[18px] max-[760px]:py-2.5">
         <Link href={`/${lang}`} className="flex items-center gap-2.5 text-landing-ink text-2xl font-[820]">
-          <img src="/logo.png" alt="DBX" width={28} height={28} />
-          <span>DBX</span>
+          <img src="/logo.png" alt="TestTeam DBX" width={28} height={28} />
+          <span>TestTeam DBX</span>
         </Link>
         <div className="flex items-center gap-1">
           <Link
@@ -62,19 +62,6 @@ export function LandingNav({
             className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === 'changelog' ? 'text-landing-ink' : 'text-landing-muted'}`}
           >
             {t.changelog}
-          </Link>
-          <Link
-            href={`/${lang}/community`}
-            className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === 'community' ? 'text-landing-ink' : 'text-landing-muted'}`}
-          >
-            {t.community}
-          </Link>
-          <Link
-            href="https://github.com/t8y2/dbx"
-            target="_blank"
-            className="landing-nav-link rounded-[7px] px-[11px] py-2 text-landing-muted text-[13px] font-medium max-[760px]:hidden"
-          >
-            GitHub
           </Link>
           <Link
             href={langHref}

@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -30,6 +31,17 @@ pub async fn cancel_stream(session_id: &str) -> bool {
 
 pub async fn unregister_stream(session_id: &str) {
     AI_STREAMS.write().await.remove(session_id);
+}
+
+async fn send_cancellable(
+    request: RequestBuilder,
+    cancelled: &Notify,
+    error_prefix: &str,
+) -> Result<Option<reqwest::Response>, String> {
+    tokio::select! {
+        res = request.send() => res.map(Some).map_err(|e| format!("{error_prefix}: {e}")),
+        _ = cancelled.notified() => Ok(None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -674,13 +686,24 @@ async fn stream_claude(
         "stream": true,
     });
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(claude_headers(&request.config)?)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Claude request failed: {e}"))?;
+    let Some(res) = send_cancellable(
+        client
+            .post(resolve_endpoint(&request.config))
+            .headers(claude_headers(&request.config)?)
+            .json(&body),
+        cancelled,
+        "Claude request failed",
+    )
+    .await?
+    else {
+        on_chunk(AiStreamChunk {
+            session_id: session_id.to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            done: true,
+        });
+        return Ok(());
+    };
 
     if !res.status().is_success() {
         let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
@@ -761,13 +784,24 @@ async fn stream_openai(
         });
     }
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(headers)
-        .json(&body_obj)
-        .send()
-        .await
-        .map_err(|e| format!("AI request failed: {e}"))?;
+    let Some(res) = send_cancellable(
+        client
+            .post(resolve_endpoint(&request.config))
+            .headers(headers)
+            .json(&body_obj),
+        cancelled,
+        "AI request failed",
+    )
+    .await?
+    else {
+        on_chunk(AiStreamChunk {
+            session_id: session_id.to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            done: true,
+        });
+        return Ok(());
+    };
 
     if !res.status().is_success() {
         let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
@@ -848,13 +882,24 @@ async fn stream_responses_api(
         "stream": true,
     });
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(headers)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("AI request failed: {e}"))?;
+    let Some(res) = send_cancellable(
+        client
+            .post(resolve_endpoint(&request.config))
+            .headers(headers)
+            .json(&body),
+        cancelled,
+        "AI request failed",
+    )
+    .await?
+    else {
+        on_chunk(AiStreamChunk {
+            session_id: session_id.to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            done: true,
+        });
+        return Ok(());
+    };
 
     if !res.status().is_success() {
         let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
@@ -937,14 +982,25 @@ async fn stream_gemini(
         },
     });
 
-    let res = client
-        .post(resolve_gemini_stream_endpoint(&request.config))
-        .query(&[("key", request.config.api_key.as_str()), ("alt", "sse")])
-        .header(CONTENT_TYPE, "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Gemini request failed: {e}"))?;
+    let Some(res) = send_cancellable(
+        client
+            .post(resolve_gemini_stream_endpoint(&request.config))
+            .query(&[("key", request.config.api_key.as_str()), ("alt", "sse")])
+            .header(CONTENT_TYPE, "application/json")
+            .json(&body),
+        cancelled,
+        "Gemini request failed",
+    )
+    .await?
+    else {
+        on_chunk(AiStreamChunk {
+            session_id: session_id.to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            done: true,
+        });
+        return Ok(());
+    };
 
     if !res.status().is_success() {
         let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;

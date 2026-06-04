@@ -1,4 +1,4 @@
-import { strict as assert } from "node:assert";
+﻿import { strict as assert } from "node:assert";
 import test from "node:test";
 import { evaluateJdbcPluginReleaseBump } from "../../.github/scripts/bump-jdbc-plugin-version.mjs";
 import { evaluateJdbcPluginVersionChange } from "../../.github/scripts/check-jdbc-plugin-version.mjs";
@@ -108,7 +108,7 @@ test("adds JDBC plugin metadata to latest.json without disturbing updater fields
     }),
     jdbcVersion: "0.1.3",
     protocolVersion: 1,
-    url: "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip",
+    url: "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip",
   });
   const parsed = JSON.parse(result);
 
@@ -117,6 +117,7 @@ test("adds JDBC plugin metadata to latest.json without disturbing updater fields
   assert.deepEqual(parsed.jdbc_plugin, {
     version: "0.1.3",
     protocol_version: 1,
-    url: "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip",
+    url: "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip",
   });
 });
+

@@ -25,13 +25,12 @@ This guide gets you through three things:
     brew upgrade --cask dbx
     ```
 
-    You can also download a `.dmg` installer from [GitHub Releases](https://github.com/t8y2/dbx/releases).
+    You can also download a `.dmg` installer from the internal release channel.
   </Tab>
   <Tab value="Windows">
     Install with Scoop:
 
     ```bash
-    scoop bucket add dbx https://github.com/t8y2/scoop-bucket
     scoop install dbx
     ```
 
@@ -41,10 +40,10 @@ This guide gets you through three things:
     scoop update dbx
     ```
 
-    You can also download a `.msi` installer from [GitHub Releases](https://github.com/t8y2/dbx/releases).
+    You can also download a `.msi` installer from the internal release channel.
   </Tab>
   <Tab value="Linux">
-    Download a package from [GitHub Releases](https://github.com/t8y2/dbx/releases):
+    Download a package from the internal release channel:
 
     | Format | Use Case |
     |---|---|
@@ -200,7 +199,7 @@ Use source mode when contributing or debugging DBX locally.
 ### Start Development
 
 ```bash
-git clone https://github.com/t8y2/dbx.git
+git clone <internal-repository-url>
 cd dbx
 pnpm install
 pnpm dev:tauri
@@ -220,3 +219,6 @@ pnpm tauri build
 ```
 
 Desktop installers are written to `src-tauri/target/release/bundle/`.
+
+
+

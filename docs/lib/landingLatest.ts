@@ -12,7 +12,7 @@ type LandingLatestUpdates = {
 const text = {
   en: {
     title: 'Latest updates',
-    desc: 'Mirrored from the latest GitHub release notes.',
+    desc: 'Mirrored from the internal release notes.',
     link: 'Read the changelog',
     fallbackItems: [
       'Desktop and Docker release assets',
@@ -23,7 +23,7 @@ const text = {
   },
   cn: {
     title: '最近更新',
-    desc: '同步 GitHub 最新 Release Notes。',
+    desc: '同步内部最新发布说明。',
     link: '查看更新日志',
     fallbackItems: [
       '桌面版与 Docker 发布资产',
@@ -61,3 +61,4 @@ export function buildLandingLatestUpdates(
     items: items.length > 0 ? items : t.fallbackItems,
   };
 }
+

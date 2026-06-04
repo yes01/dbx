@@ -3,8 +3,7 @@ use crate::update::{fetch_latest_release, is_newer_version, JdbcPluginLatest};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-const JDBC_PLUGIN_DOWNLOAD_URL: &str =
-    "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip";
+const JDBC_PLUGIN_DOWNLOAD_URL: &str = "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip";
 const JDBC_PLUGIN_R2_PATH: &str = "releases/latest/dbx-jdbc-plugin-latest.zip";
 
 #[derive(Debug, Clone, Serialize)]

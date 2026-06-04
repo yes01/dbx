@@ -2,15 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildRedisKeyTree,
-  collectRedisGroupKeyRaws,
   collectExpandedGroupIds,
+  collectRedisGroupKeyRaws,
+  collectRootRedisGroupIds,
   flattenVisibleRedisKeyTree,
   type RedisKeyTreeNode,
 } from "../../apps/desktop/src/lib/redisKeyTree.ts";
 import type { RedisKeyInfo } from "../../apps/desktop/src/lib/api.ts";
 
 function makeKey(key_display: string, key_raw: string, key_type = "string", ttl = -1): RedisKeyInfo {
-  return { key_display, key_raw, key_type, ttl };
+  return { key_display, key_raw, key_type, ttl, size: 0, value_preview: "" };
 }
 
 function leafLabels(nodes: RedisKeyTreeNode[]): string[] {
@@ -93,4 +94,22 @@ test("collectRedisGroupKeyRaws returns every leaf key under a group", () => {
   if (!userGroup || userGroup.kind !== "group") return;
 
   assert.deepEqual(collectRedisGroupKeyRaws(userGroup), ["k2", "k1", "k3"]);
+});
+
+test("collectRootRedisGroupIds expands only top-level groups for search summaries", () => {
+  const tree = buildRedisKeyTree(
+    [
+      makeKey("act:rankInfo:player:1", "k1"),
+      makeKey("act:double11:1", "k2"),
+      makeKey("cache:token:1", "k3"),
+      makeKey("plain", "k4"),
+    ],
+    1,
+  );
+  const rows = flattenVisibleRedisKeyTree(tree, collectRootRedisGroupIds(tree));
+
+  assert.deepEqual(
+    rows.map(({ node, depth }) => `${depth}:${node.kind}:${node.label}`),
+    ["0:group:act", "1:group:double11", "1:group:rankInfo", "0:group:cache", "1:group:token", "0:leaf:plain"],
+  );
 });

@@ -24,8 +24,8 @@ function formatDate(dateStr: string, lang: string) {
 
 function ReleaseCard({ release, lang }: { release: ChangelogRelease; lang: string }) {
   const t = lang === 'cn'
-    ? { publishedOn: '发布于', download: '下载', seeGitHub: '查看 GitHub Release 获取详情' }
-    : { publishedOn: 'Published on', download: 'Download', seeGitHub: 'See GitHub Release for details' };
+    ? { publishedOn: '发布于', download: '下载', seeInternal: '查看内部发布说明获取详情' }
+    : { publishedOn: 'Published on', download: 'Download', seeInternal: 'See internal release notes for details' };
 
   return (
     <div className="py-12 border-t border-[rgba(155,176,205,0.18)]">
@@ -41,7 +41,7 @@ function ReleaseCard({ release, lang }: { release: ChangelogRelease; lang: strin
           </span>
         </div>
         <a
-          href={`https://github.com/t8y2/dbx/releases/tag/${release.tag}`}
+          href="https://dl.dbxio.com/releases/latest/"
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-[rgba(155,176,205,0.25)] text-sm text-[#e2e8f0] hover:border-[rgba(155,176,205,0.4)] transition-colors"
@@ -76,7 +76,7 @@ function ReleaseCard({ release, lang }: { release: ChangelogRelease; lang: strin
       ))}
 
       {release.sections.length === 0 && (
-        <p className="text-[15px] text-[#64748b] italic">{t.seeGitHub}</p>
+        <p className="text-[15px] text-[#64748b] italic">{t.seeInternal}</p>
       )}
     </div>
   );
@@ -119,3 +119,5 @@ export function ChangelogList({ releases, lang }: { releases: ChangelogRelease[]
     </>
   );
 }
+
+

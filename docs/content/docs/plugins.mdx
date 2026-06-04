@@ -1,4 +1,4 @@
----
+﻿---
 title: JDBC Plugin
 description: Install the DBX JDBC plugin, import vendor JDBC driver JARs, and create JDBC connections.
 ---
@@ -219,7 +219,7 @@ jdbc:postgresql://localhost:5432/postgres?sslmode=require
 
 ### JDBC plugin installation fails
 
-Check whether your network can access DBX GitHub Releases. DBX tries proxy URLs and the original GitHub URL, but public proxies can still be unavailable. Try another network if GitHub is blocked.
+Check whether your network can access DBX internal release channel. TestTeam DBX uses internal release channels for plugin downloads. Check internal network access if downloads fail.
 
 ### Java cannot be found
 
@@ -299,3 +299,4 @@ The initial protocol supports `testConnection`, `connect`, `executeQuery`, `list
 <Callout type="info">
 JDBC connection configs store `jdbc_driver_class` and `jdbc_driver_paths`. If a driver needs several JARs, keep all paths attached to the connection so metadata and query calls use the same classpath.
 </Callout>
+

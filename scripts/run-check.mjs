@@ -1,5 +1,27 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 import { performance } from "node:perf_hooks";
+
+const isWindows = process.platform === "win32";
+const binPath = path.join(process.cwd(), "node_modules", ".bin");
+const env = {
+  ...process.env,
+  PATH: `${binPath}${path.delimiter}${process.env.PATH ?? ""}`,
+};
+
+function taskProcess(task) {
+  if (!isWindows) {
+    return {
+      command: task.command,
+      args: task.args,
+    };
+  }
+
+  return {
+    command: process.env.ComSpec ?? "cmd.exe",
+    args: ["/d", "/c", "pnpm", "exec", task.command, ...task.args],
+  };
+}
 
 const tasks = [
   {
@@ -26,9 +48,10 @@ const tasks = [
 
 function runTask(task) {
   const startedAt = performance.now();
-  const child = spawn(task.command, task.args, {
+  const processConfig = taskProcess(task);
+  const child = spawn(processConfig.command, processConfig.args, {
     cwd: process.cwd(),
-    env: process.env,
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stdout = [];

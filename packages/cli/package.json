@@ -1,7 +1,7 @@
 {
   "name": "@dbx-app/cli",
   "version": "0.4.5",
-  "description": "Command line interface for DBX database connections, schema, and safe queries",
+  "description": "Command line interface for TestTeam DBX database connections, schema, and safe queries",
   "type": "module",
   "engines": {
     "node": ">=22.13.0"
@@ -32,10 +32,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/t8y2/dbx",
+    "url": "",
     "directory": "packages/cli"
   },
-  "homepage": "https://github.com/t8y2/dbx/tree/main/packages/cli",
+  "homepage": "",
   "dependencies": {
     "@dbx-app/node-core": "workspace:^"
   },
