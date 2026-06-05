@@ -104,16 +104,14 @@ function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: nu
     fitCanvasTextCache.set(cacheKey, text);
     return text;
   }
-  const ellipsis = "...";
-  const ellipsisWidth = ctx.measureText(ellipsis).width;
   let low = 0;
   let high = text.length;
   while (low < high) {
     const mid = Math.ceil((low + high) / 2);
-    if (ctx.measureText(text.slice(0, mid)).width + ellipsisWidth <= maxWidth) low = mid;
+    if (ctx.measureText(text.slice(0, mid)).width <= maxWidth) low = mid;
     else high = mid - 1;
   }
-  const result = text.slice(0, low) + ellipsis;
+  const result = text.slice(0, low);
   if (fitCanvasTextCache.size >= FIT_CANVAS_TEXT_CACHE_MAX) fitCanvasTextCache.clear();
   fitCanvasTextCache.set(cacheKey, result);
   return result;
@@ -373,7 +371,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText);
         const needsTruncation = ctx.measureText(displayText).width > paddedMaxWidth;
         const textMaxWidth = needsTruncation ? Math.max(0, x + colWidth - textLeft) : paddedMaxWidth;
-        const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth - 12);
+        const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth);
         ctx.fillText(text, textLeft, textY);
         if (item.isDeleted && text) {
           const textWidth = Math.min(ctx.measureText(text).width, textMaxWidth);
