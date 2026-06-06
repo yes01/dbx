@@ -20,7 +20,7 @@ import type {
   SavedSqlFolder,
   SavedSqlLibrary,
 } from "@/types/database";
-import type { AiConfig } from "@/stores/settingsStore";
+import type { AiConfig, AiSettings } from "@/stores/settingsStore";
 import type {
   AgentDriverInfo,
   AiCompletionRequest,
@@ -807,11 +807,11 @@ export async function aiListModels(config: AiConfig): Promise<AiModelInfo[]> {
   return post("/api/ai/models", { config });
 }
 
-export async function saveAiConfig(config: AiConfig): Promise<void> {
+export async function saveAiConfig(config: AiConfig | AiSettings): Promise<void> {
   return post("/api/ai/config", { config });
 }
 
-export async function loadAiConfig(): Promise<AiConfig | null> {
+export async function loadAiConfig(): Promise<AiConfig | AiSettings | null> {
   return get("/api/ai/config");
 }
 

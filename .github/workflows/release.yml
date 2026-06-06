@@ -27,9 +27,11 @@ jobs:
           - label: Windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            build_args: --ci --no-sign --config src-tauri/tauri.ci.conf.json --target x86_64-pc-windows-msvc
           - label: macOS Apple Silicon
             os: macos-latest
             target: aarch64-apple-darwin
+            build_args: --ci --config src-tauri/tauri.ci.conf.json --target aarch64-apple-darwin --bundles app
 
     steps:
       - uses: actions/checkout@v4
@@ -64,6 +66,9 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Set app version from release tag
+        run: node scripts/set-app-version.mjs "${{ steps.release-tag.outputs.tag }}"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -108,7 +113,21 @@ jobs:
           releaseCommitish: ${{ github.sha }}
           releaseDraft: false
           prerelease: false
-          args: --ci --no-sign --config src-tauri/tauri.ci.conf.json --target ${{ matrix.target }}
+          args: ${{ matrix.build_args }}
+
+      - name: Build macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release-tag.outputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          DMG_PATH="target/${{ matrix.target }}/release/bundle/dmg/TestTeam.DBX_${VERSION}_aarch64.dmg"
+          node scripts/build-macos-dmg.mjs \
+            "target/${{ matrix.target }}/release/bundle/macos/TestTeam DBX.app" \
+            "$DMG_PATH"
+          gh release upload "${TAG}" "$DMG_PATH" --repo "${GITHUB_REPOSITORY}" --clobber
 
       - name: Upload Windows portable ZIP
         if: runner.os == 'Windows'

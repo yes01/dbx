@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 const LATEST_JSON_PATH: &str = "https://dl.dbxio.com/releases/latest/latest.json";
 const LATEST_JSON_R2_PATH: &str = "releases/latest/latest.json";
@@ -347,5 +347,5 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
         assert_eq!(info.release_url, "https://dl.dbxio.com/releases/latest/");
         assert_eq!(info.release_notes, "Internal release notes");
         assert!(!info.portable_mode);
-    }}
-
+    }
+}

@@ -392,7 +392,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
               v-if="hasQueryOutput && !resultsPaneOpen"
               variant="secondary"
               size="sm"
-              class="absolute bottom-3 right-3 z-20 h-7 gap-1.5 rounded-full border bg-background/95 px-3 text-xs shadow-lg backdrop-blur hover:bg-accent"
+              class="absolute bottom-3 right-3 z-20 h-7 gap-1.5 rounded-md border border-border/70 bg-popover px-3 text-xs text-popover-foreground shadow-[var(--shadow-panel)] hover:bg-accent hover:text-accent-foreground"
               @click="resultsPaneOpen = true"
             >
               <ChevronUp class="h-3.5 w-3.5" />
@@ -404,7 +404,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
           <div class="h-full flex flex-col">
             <div
               v-if="hasQueryOutput"
-              class="h-8 shrink-0 border-b bg-muted/20 px-2 flex items-center gap-1 overflow-x-auto"
+              class="h-8 shrink-0 border-b border-border/70 bg-[var(--surface-panel)] px-2 flex items-center gap-1 overflow-x-auto"
               style="scrollbar-width: none; -ms-overflow-style: none; -webkit-overflow-scrolling: touch"
             >
               <Button
@@ -464,11 +464,11 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                 </PopoverTrigger>
                 <PopoverContent
                   align="end"
-                  class="w-max min-w-44 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl"
+                  class="w-max min-w-44 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border border-border/70 bg-popover p-0 text-popover-foreground shadow-[var(--shadow-panel)]"
                   @click.stop
                   @keydown.stop
                 >
-                  <div class="border-b bg-muted/40 px-3 py-2">
+                  <div class="border-b border-border/70 bg-[var(--surface-panel)] px-3 py-2">
                     <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
                   </div>
                   <label
@@ -657,11 +657,11 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
             </PopoverTrigger>
             <PopoverContent
               align="end"
-              class="w-64 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl"
+              class="w-64 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border border-border/70 bg-popover p-0 text-popover-foreground shadow-[var(--shadow-panel)]"
               @click.stop
               @keydown.stop
             >
-              <div class="border-b bg-muted/40 px-2 py-1.5">
+              <div class="border-b border-border/70 bg-[var(--surface-panel)] px-2 py-1.5">
                 <div class="flex items-center justify-between gap-2">
                   <div class="text-xs font-semibold">{{ t("grid.columnVisibility") }}</div>
                   <div class="text-[10px] text-muted-foreground tabular-nums">
@@ -669,7 +669,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                   </div>
                 </div>
               </div>
-              <div class="flex items-center gap-1.5 border-b px-2 py-1.5">
+              <div class="flex items-center gap-1.5 border-b border-border/70 px-2 py-1.5">
                 <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <input
                   v-model="columnVisibilitySearch"
@@ -707,7 +707,9 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
                   {{ t("grid.noSearchResults") }}
                 </div>
               </div>
-              <div class="flex items-center justify-between gap-2 border-t bg-muted/30 px-2 py-1.5">
+              <div
+                class="flex items-center justify-between gap-2 border-t border-border/70 bg-[var(--surface-panel)] px-2 py-1.5"
+              >
                 <span class="text-[11px] text-muted-foreground">{{ t("grid.columnVisibilityHint") }}</span>
                 <div class="flex items-center gap-1">
                   <Button
@@ -757,11 +759,11 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
             </PopoverTrigger>
             <PopoverContent
               align="end"
-              class="w-max min-w-44 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl"
+              class="w-max min-w-44 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border border-border/70 bg-popover p-0 text-popover-foreground shadow-[var(--shadow-panel)]"
               @click.stop
               @keydown.stop
             >
-              <div class="border-b bg-muted/40 px-3 py-2">
+              <div class="border-b border-border/70 bg-[var(--surface-panel)] px-3 py-2">
                 <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
               </div>
               <label

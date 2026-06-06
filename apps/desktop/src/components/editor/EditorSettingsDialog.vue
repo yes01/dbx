@@ -12,6 +12,7 @@ import {
   Loader2,
   PackageSearch,
   Pencil,
+  Plus,
   RefreshCw,
   Settings,
   Terminal,
@@ -40,6 +41,7 @@ import {
   DEFAULT_DESKTOP_SETTINGS,
   type AiProvider,
   type AiApiStyle,
+  type AiProfile,
   type EditorTheme,
   type DesktopIconTheme,
   type DisconnectTabHandlingMode,
@@ -819,6 +821,8 @@ async function changePassword() {
 const aiProviderOptions = Object.values(AI_PROVIDER_PRESETS);
 const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value]);
 
+const aiEditProfileId = ref(settingsStore.aiSettings.activeProfileId);
+const aiEditProfileName = ref("");
 const aiEditProvider = ref<AiProvider>(settingsStore.aiConfig.provider);
 const aiEditApiKey = ref(settingsStore.aiConfig.apiKey);
 const aiEditEndpoint = ref(settingsStore.aiConfig.endpoint);
@@ -840,6 +844,12 @@ const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
 const aiTestError = ref("");
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
+const aiProfileOptions = computed(() => settingsStore.aiSettings.profiles);
+const aiSelectedProfile = computed(
+  () =>
+    settingsStore.aiSettings.profiles.find((profile) => profile.id === aiEditProfileId.value) ||
+    settingsStore.aiSettings.profiles[0],
+);
 const aiSupportsApiStyle = computed(
   () =>
     aiEditProvider.value === "openai" ||
@@ -888,6 +898,17 @@ function currentAiEditConfig() {
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
+  };
+}
+
+function currentAiEditProfile(): AiProfile {
+  return {
+    id: aiEditProfileId.value,
+    name:
+      aiEditProfileName.value.trim() ||
+      aiSelectedProfile.value?.name ||
+      AI_PROVIDER_PRESETS[aiEditProvider.value].label,
+    config: currentAiEditConfig(),
   };
 }
 
@@ -957,17 +978,62 @@ function aiSelectModel(modelId: string) {
 }
 
 function syncAiEditState() {
-  aiEditProvider.value = settingsStore.aiConfig.provider;
-  aiEditApiKey.value = settingsStore.aiConfig.apiKey;
-  aiEditEndpoint.value = settingsStore.aiConfig.endpoint;
-  aiEditModel.value = settingsStore.aiConfig.model;
-  aiEditApiStyle.value = settingsStore.aiConfig.apiStyle || "completions";
-  aiEditProxyEnabled.value = !!settingsStore.aiConfig.proxyEnabled;
-  aiEditProxyUrl.value = settingsStore.aiConfig.proxyUrl || "";
-  aiEditEnableThinking.value = settingsStore.aiConfig.enableThinking ?? true;
+  const profile =
+    settingsStore.aiSettings.profiles.find((item) => item.id === settingsStore.aiSettings.activeProfileId) ||
+    settingsStore.aiSettings.profiles[0];
+  const config = profile.config;
+  aiEditProfileId.value = profile.id;
+  aiEditProfileName.value = profile.name;
+  aiEditProvider.value = config.provider;
+  aiEditApiKey.value = config.apiKey;
+  aiEditEndpoint.value = config.endpoint;
+  aiEditModel.value = config.model;
+  aiEditApiStyle.value = config.apiStyle || "completions";
+  aiEditProxyEnabled.value = !!config.proxyEnabled;
+  aiEditProxyUrl.value = config.proxyUrl || "";
+  aiEditEnableThinking.value = config.enableThinking ?? true;
   aiTestResult.value = "";
   aiTestError.value = "";
   clearAiModelOptions();
+}
+
+function syncAiEditStateFromProfile(profile: AiProfile) {
+  const config = profile.config;
+  aiEditProfileId.value = profile.id;
+  aiEditProfileName.value = profile.name;
+  aiEditProvider.value = config.provider;
+  aiEditApiKey.value = config.apiKey;
+  aiEditEndpoint.value = config.endpoint;
+  aiEditModel.value = config.model;
+  aiEditApiStyle.value = config.apiStyle || "completions";
+  aiEditProxyEnabled.value = !!config.proxyEnabled;
+  aiEditProxyUrl.value = config.proxyUrl || "";
+  aiEditEnableThinking.value = config.enableThinking ?? true;
+  aiTestResult.value = "";
+  aiTestError.value = "";
+  clearAiModelOptions();
+}
+
+function aiSelectProfile(profileId: string) {
+  if (profileId === aiEditProfileId.value) return;
+  if (aiHasChanges()) aiApplySettings();
+  settingsStore.setActiveAiProfile(profileId);
+  syncAiEditState();
+}
+
+function aiAddProfile() {
+  if (aiHasChanges()) aiApplySettings();
+  const profile = settingsStore.addAiProfile({
+    ...currentAiEditConfig(),
+    apiKey: "",
+  });
+  syncAiEditStateFromProfile(profile);
+}
+
+function aiDeleteProfile() {
+  const profileId = aiEditProfileId.value;
+  settingsStore.deleteAiProfile(profileId);
+  syncAiEditState();
 }
 
 function aiSelectProvider(provider: AiProvider) {
@@ -980,20 +1046,24 @@ function aiSelectProvider(provider: AiProvider) {
 }
 
 function aiHasChanges(): boolean {
+  const profile = aiSelectedProfile.value;
+  if (!profile) return false;
   return (
-    aiEditProvider.value !== settingsStore.aiConfig.provider ||
-    aiEditApiKey.value !== settingsStore.aiConfig.apiKey ||
-    aiEditEndpoint.value !== settingsStore.aiConfig.endpoint ||
-    aiEditModel.value !== settingsStore.aiConfig.model ||
-    aiEditApiStyle.value !== (settingsStore.aiConfig.apiStyle || "completions") ||
-    aiEditProxyEnabled.value !== !!settingsStore.aiConfig.proxyEnabled ||
-    aiEditProxyUrl.value !== (settingsStore.aiConfig.proxyUrl || "") ||
-    aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true)
+    aiEditProfileName.value !== profile.name ||
+    aiEditProvider.value !== profile.config.provider ||
+    aiEditApiKey.value !== profile.config.apiKey ||
+    aiEditEndpoint.value !== profile.config.endpoint ||
+    aiEditModel.value !== profile.config.model ||
+    aiEditApiStyle.value !== (profile.config.apiStyle || "completions") ||
+    aiEditProxyEnabled.value !== !!profile.config.proxyEnabled ||
+    aiEditProxyUrl.value !== (profile.config.proxyUrl || "") ||
+    aiEditEnableThinking.value !== (profile.config.enableThinking ?? true)
   );
 }
 
 function aiApplySettings() {
-  settingsStore.updateAiConfig(currentAiEditConfig());
+  settingsStore.updateAiProfile(currentAiEditProfile());
+  syncAiEditState();
 }
 
 async function aiTestConn() {
@@ -1892,6 +1962,50 @@ watch(
               <p class="text-xs text-muted-foreground">{{ t("ai.settingsHint") }}</p>
 
               <div class="space-y-3">
+                <div class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.profile") }}</Label>
+                  <div class="col-span-2 flex min-w-0 items-center gap-2">
+                    <Select :model-value="aiEditProfileId" @update:model-value="(v: any) => aiSelectProfile(String(v))">
+                      <SelectTrigger class="h-8 min-w-0 flex-1 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="profile in aiProfileOptions" :key="profile.id" :value="profile.id">
+                          {{ profile.name }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="outline"
+                      class="h-8 w-8 shrink-0"
+                      :title="t('ai.addProfile')"
+                      :aria-label="t('ai.addProfile')"
+                      @click="aiAddProfile"
+                    >
+                      <Plus class="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="outline"
+                      class="h-8 w-8 shrink-0"
+                      :disabled="aiProfileOptions.length <= 1"
+                      :title="t('ai.deleteProfile')"
+                      :aria-label="t('ai.deleteProfile')"
+                      @click="aiDeleteProfile"
+                    >
+                      <Trash2 class="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.profileName") }}</Label>
+                  <Input v-model="aiEditProfileName" autocomplete="off" class="col-span-2 h-8 text-xs" />
+                </div>
+
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.provider") }}</Label>
                   <Select :model-value="aiEditProvider" @update:model-value="(v: any) => aiSelectProvider(v)">

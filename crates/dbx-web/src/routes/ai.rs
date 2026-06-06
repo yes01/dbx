@@ -18,7 +18,7 @@ use crate::state::WebState;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveAiConfigRequest {
-    pub config: AiConfig,
+    pub config: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -70,7 +70,7 @@ pub async fn save_ai_config(
     Ok(Json(()))
 }
 
-pub async fn load_ai_config(State(state): State<Arc<WebState>>) -> Result<Json<Option<AiConfig>>, AppError> {
+pub async fn load_ai_config(State(state): State<Arc<WebState>>) -> Result<Json<Option<serde_json::Value>>, AppError> {
     let config = state.app.storage.load_ai_config().await.map_err(AppError)?;
     Ok(Json(config))
 }

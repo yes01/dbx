@@ -244,7 +244,7 @@ onBeforeUnmount(() => {
       v-if="show"
       ref="menuRef"
       :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }"
-      class="bg-popover text-popover-foreground min-w-40 rounded-xl p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
+      class="bg-popover text-popover-foreground min-w-40 rounded-md border border-border/70 p-1 overflow-x-hidden overflow-y-auto shadow-[var(--shadow-panel)]"
     >
       <template v-for="(item, index) in items" :key="index">
         <template v-if="item.visible !== false">
@@ -286,7 +286,7 @@ onBeforeUnmount(() => {
       v-if="show && activeSubIndex !== null && items[activeSubIndex]?.children?.length"
       ref="subRef"
       :style="{ position: 'fixed', left: subX + 'px', top: subY + 'px', zIndex: 10000 }"
-      class="bg-popover text-popover-foreground min-w-40 rounded-xl p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
+      class="bg-popover text-popover-foreground min-w-40 rounded-md border border-border/70 p-1 overflow-x-hidden overflow-y-auto shadow-[var(--shadow-panel)]"
       @mouseenter="onSubMouseEnter"
       @mouseleave="onSubMouseLeave"
     >

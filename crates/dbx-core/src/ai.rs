@@ -687,10 +687,7 @@ async fn stream_claude(
     });
 
     let Some(res) = send_cancellable(
-        client
-            .post(resolve_endpoint(&request.config))
-            .headers(claude_headers(&request.config)?)
-            .json(&body),
+        client.post(resolve_endpoint(&request.config)).headers(claude_headers(&request.config)?).json(&body),
         cancelled,
         "Claude request failed",
     )
@@ -785,10 +782,7 @@ async fn stream_openai(
     }
 
     let Some(res) = send_cancellable(
-        client
-            .post(resolve_endpoint(&request.config))
-            .headers(headers)
-            .json(&body_obj),
+        client.post(resolve_endpoint(&request.config)).headers(headers).json(&body_obj),
         cancelled,
         "AI request failed",
     )
@@ -883,10 +877,7 @@ async fn stream_responses_api(
     });
 
     let Some(res) = send_cancellable(
-        client
-            .post(resolve_endpoint(&request.config))
-            .headers(headers)
-            .json(&body),
+        client.post(resolve_endpoint(&request.config)).headers(headers).json(&body),
         cancelled,
         "AI request failed",
     )

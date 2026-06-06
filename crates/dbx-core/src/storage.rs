@@ -5,7 +5,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::ai::{AiChatMessage, AiConfig, AiConversation};
+use crate::ai::{AiChatMessage, AiConversation};
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{HistoryEntry, MAX_HISTORY};
 use crate::models::connection::ConnectionConfig;
@@ -309,7 +309,7 @@ impl Storage {
 // AI Config
 
 impl Storage {
-    pub async fn save_ai_config(&self, config: &AiConfig) -> Result<(), String> {
+    pub async fn save_ai_config(&self, config: &serde_json::Value) -> Result<(), String> {
         let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
         self.with_conn(move |conn| {
             conn.execute("INSERT OR REPLACE INTO ai_config (id, config_json) VALUES (1, ?1)", [json])
@@ -319,7 +319,7 @@ impl Storage {
         .await
     }
 
-    pub async fn load_ai_config(&self) -> Result<Option<AiConfig>, String> {
+    pub async fn load_ai_config(&self) -> Result<Option<serde_json::Value>, String> {
         let json: Option<String> = self
             .with_conn(|conn| {
                 conn.query_row("SELECT config_json FROM ai_config WHERE id = 1", [], |row| row.get(0))

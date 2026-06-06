@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -24,11 +25,13 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: dbx-windows-x64
             bundle_path: target/x86_64-pc-windows-msvc/release/bundle
+            build_args: --ci --no-sign --config src-tauri/tauri.ci.conf.json --target x86_64-pc-windows-msvc
           - label: macOS Apple Silicon
             os: macos-latest
             target: aarch64-apple-darwin
             artifact: dbx-macos-arm64
             bundle_path: target/aarch64-apple-darwin/release/bundle
+            build_args: --ci --config src-tauri/tauri.ci.conf.json --target aarch64-apple-darwin --bundles app
 
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +47,15 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Set app version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            node scripts/set-app-version.mjs "${GITHUB_REF_NAME}"
+          else
+            node scripts/set-app-version.mjs "v0.6.0"
+          fi
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -61,7 +73,15 @@ jobs:
         run: pnpm typecheck
 
       - name: Build desktop bundle
-        run: pnpm tauri build --ci --no-sign --config src-tauri/tauri.ci.conf.json --target ${{ matrix.target }}
+        run: pnpm tauri build ${{ matrix.build_args }}
+
+      - name: Build macOS DMG
+        if: runner.os == 'macOS'
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          node scripts/build-macos-dmg.mjs \
+            "target/${{ matrix.target }}/release/bundle/macos/TestTeam DBX.app" \
+            "target/${{ matrix.target }}/release/bundle/dmg/TestTeam.DBX_${VERSION}_aarch64.dmg"
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4

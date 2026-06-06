@@ -21,7 +21,7 @@ import type {
   SavedSqlFolder,
   SavedSqlLibrary,
 } from "@/types/database";
-import type { AiConfig } from "@/stores/settingsStore";
+import type { AiConfig, AiSettings } from "@/stores/settingsStore";
 import type { QueryEditability } from "@/lib/sqlAnalysis";
 import type {
   DataGridColumnValueFilterConditionOptions,
@@ -260,7 +260,7 @@ export async function aiStream(
   }
 }
 
-export async function saveAiConfig(config: AiConfig): Promise<void> {
+export async function saveAiConfig(config: AiConfig | AiSettings): Promise<void> {
   return invoke("save_ai_config", { config });
 }
 
@@ -276,7 +276,7 @@ export async function aiCancelStream(sessionId: string): Promise<boolean> {
   return invoke("ai_cancel_stream", { sessionId });
 }
 
-export async function loadAiConfig(): Promise<AiConfig | null> {
+export async function loadAiConfig(): Promise<AiConfig | AiSettings | null> {
   return invoke("load_ai_config");
 }
 

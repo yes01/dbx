@@ -760,6 +760,10 @@
   ai: {
     placeholder: "Describe tu consulta en lenguaje natural...",
     settings: "Configuración de IA",
+    profile: "Perfil",
+    profileName: "Nombre del perfil",
+    addProfile: "Agregar perfil",
+    deleteProfile: "Eliminar perfil",
     provider: "Proveedor",
     model: "Modelo",
     browseModels: "Explorar modelos",

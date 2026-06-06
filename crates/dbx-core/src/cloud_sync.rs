@@ -9,7 +9,6 @@ use reqwest::{header, Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::ai::AiConfig;
 use crate::models::connection::ConnectionConfig;
 use crate::saved_sql::SavedSqlLibrary;
 use crate::storage::{DesktopSettings, Storage};
@@ -71,7 +70,7 @@ pub struct EncryptedSecretsBlob {
 #[serde(rename_all = "camelCase")]
 pub struct SensitiveSyncPayload {
     pub connection_secrets: Vec<ConnectionSecretSnapshot>,
-    pub ai_config: Option<AiConfig>,
+    pub ai_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

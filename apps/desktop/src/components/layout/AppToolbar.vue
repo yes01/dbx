@@ -83,12 +83,12 @@ function onToolbarDblClick(e: MouseEvent) {
 
 <template>
   <div
-    class="h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0"
+    class="h-10 flex items-center gap-1 border-b border-border/80 bg-[var(--surface-toolbar)] px-2 shrink-0 shadow-[0_1px_0_color-mix(in_oklch,var(--foreground)_4%,transparent)]"
     :class="{ 'pl-17.5': shouldReserveMacTrafficLightInset(isMac, isFullscreen, isDesktop) }"
     data-tauri-drag-region
     @dblclick="onToolbarDblClick"
   >
-    <Button variant="ghost" size="sm" class="h-8 px-2 text-xs gap-1" @click="emit('new-connection')">
+    <Button variant="ghost" size="sm" class="h-7 px-2 text-xs gap-1" @click="emit('new-connection')">
       <DatabaseZap class="h-3.5 w-3.5" />
       {{ t("toolbar.newConnection") }}
     </Button>
@@ -96,7 +96,7 @@ function onToolbarDblClick(e: MouseEvent) {
     <Button
       variant="ghost"
       size="sm"
-      class="h-8 px-2 text-xs gap-1"
+      class="h-7 px-2 text-xs gap-1"
       @click="emit('new-query')"
       :disabled="!hasConnections"
     >
@@ -107,7 +107,7 @@ function onToolbarDblClick(e: MouseEvent) {
     <Button
       variant="ghost"
       size="sm"
-      class="h-8 px-2 text-xs gap-1"
+      class="h-7 px-2 text-xs gap-1"
       @click="emit('open-transfer')"
       :disabled="!hasConnections"
     >
@@ -118,7 +118,7 @@ function onToolbarDblClick(e: MouseEvent) {
     <Button
       variant="ghost"
       size="sm"
-      class="h-8 px-2 text-xs gap-1"
+      class="h-7 px-2 text-xs gap-1"
       @click="emit('open-sql-file')"
       :disabled="!hasSqlFileConnections"
     >
@@ -129,7 +129,7 @@ function onToolbarDblClick(e: MouseEvent) {
     <Button
       variant="ghost"
       size="sm"
-      class="h-8 px-2 text-xs gap-1"
+      class="h-7 px-2 text-xs gap-1"
       @click="emit('open-schema-diff')"
       :disabled="!hasConnections"
     >
@@ -140,7 +140,7 @@ function onToolbarDblClick(e: MouseEvent) {
     <Button
       variant="ghost"
       size="sm"
-      class="h-8 px-2 text-xs gap-1"
+      class="h-7 px-2 text-xs gap-1"
       @click="emit('open-data-compare')"
       :disabled="!hasConnections"
     >
@@ -151,8 +151,8 @@ function onToolbarDblClick(e: MouseEvent) {
     <Button
       variant="ghost"
       size="sm"
-      class="h-8 px-2 text-xs gap-1"
-      :class="{ 'bg-accent': showDriverStore }"
+      class="h-7 px-2 text-xs gap-1"
+      :class="{ 'bg-accent text-accent-foreground ring-1 ring-border/70': showDriverStore }"
       @click="emit('open-driver-store')"
     >
       <Package class="h-3.5 w-3.5" />
@@ -175,8 +175,8 @@ function onToolbarDblClick(e: MouseEvent) {
         <Button
           variant="ghost"
           size="icon"
-          class="h-8 w-8"
-          :class="{ 'bg-accent': showHistory }"
+          class="h-7 w-7"
+          :class="{ 'bg-accent text-accent-foreground ring-1 ring-border/70': showHistory }"
           @click="emit('toggle-history')"
         >
           <History class="h-4 w-4" />
@@ -190,8 +190,8 @@ function onToolbarDblClick(e: MouseEvent) {
         <Button
           variant="ghost"
           size="icon"
-          class="h-8 w-8"
-          :class="{ 'bg-accent': showAiPanel }"
+          class="h-7 w-7"
+          :class="{ 'bg-accent text-accent-foreground ring-1 ring-border/70': showAiPanel }"
           @click="emit('toggle-ai')"
         >
           <Bot class="h-4 w-4" />
@@ -208,7 +208,7 @@ function onToolbarDblClick(e: MouseEvent) {
             :items="themeItems"
             :aria-label="t('toolbar.theme')"
             :trigger-icon="themeTriggerIcon"
-            trigger-class="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground"
+            trigger-class="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground"
             trigger-icon-class="h-4 w-4"
             item-icon-class="h-4 w-4"
             :show-trigger-label="false"
@@ -230,7 +230,7 @@ function onToolbarDblClick(e: MouseEvent) {
             :items="localeItems"
             :aria-label="t('common.language')"
             :trigger-icon="Languages"
-            trigger-class="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground"
+            trigger-class="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground"
             trigger-icon-class="h-4 w-4"
             :show-trigger-label="false"
             :show-chevron="false"
@@ -245,7 +245,7 @@ function onToolbarDblClick(e: MouseEvent) {
 
     <Tooltip>
       <TooltipTrigger as-child>
-        <Button variant="ghost" size="icon" class="h-8 w-8" @click="emit('open-settings')">
+        <Button variant="ghost" size="icon" class="h-7 w-7" @click="emit('open-settings')">
           <Settings class="h-4 w-4" />
         </Button>
       </TooltipTrigger>

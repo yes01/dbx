@@ -15,12 +15,12 @@ pub async fn ai_list_models(config: AiConfig) -> Result<Vec<AiModelInfo>, String
 }
 
 #[tauri::command]
-pub async fn save_ai_config(state: State<'_, Arc<AppState>>, config: AiConfig) -> Result<(), String> {
+pub async fn save_ai_config(state: State<'_, Arc<AppState>>, config: serde_json::Value) -> Result<(), String> {
     state.storage.save_ai_config(&config).await
 }
 
 #[tauri::command]
-pub async fn load_ai_config(state: State<'_, Arc<AppState>>) -> Result<Option<AiConfig>, String> {
+pub async fn load_ai_config(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
     state.storage.load_ai_config().await
 }
 

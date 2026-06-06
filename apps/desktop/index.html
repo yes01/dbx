@@ -7,22 +7,305 @@
     <title>TestTeam DBX</title>
   </head>
   <body>
-    <div id="root">
-      <style>
-        #root:empty {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          height: 100vh;
-          font-family: system-ui, sans-serif;
-          color: #888;
-          font-size: 13px;
+    <style>
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+
+      #dbx-startup {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 50% 38%, rgba(37, 99, 235, 0.08), transparent 34%),
+          linear-gradient(135deg, #fbfcfe 0%, #edf1f6 100%);
+        color: #111827;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        transition:
+          opacity 320ms ease,
+          transform 320ms ease;
+      }
+
+      #dbx-startup.dbx-startup--done {
+        opacity: 0;
+        pointer-events: none;
+        transform: scale(1.01);
+      }
+
+      .dbx-startup-grid {
+        position: absolute;
+        inset: -1px;
+        opacity: 0.32;
+        background-image:
+          linear-gradient(rgba(15, 23, 42, 0.07) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(15, 23, 42, 0.07) 1px, transparent 1px);
+        background-size: 32px 32px;
+        mask-image: radial-gradient(circle at center, black 0%, transparent 72%);
+      }
+
+      .dbx-startup-shell {
+        position: relative;
+        display: flex;
+        width: min(360px, calc(100vw - 48px));
+        flex-direction: column;
+        align-items: center;
+        gap: 18px;
+        padding: 8px;
+        animation: dbx-startup-rise 480ms ease-out both;
+      }
+
+      .dbx-startup-mark {
+        position: relative;
+        display: grid;
+        height: 112px;
+        width: 112px;
+        place-items: center;
+      }
+
+      .dbx-startup-logo {
+        position: relative;
+        z-index: 2;
+        height: 64px;
+        width: 64px;
+        border-radius: 16px;
+        box-shadow: 0 20px 60px rgba(15, 23, 42, 0.16);
+      }
+
+      .dbx-startup-orbit {
+        position: absolute;
+        inset: 8px;
+        border: 1px solid rgba(15, 23, 42, 0.13);
+        border-radius: 999px;
+      }
+
+      .dbx-startup-orbit::after {
+        position: absolute;
+        top: -3px;
+        left: 50%;
+        height: 6px;
+        width: 6px;
+        border-radius: 999px;
+        background: #2563eb;
+        box-shadow: 0 0 18px rgba(37, 99, 235, 0.55);
+        content: "";
+      }
+
+      .dbx-startup-orbit-a {
+        animation: dbx-startup-spin 2.8s linear infinite;
+      }
+
+      .dbx-startup-orbit-b {
+        inset: 20px;
+        transform: rotate(58deg);
+        animation: dbx-startup-spin 2.1s linear infinite reverse;
+      }
+
+      .dbx-startup-copy {
+        text-align: center;
+      }
+
+      .dbx-startup-title {
+        font-size: 28px;
+        font-weight: 700;
+        line-height: 1;
+      }
+
+      .dbx-startup-subtitle {
+        margin-top: 8px;
+        color: #64748b;
+        font-size: 12px;
+      }
+
+      .dbx-startup-progress {
+        width: 100%;
+      }
+
+      .dbx-startup-progress-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 8px;
+        color: #64748b;
+        font-size: 11px;
+      }
+
+      .dbx-startup-progress-track {
+        position: relative;
+        height: 4px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.1);
+      }
+
+      .dbx-startup-progress-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #2563eb, #0f9f8e);
+        transition: width 120ms ease-out;
+      }
+
+      .dbx-startup-progress-glint {
+        position: absolute;
+        top: -4px;
+        left: 0%;
+        height: 12px;
+        width: 28px;
+        border-radius: 999px;
+        background: rgba(37, 99, 235, 0.35);
+        filter: blur(8px);
+        transform: translateX(-50%);
+        transition: left 120ms ease-out;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        #dbx-startup {
+          background:
+            radial-gradient(circle at 50% 38%, rgba(59, 130, 246, 0.16), transparent 34%),
+            linear-gradient(135deg, #0b1220 0%, #111827 100%);
+          color: #f8fafc;
         }
-        #root:empty::after {
-          content: "Loading…";
+
+        .dbx-startup-grid {
+          background-image:
+            linear-gradient(rgba(248, 250, 252, 0.07) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(248, 250, 252, 0.07) 1px, transparent 1px);
         }
-      </style>
+
+        .dbx-startup-orbit {
+          border-color: rgba(248, 250, 252, 0.14);
+        }
+
+        .dbx-startup-subtitle,
+        .dbx-startup-progress-meta {
+          color: #94a3b8;
+        }
+
+        .dbx-startup-progress-track {
+          background: rgba(248, 250, 252, 0.12);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #dbx-startup,
+        .dbx-startup-shell,
+        .dbx-startup-orbit-a,
+        .dbx-startup-orbit-b,
+        .dbx-startup-progress-fill,
+        .dbx-startup-progress-glint {
+          animation: none;
+          transition: none;
+        }
+      }
+
+      @keyframes dbx-startup-rise {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @keyframes dbx-startup-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+    <div id="dbx-startup" role="status" aria-label="Loading DBX">
+      <div class="dbx-startup-grid"></div>
+      <div class="dbx-startup-shell">
+        <div class="dbx-startup-mark">
+          <div class="dbx-startup-orbit dbx-startup-orbit-a"></div>
+          <div class="dbx-startup-orbit dbx-startup-orbit-b"></div>
+          <img src="/logo.png" alt="DBX" class="dbx-startup-logo" />
+        </div>
+        <div class="dbx-startup-copy">
+          <div class="dbx-startup-title">DBX</div>
+          <div class="dbx-startup-subtitle">Database workspace initializing</div>
+        </div>
+        <div class="dbx-startup-progress">
+          <div class="dbx-startup-progress-meta">
+            <span>Loading workspace</span>
+            <span id="dbx-startup-percent">0%</span>
+          </div>
+          <div class="dbx-startup-progress-track">
+            <div id="dbx-startup-progress-fill" class="dbx-startup-progress-fill"></div>
+            <div id="dbx-startup-progress-glint" class="dbx-startup-progress-glint"></div>
+          </div>
+        </div>
+      </div>
     </div>
+    <div id="root"></div>
+    <script>
+      (() => {
+        const splash = document.getElementById("dbx-startup");
+        const fill = document.getElementById("dbx-startup-progress-fill");
+        const glint = document.getElementById("dbx-startup-progress-glint");
+        const percent = document.getElementById("dbx-startup-percent");
+        if (!splash || !fill || !glint || !percent) return;
+
+        let progress = 0;
+        let appReady = false;
+        let minimumElapsed = false;
+        const startedAt = performance.now();
+
+        function setProgress(value) {
+          progress = Math.max(progress, Math.min(100, Math.round(value)));
+          fill.style.width = `${progress}%`;
+          glint.style.left = `${Math.min(progress, 98)}%`;
+          percent.textContent = `${progress}%`;
+        }
+
+        function removeSplash() {
+          setProgress(100);
+          splash.classList.add("dbx-startup--done");
+          window.setTimeout(() => {
+            splash.remove();
+          }, 340);
+        }
+
+        const timer = window.setInterval(() => {
+          const elapsed = performance.now() - startedAt;
+          const timeProgress = Math.min(elapsed / 2200, 1);
+          const target =
+            appReady && minimumElapsed ? 100 : Math.min(92, 100 * (1 - Math.pow(1 - timeProgress, 2.4)));
+          setProgress(target);
+          if (appReady && minimumElapsed && progress >= 100) {
+            window.clearInterval(timer);
+            removeSplash();
+          }
+        }, 40);
+
+        window.setTimeout(() => {
+          minimumElapsed = true;
+        }, 2400);
+
+        window.setTimeout(() => {
+          appReady = true;
+          minimumElapsed = true;
+        }, 3000);
+
+        window.addEventListener(
+          "dbx-app-ready",
+          () => {
+            appReady = true;
+          },
+          { once: true },
+        );
+      })();
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

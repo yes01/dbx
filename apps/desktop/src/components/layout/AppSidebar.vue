@@ -54,12 +54,14 @@ defineExpose({ focusSearch });
 <template>
   <div
     class="h-full shrink-0 relative select-none"
-    :class="classicLayout ? '' : 'rounded-md border border-border/80 bg-background'"
+    :class="
+      classicLayout ? '' : 'rounded-md border border-border/70 bg-[var(--surface-panel)] shadow-[var(--shadow-panel)]'
+    "
     :style="{ width: sidebarWidth + 'px' }"
   >
     <div class="h-full flex flex-col overflow-hidden">
       <div
-        class="flex items-center gap-px px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20"
+        class="flex items-center gap-px border-b border-border/70 bg-[var(--surface-toolbar)] px-3 text-xs font-medium text-muted-foreground"
         :class="classicLayout ? 'h-9' : 'h-10'"
       >
         <span class="flex self-stretch items-center truncate" data-tauri-drag-region>{{
@@ -74,7 +76,7 @@ defineExpose({ focusSearch });
                 :items="importSourceItems"
                 :aria-label="t('sidebar.import')"
                 :trigger-icon="Download"
-                trigger-class="inline-flex h-6 w-5 items-center justify-center rounded-md outline-none hover:bg-muted hover:text-foreground focus-visible:ring-0"
+                trigger-class="inline-flex h-6 w-6 items-center justify-center rounded-md outline-none hover:bg-accent hover:text-accent-foreground focus-visible:ring-0"
                 trigger-icon-class="h-4 w-4"
                 content-class="w-44"
                 :show-trigger-label="false"
@@ -90,7 +92,7 @@ defineExpose({ focusSearch });
         </Tooltip>
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('export')">
+            <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('export')">
               <Upload class="h-3 w-3" />
             </Button>
           </TooltipTrigger>
@@ -98,7 +100,7 @@ defineExpose({ focusSearch });
         </Tooltip>
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="createNewGroup">
+            <Button variant="ghost" size="icon" class="h-6 w-6" @click="createNewGroup">
               <FolderPlus class="h-3 w-3" />
             </Button>
           </TooltipTrigger>
@@ -106,7 +108,7 @@ defineExpose({ focusSearch });
         </Tooltip>
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshTree">
+            <Button variant="ghost" size="icon" class="h-6 w-6" @click="refreshTree">
               <RefreshCw class="h-3 w-3" />
             </Button>
           </TooltipTrigger>
@@ -114,7 +116,12 @@ defineExpose({ focusSearch });
         </Tooltip>
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('collapse')">
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-6 w-6 text-foreground/70 hover:text-foreground"
+              @click="emit('collapse')"
+            >
               <ChevronsLeft class="h-3.5 w-3.5" />
             </Button>
           </TooltipTrigger>

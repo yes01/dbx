@@ -29,39 +29,45 @@ const { t } = useI18n();
 </script>
 
 <template>
-  <div class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-background">
+  <div class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-[var(--surface-raised)]">
     <div class="mx-auto flex min-h-full w-full min-w-0 max-w-5xl flex-col justify-center gap-6 px-8 py-10">
       <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <div class="rounded-lg border bg-muted/20 px-4 py-3">
+        <div
+          class="rounded-md border border-border/70 bg-[var(--surface-panel)] px-4 py-3 shadow-[var(--shadow-panel)]"
+        >
           <div class="flex items-center gap-2 text-xs text-muted-foreground">
-            <Database class="h-3.5 w-3.5" /> {{ t("welcome.connections") }}
+            <Database class="h-3.5 w-3.5 text-[var(--status-info)]" /> {{ t("welcome.connections") }}
           </div>
           <div class="mt-2 text-2xl font-semibold">{{ connectionStats.total }}</div>
         </div>
-        <div class="rounded-lg border bg-muted/20 px-4 py-3">
+        <div
+          class="rounded-md border border-border/70 bg-[var(--surface-panel)] px-4 py-3 shadow-[var(--shadow-panel)]"
+        >
           <div class="flex items-center gap-2 text-xs text-muted-foreground">
-            <ShieldCheck class="h-3.5 w-3.5" /> {{ t("welcome.connected") }}
+            <ShieldCheck class="h-3.5 w-3.5 text-[var(--status-success)]" /> {{ t("welcome.connected") }}
           </div>
           <div class="mt-2 text-2xl font-semibold">{{ connectionStats.connected }}</div>
         </div>
-        <div class="rounded-lg border bg-muted/20 px-4 py-3">
+        <div
+          class="rounded-md border border-border/70 bg-[var(--surface-panel)] px-4 py-3 shadow-[var(--shadow-panel)]"
+        >
           <div class="flex items-center gap-2 text-xs text-muted-foreground">
-            <Sparkles class="h-3.5 w-3.5" /> {{ t("welcome.databaseTypes") }}
+            <Sparkles class="h-3.5 w-3.5 text-[var(--status-warning)]" /> {{ t("welcome.databaseTypes") }}
           </div>
           <div class="mt-2 text-2xl font-semibold">{{ connectionStats.types }}</div>
         </div>
       </div>
 
       <div class="grid grid-cols-1 gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-        <div class="rounded-lg border">
-          <div class="flex items-center justify-between border-b px-4 py-3">
+        <div class="rounded-md border border-border/70 bg-background shadow-[var(--shadow-panel)]">
+          <div class="flex items-center justify-between border-b border-border/70 bg-[var(--surface-panel)] px-4 py-3">
             <div class="text-sm font-medium">{{ t("welcome.quickConnections") }}</div>
           </div>
           <div class="divide-y">
             <button
               v-for="connection in recentConnections"
               :key="connection.id"
-              class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40"
+              class="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-accent"
               @click="emit('open-connection-query', connection.id)"
             >
               <DatabaseIcon :db-type="connectionIconType(connection)" class="h-4 w-4" />
@@ -80,38 +86,40 @@ const { t } = useI18n();
           </div>
         </div>
 
-        <div class="rounded-lg border">
-          <div class="border-b px-4 py-3">
+        <div class="rounded-md border border-border/70 bg-background shadow-[var(--shadow-panel)]">
+          <div class="border-b border-border/70 bg-[var(--surface-panel)] px-4 py-3">
             <div class="text-sm font-medium">{{ t("welcome.shortcuts") }}</div>
           </div>
           <div class="grid gap-1 p-2">
             <button
-              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50"
+              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
               @click="emit('new-connection')"
             >
               <Plus class="h-4 w-4" /> {{ t("toolbar.newConnection") }}
             </button>
             <button
-              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50"
+              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="!hasConnections"
               @click="emit('new-query')"
             >
               <FilePlus2 class="h-4 w-4" /> {{ t("toolbar.newQuery") }}
             </button>
             <button
-              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50"
+              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
               @click="emit('show-history')"
             >
               <History class="h-4 w-4" /> {{ t("history.title") }}
             </button>
             <button
-              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50"
+              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
               @click="emit('import-config')"
             >
               <Download class="h-4 w-4" /> {{ t("sidebar.import") }}
             </button>
-            <div class="mt-2 rounded-md bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
-              <Search class="mr-1 inline h-3.5 w-3.5" />
+            <div
+              class="mt-2 rounded-md border border-border/60 bg-[var(--surface-panel)] px-3 py-2 text-xs leading-5 text-muted-foreground"
+            >
+              <Search class="mr-1 inline h-3.5 w-3.5 text-[var(--status-info)]" />
               {{ t("welcome.tip") }}
             </div>
           </div>

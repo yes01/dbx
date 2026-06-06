@@ -264,7 +264,7 @@ const tabTailDragRegionClass = computed(() =>
 const tabOverflowControlClass = computed(() =>
   settingsStore.editorSettings.appLayout === "classic"
     ? "h-full w-8 border-r border-border/80 dark:border-border/45 bg-background/80 text-foreground/75 hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-40"
-    : "h-7 w-7 rounded-md border border-border/60 bg-background text-foreground/70 hover:border-border hover:text-foreground",
+    : "h-7 w-7 rounded-md border border-border/60 bg-[var(--surface-panel)] text-foreground/70 hover:border-border hover:bg-accent hover:text-accent-foreground",
 );
 </script>
 
@@ -275,7 +275,7 @@ const tabOverflowControlClass = computed(() =>
     :class="
       settingsStore.editorSettings.appLayout === 'classic'
         ? 'h-9 items-stretch bg-muted'
-        : 'h-10 items-center bg-background px-2'
+        : 'h-10 items-center border-border/70 bg-[var(--surface-panel)] px-2'
     "
   >
     <button
@@ -320,10 +320,10 @@ const tabOverflowControlClass = computed(() =>
                       ]
                     : [
                         compactTabTitle ? 'min-w-24' : 'min-w-38',
-                        'h-7 rounded-md border',
+                        'h-7 rounded-md border shadow-[0_1px_0_color-mix(in_oklch,var(--foreground)_3%,transparent)]',
                         tab.id === queryStore.activeTabId && !showDriverStore
-                          ? 'text-foreground font-medium'
-                          : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90',
+                          ? 'bg-background text-foreground font-medium'
+                          : 'border-border/60 bg-[var(--surface-raised)]/60 text-foreground/70 hover:border-border hover:bg-accent hover:text-accent-foreground',
                       ]
                 "
                 :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
@@ -393,7 +393,10 @@ const tabOverflowControlClass = computed(() =>
         :class="
           settingsStore.editorSettings.appLayout === 'classic'
             ? ['h-full border-r border-border/80 dark:border-border/45 bg-background text-foreground font-medium']
-            : ['h-7 rounded-md border text-foreground font-medium', 'border-ring']
+            : [
+                'h-7 rounded-md border bg-background text-foreground font-medium shadow-[0_1px_0_color-mix(in_oklch,var(--foreground)_3%,transparent)]',
+                'border-ring',
+              ]
         "
         :style="
           settingsStore.editorSettings.appLayout === 'classic' ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}

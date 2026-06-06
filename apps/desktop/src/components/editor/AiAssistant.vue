@@ -185,6 +185,17 @@ const actionMenuItems = computed(() =>
   })),
 );
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
+const activeAiProfile = computed(
+  () =>
+    settings.aiSettings.profiles.find((profile) => profile.id === settings.aiSettings.activeProfileId) ||
+    settings.aiSettings.profiles[0],
+);
+const activeAiConfigLabel = computed(() => {
+  const profile = activeAiProfile.value;
+  const config = profile?.config || settings.aiConfig;
+  const name = profile?.name || config.provider;
+  return config.model ? `${name} · ${config.model}` : name;
+});
 
 const { databaseOptions: allDbOptions, loadDatabaseOptions } = useDatabaseOptions();
 
@@ -878,52 +889,62 @@ const messageRenderer = computed(() => {
 
     <div class="p-2">
       <div class="relative rounded-lg border bg-background px-2 pb-2 pt-1">
-        <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
-          <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
-          <Server v-else class="h-3 w-3 shrink-0" />
-          <Select :model-value="connection?.id || ''" @update:model-value="(v: any) => changeConnection(v)">
-            <SelectTrigger
-              class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3"
-            >
-              <SelectValue :placeholder="t('editor.selectConnection')">{{
-                connection?.name || t("editor.selectConnection")
-              }}</SelectValue>
-            </SelectTrigger>
-            <SelectContent class="min-w-48">
-              <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
-                <div class="flex min-w-0 items-center gap-2">
-                  <DatabaseIcon :db-type="connectionIconType(conn)" class="h-3.5 w-3.5 shrink-0" />
-                  <span class="truncate">{{ conn.name }}</span>
-                </div>
-              </SelectItem>
-            </SelectContent>
-          </Select>
-          <template v-if="connection">
-            <Database class="h-3 w-3 shrink-0 text-foreground/40" />
-            <Select
-              :model-value="tab?.database || ''"
-              @update:model-value="(v: any) => changeDatabase(v)"
-              @update:open="
-                (open: boolean) => {
-                  if (open) loadDatabases();
-                }
-              "
-            >
+        <div class="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-foreground/80">
+          <div v-if="connectionStore.connections.length" class="flex min-w-0 items-center gap-1">
+            <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
+            <Server v-else class="h-3 w-3 shrink-0" />
+            <Select :model-value="connection?.id || ''" @update:model-value="(v: any) => changeConnection(v)">
               <SelectTrigger
-                class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3"
+                class="h-5 w-auto max-w-36 border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3"
               >
-                <SelectValue :placeholder="t('editor.selectDatabase')">{{
-                  tab?.database || t("editor.selectDatabase")
+                <SelectValue :placeholder="t('editor.selectConnection')">{{
+                  connection?.name || t("editor.selectConnection")
                 }}</SelectValue>
               </SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="db in dbOptions" :key="db" :value="db">{{ db }}</SelectItem>
-                <SelectItem v-if="!dbOptions.length && tab?.database" :value="tab.database">{{
-                  tab.database
-                }}</SelectItem>
+              <SelectContent class="min-w-48">
+                <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <DatabaseIcon :db-type="connectionIconType(conn)" class="h-3.5 w-3.5 shrink-0" />
+                    <span class="truncate">{{ conn.name }}</span>
+                  </div>
+                </SelectItem>
               </SelectContent>
             </Select>
-          </template>
+            <template v-if="connection">
+              <Database class="h-3 w-3 shrink-0 text-foreground/40" />
+              <Select
+                :model-value="tab?.database || ''"
+                @update:model-value="(v: any) => changeDatabase(v)"
+                @update:open="
+                  (open: boolean) => {
+                    if (open) loadDatabases();
+                  }
+                "
+              >
+                <SelectTrigger
+                  class="h-5 w-auto max-w-32 border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3"
+                >
+                  <SelectValue :placeholder="t('editor.selectDatabase')">{{
+                    tab?.database || t("editor.selectDatabase")
+                  }}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="db in dbOptions" :key="db" :value="db">{{ db }}</SelectItem>
+                  <SelectItem v-if="!dbOptions.length && tab?.database" :value="tab.database">{{
+                    tab.database
+                  }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </template>
+          </div>
+          <span class="min-w-0 flex-1" />
+          <div
+            class="flex h-5 max-w-full min-w-0 items-center gap-1 rounded-md border border-border/70 bg-muted/40 px-1.5 text-[11px] text-muted-foreground"
+            :title="activeAiConfigLabel"
+          >
+            <Bot class="h-3 w-3 shrink-0" />
+            <span class="truncate">{{ activeAiConfigLabel }}</span>
+          </div>
         </div>
         <div
           v-if="mentionOpen"

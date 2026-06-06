@@ -97,9 +97,6 @@ mod tests {
             "releases/latest/latest.json",
         );
 
-        assert_eq!(
-            urls,
-            vec!["https://dl.dbxio.com/releases/latest/latest.json"]
-        );
+        assert_eq!(urls, vec!["https://dl.dbxio.com/releases/latest/latest.json"]);
     }
 }

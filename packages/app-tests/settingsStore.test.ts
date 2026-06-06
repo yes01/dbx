@@ -4,6 +4,7 @@ import {
   AI_PROVIDER_PRESETS,
   DEFAULT_EDITOR_SETTINGS,
   normalizeAiConfig,
+  normalizeAiSettings,
   normalizeEditorSettings,
 } from "../../apps/desktop/src/stores/settingsStore.ts";
 
@@ -235,6 +236,46 @@ test("infers legacy AI provider from saved endpoint and model", () => {
   assert.equal(deepseek.provider, "deepseek");
   assert.equal(deepseek.endpoint, "https://api.deepseek.com/anthropic/v1/messages");
   assert.equal(deepseek.model, "deepseek-v4-pro");
+});
+
+test("normalizes legacy AI config into a default profile", () => {
+  const settings = normalizeAiSettings({
+    provider: "openai",
+    apiKey: "key",
+    endpoint: "https://api.openai.com/v1/chat/completions",
+    model: "gpt-4o",
+  } as any);
+
+  assert.equal(settings.activeProfileId, "default");
+  assert.equal(settings.profiles.length, 1);
+  assert.equal(settings.profiles[0].name, "OpenAI - gpt-4o");
+  assert.equal(settings.profiles[0].config.provider, "openai");
+  assert.equal(settings.profiles[0].config.apiKey, "key");
+});
+
+test("normalizes AI profile settings and keeps the active profile", () => {
+  const settings = normalizeAiSettings({
+    activeProfileId: "local",
+    profiles: [
+      { id: "hosted", name: "Hosted", config: { provider: "claude", apiKey: "a" } },
+      { id: "local", name: "Local", config: { provider: "ollama" } },
+    ],
+  } as any);
+
+  assert.equal(settings.activeProfileId, "local");
+  assert.equal(settings.profiles.length, 2);
+  assert.equal(settings.profiles[1].config.endpoint, "http://localhost:11434/v1");
+  assert.equal(settings.profiles[1].config.apiKey, "");
+});
+
+test("normalizes AI profile settings with a missing active profile", () => {
+  const settings = normalizeAiSettings({
+    activeProfileId: "missing",
+    profiles: [{ id: "only", name: "", config: { provider: "qwen" } }],
+  } as any);
+
+  assert.equal(settings.activeProfileId, "only");
+  assert.equal(settings.profiles[0].name, "Qwen - qwen-plus");
 });
 
 test("normalizeEditorSettings falls back to the default UI scale", () => {

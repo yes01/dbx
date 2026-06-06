@@ -51,12 +51,10 @@ async function submit() {
 </script>
 
 <template>
-  <div
-    class="flex items-center justify-center h-screen bg-gradient-to-br from-background via-background to-blue-950/20"
-  >
-    <div class="w-[360px] space-y-8">
+  <div class="flex h-screen items-center justify-center bg-[var(--surface-recessed)]">
+    <div class="w-[360px] space-y-7 rounded-md border border-border/70 bg-background p-7 shadow-[var(--shadow-panel)]">
       <div class="flex flex-col items-center gap-4">
-        <AppLogo class="w-20 h-20 rounded-2xl shadow-lg shadow-blue-500/20" />
+        <AppLogo class="w-16 h-16 rounded-md" />
         <div class="text-center">
           <h1 class="text-2xl font-bold tracking-tight">DBX</h1>
           <p class="text-sm text-muted-foreground mt-1">
@@ -102,7 +100,7 @@ async function submit() {
         </Button>
       </form>
 
-      <p class="text-center text-xs text-muted-foreground/50">Powered by DBX</p>
+      <p class="text-center text-xs text-muted-foreground/70">Powered by DBX</p>
     </div>
   </div>
 </template>

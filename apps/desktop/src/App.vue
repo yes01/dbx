@@ -824,11 +824,15 @@ function onLoginSuccess() {
   initApp();
 }
 
+function notifyStartupReady() {
+  window.dispatchEvent(new CustomEvent("dbx-app-ready"));
+}
+
 function initApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
   settingsStore.initDesktopSettings().catch(() => {});
-  savedSqlStore
+  const workspaceStartup = savedSqlStore
     .initFromStorage()
     .then(() => {
       console.log(`[STARTUP]   savedSqlStore.initFromStorage: ${(performance.now() - t0).toFixed(0)}ms`);
@@ -841,7 +845,8 @@ function initApp() {
     .catch((e: any) => {
       toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
     });
-  settingsStore.initAiConfig();
+  const aiStartup = settingsStore.initAiConfig();
+  Promise.allSettled([workspaceStartup, aiStartup]).then(notifyStartupReady);
 }
 
 async function reconnectRestoredTabs() {
@@ -895,6 +900,7 @@ onMounted(async () => {
     }
     if (needsAuth.value && !authenticated.value) {
       history.replaceState(null, "", "/login");
+      notifyStartupReady();
     }
     if (!setupRequired.value && (!needsAuth.value || authenticated.value)) initApp();
     api
@@ -977,7 +983,7 @@ onUnmounted(() => {
           :class="
             isClassicLayout
               ? 'app-layout-classic flex-1 flex min-h-0'
-              : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'
+              : 'app-panel-gutter flex-1 flex min-h-0 gap-1.5 p-1.5'
           "
         >
           <AppSidebar
@@ -992,8 +998,8 @@ onUnmounted(() => {
           />
           <div
             v-show="!sidebarOpen"
-            class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-background/80 pt-2"
-            :class="isClassicLayout ? '' : 'rounded-md border border-border/80'"
+            class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-[var(--surface-panel)] pt-2"
+            :class="isClassicLayout ? '' : 'rounded-md border border-border/70 shadow-[var(--shadow-panel)]'"
           >
             <Button
               variant="ghost"
@@ -1011,7 +1017,7 @@ onUnmounted(() => {
             :class="
               isClassicLayout
                 ? 'flex-1 min-w-0 overflow-hidden'
-                : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'
+                : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/70 bg-[var(--surface-raised)] shadow-[var(--shadow-panel)]'
             "
           >
             <div class="h-full flex flex-col min-w-0">
@@ -1133,7 +1139,7 @@ onUnmounted(() => {
             :class="
               isClassicLayout
                 ? 'h-full shrink-0 relative z-30 isolate bg-background'
-                : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'
+                : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/70 bg-[var(--surface-raised)] shadow-[var(--shadow-panel)]'
             "
             :style="{ width: aiPanelWidth + 'px' }"
           >
@@ -1157,7 +1163,7 @@ onUnmounted(() => {
             :class="
               isClassicLayout
                 ? 'h-full shrink-0 relative z-30 isolate bg-background'
-                : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'
+                : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/70 bg-[var(--surface-raised)] shadow-[var(--shadow-panel)]'
             "
             :style="{ width: historyWidth + 'px' }"
           >
@@ -1208,7 +1214,7 @@ onUnmounted(() => {
         <Transition name="toast">
           <div
             v-if="toastVisible"
-            class="fixed bottom-6 left-1/2 -translate-x-1/2 z-100 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg"
+            class="fixed bottom-6 left-1/2 -translate-x-1/2 z-100 rounded-md border border-border/70 bg-popover px-4 py-2 text-sm text-popover-foreground shadow-[var(--shadow-panel)]"
           >
             {{ toastMessage }}
           </div>

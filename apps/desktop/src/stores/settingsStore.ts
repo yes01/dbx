@@ -36,6 +36,17 @@ export interface AiConfig {
   enableThinking?: boolean;
 }
 
+export interface AiProfile {
+  id: string;
+  name: string;
+  config: AiConfig;
+}
+
+export interface AiSettings {
+  activeProfileId: string;
+  profiles: AiProfile[];
+}
+
 export interface DesktopSettings {
   show_tray_icon: boolean;
   icon_theme: DesktopIconTheme;
@@ -155,6 +166,48 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     proxyEnabled: !!config?.proxyEnabled,
     proxyUrl: config?.proxyUrl ?? "",
     enableThinking: config?.enableThinking ?? true,
+  };
+}
+
+const DEFAULT_AI_PROFILE_ID = "default";
+
+function aiProfileName(config: AiConfig): string {
+  const preset = AI_PROVIDER_PRESETS[config.provider];
+  return config.model ? `${preset.label} - ${config.model}` : preset.label;
+}
+
+function isAiSettingsValue(value: unknown): value is Partial<AiSettings> {
+  return !!value && typeof value === "object" && Array.isArray((value as Partial<AiSettings>).profiles);
+}
+
+export function normalizeAiSettings(value: Partial<AiSettings> | Partial<AiConfig> | null | undefined): AiSettings {
+  if (isAiSettingsValue(value)) {
+    const seen = new Set<string>();
+    const rawProfiles = value.profiles ?? [];
+    const profiles = rawProfiles
+      .map((profile, index) => {
+        const config = normalizeAiConfig(profile?.config);
+        const fallbackId = index === 0 ? DEFAULT_AI_PROFILE_ID : `profile-${index + 1}`;
+        const id = (profile?.id || fallbackId).trim() || fallbackId;
+        if (seen.has(id)) return null;
+        seen.add(id);
+        const name = (profile?.name || aiProfileName(config)).trim() || aiProfileName(config);
+        return { id, name, config };
+      })
+      .filter((profile): profile is AiProfile => !!profile);
+
+    if (profiles.length) {
+      const activeProfileId = profiles.some((profile) => profile.id === value.activeProfileId)
+        ? value.activeProfileId || profiles[0].id
+        : profiles[0].id;
+      return { activeProfileId, profiles };
+    }
+  }
+
+  const config = normalizeAiConfig(value as Partial<AiConfig> | null | undefined);
+  return {
+    activeProfileId: DEFAULT_AI_PROFILE_ID,
+    profiles: [{ id: DEFAULT_AI_PROFILE_ID, name: aiProfileName(config), config }],
   };
 }
 
@@ -478,7 +531,8 @@ function saveEditorSettings(settings: EditorSettings) {
 }
 
 export const useSettingsStore = defineStore("settings", () => {
-  const aiConfig = ref<AiConfig>(normalizeAiConfig({ provider: "claude" }));
+  const aiSettings = ref<AiSettings>(normalizeAiSettings({ provider: "claude" }));
+  const aiConfig = ref<AiConfig>(aiSettings.value.profiles[0].config);
   const isAiConfigLoaded = ref(false);
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
   const isDesktopSettingsLoaded = ref(false);
@@ -511,22 +565,94 @@ export const useSettingsStore = defineStore("settings", () => {
     const legacy = localStorage.getItem("dbx-ai-config");
     const saved = await api.loadAiConfig().catch(() => null);
     if (saved) {
-      aiConfig.value = normalizeAiConfig(saved);
+      setAiSettings(normalizeAiSettings(saved));
     } else if (legacy) {
-      aiConfig.value = normalizeAiConfig(JSON.parse(legacy));
-      await api.saveAiConfig(aiConfig.value).catch(() => {});
+      setAiSettings(normalizeAiSettings(JSON.parse(legacy)));
+      await api.saveAiConfig(aiSettings.value).catch(() => {});
       localStorage.removeItem("dbx-ai-config");
     }
     isAiConfigLoaded.value = true;
   }
 
-  function updateAiConfig(config: Partial<AiConfig>) {
-    const previousProvider = aiConfig.value.provider;
-    if (config.provider && config.provider !== previousProvider) {
-      Object.assign(aiConfig.value, defaultConfigs[config.provider]);
+  function setAiSettings(settings: AiSettings) {
+    aiSettings.value = normalizeAiSettings(settings);
+    aiConfig.value = aiSettings.value.profiles.find(
+      (profile) => profile.id === aiSettings.value.activeProfileId,
+    )!.config;
+  }
+
+  function saveAiSettings() {
+    api.saveAiConfig(aiSettings.value).catch(() => {});
+  }
+
+  function updateAiConfig(config: Partial<AiConfig>, profileId = aiSettings.value.activeProfileId) {
+    const profile = aiSettings.value.profiles.find((item) => item.id === profileId);
+    if (!profile) return;
+    const previousProvider = profile.config.provider;
+    const next =
+      config.provider && config.provider !== previousProvider
+        ? normalizeAiConfig({
+            ...defaultConfigs[config.provider],
+            ...config,
+            apiKey: config.apiKey ?? profile.config.apiKey,
+          })
+        : normalizeAiConfig({ ...profile.config, ...config });
+    profile.config = next;
+    if (!profile.name.trim()) profile.name = aiProfileName(next);
+    if (profile.id === aiSettings.value.activeProfileId) aiConfig.value = profile.config;
+    saveAiSettings();
+  }
+
+  function updateAiProfile(profile: AiProfile) {
+    const normalized = normalizeAiSettings({
+      activeProfileId: profile.id,
+      profiles: [profile],
+    }).profiles[0];
+    const index = aiSettings.value.profiles.findIndex((item) => item.id === normalized.id);
+    if (index >= 0) {
+      aiSettings.value.profiles[index] = normalized;
+    } else {
+      aiSettings.value.profiles.push(normalized);
     }
-    Object.assign(aiConfig.value, config);
-    api.saveAiConfig(aiConfig.value).catch(() => {});
+    aiSettings.value.activeProfileId = normalized.id;
+    aiConfig.value = normalized.config;
+    saveAiSettings();
+  }
+
+  function addAiProfile(config: Partial<AiConfig> = aiConfig.value): AiProfile {
+    const normalizedConfig = normalizeAiConfig(config);
+    const profile: AiProfile = {
+      id: `profile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name: aiProfileName(normalizedConfig),
+      config: normalizedConfig,
+    };
+    aiSettings.value.profiles.push(profile);
+    aiSettings.value.activeProfileId = profile.id;
+    aiConfig.value = profile.config;
+    saveAiSettings();
+    return profile;
+  }
+
+  function deleteAiProfile(profileId: string) {
+    if (aiSettings.value.profiles.length <= 1) return;
+    const index = aiSettings.value.profiles.findIndex((profile) => profile.id === profileId);
+    if (index < 0) return;
+    aiSettings.value.profiles.splice(index, 1);
+    if (aiSettings.value.activeProfileId === profileId) {
+      aiSettings.value.activeProfileId = aiSettings.value.profiles[Math.max(0, index - 1)].id;
+      aiConfig.value = aiSettings.value.profiles.find(
+        (profile) => profile.id === aiSettings.value.activeProfileId,
+      )!.config;
+    }
+    saveAiSettings();
+  }
+
+  function setActiveAiProfile(profileId: string) {
+    const profile = aiSettings.value.profiles.find((item) => item.id === profileId);
+    if (!profile) return;
+    aiSettings.value.activeProfileId = profile.id;
+    aiConfig.value = profile.config;
+    saveAiSettings();
   }
 
   function isConfigured(): boolean {
@@ -625,10 +751,15 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   return {
+    aiSettings,
     aiConfig,
     isAiConfigLoaded,
     initAiConfig,
     updateAiConfig,
+    updateAiProfile,
+    addAiProfile,
+    deleteAiProfile,
+    setActiveAiProfile,
     isConfigured,
     editorSettings,
     desktopSettings,
