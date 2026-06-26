@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -28,8 +28,6 @@ const testRoots = [
   "packages/app-tests",
   "apps/desktop/src",
   "packages/node-core/tests",
-  "packages/cli/tests",
-  "packages/mcp-server/tests",
   "docs/lib",
 ];
 
@@ -66,7 +64,28 @@ function chunk(items, size) {
 }
 
 const nodeTestFiles = testFilesUsing("node:test");
-const vitestFiles = testFilesUsing("vitest");
+const vitestFiles = testFilesUsing("vitest").filter((file) => !nodeTestFiles.includes(file));
+const vitestRunCheckConfigPath = path.join(process.cwd(), ".vitest.run-check.config.mjs");
+
+if (vitestFiles.length > 0) {
+  writeFileSync(
+    vitestRunCheckConfigPath,
+    [
+      'import path from "node:path";',
+      'import { defineConfig } from "vitest/config";',
+      "",
+      "export default defineConfig({",
+      "  resolve: {",
+      '    alias: { "@": path.resolve(process.cwd(), "apps/desktop/src") },',
+      "  },",
+      "  test: {",
+      `    include: ${JSON.stringify(vitestFiles)},`,
+      "  },",
+      "});",
+      "",
+    ].join("\n"),
+  );
+}
 
 const tasks = [
   {
@@ -87,7 +106,17 @@ const tasks = [
   vitestFiles.length > 0 && {
     name: "test",
     command: "vitest",
-    args: ["run"],
+    args: ["run", "--config", vitestRunCheckConfigPath],
+  },
+  {
+    name: "cli-test",
+    command: "pnpm",
+    args: ["--filter", "@dbx-app/cli", "test"],
+  },
+  {
+    name: "mcp-test",
+    command: "pnpm",
+    args: ["--filter", "@dbx-app/mcp-server", "test"],
   },
   ...chunk(nodeTestFiles, 12).map((files, index) => ({
     name: nodeTestFiles.length > 12 ? `node-test-${index + 1}` : "node-test",
@@ -164,29 +193,41 @@ function tailOutput(output, maxLines = 120) {
   return [`... omitted ${lines.length - maxLines} earlier line(s) ...`, ...lines.slice(-maxLines)].join("\n");
 }
 
-const results = await Promise.all(tasks.map(runTask));
+let failures = [];
 
-for (const result of results) {
-  const seconds = (result.durationMs / 1000).toFixed(2);
-  const status = result.code === 0 ? "ok" : "failed";
-  console.log(`${status.padEnd(6)} ${result.name.padEnd(9)} ${seconds}s`);
-}
+try {
+  const results = await Promise.all(tasks.map(runTask));
 
-const failures = results.filter((result) => result.code !== 0);
-
-for (const failure of failures) {
-  console.error(`\n${failure.name} output:`);
-  if (failure.output) {
-    const excerpt = outputFailureExcerpt(failure.output);
-    if (excerpt) {
-      console.error("failure excerpt:");
-      console.error(excerpt);
-      console.error("\noutput tail:");
-    }
-    console.error(tailOutput(failure.output));
+  for (const result of results) {
+    const seconds = (result.durationMs / 1000).toFixed(2);
+    const status = result.code === 0 ? "ok" : "failed";
+    console.log(`${status.padEnd(6)} ${result.name.padEnd(9)} ${seconds}s`);
   }
-  if (failure.errorOutput) {
-    console.error(tailOutput(failure.errorOutput));
+
+  failures = results.filter((result) => result.code !== 0);
+
+  for (const failure of failures) {
+    console.error(`\n${failure.name} output:`);
+    if (failure.output) {
+      const excerpt = outputFailureExcerpt(failure.output);
+      if (excerpt) {
+        console.error("failure excerpt:");
+        console.error(excerpt);
+        console.error("\noutput tail:");
+      }
+      console.error(tailOutput(failure.output));
+    }
+    if (failure.errorOutput) {
+      console.error(tailOutput(failure.errorOutput));
+    }
+  }
+} finally {
+  if (vitestFiles.length > 0) {
+    try {
+      unlinkSync(vitestRunCheckConfigPath);
+    } catch {
+      /* ignore cleanup errors */
+    }
   }
 }
 

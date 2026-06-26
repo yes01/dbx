@@ -436,11 +436,16 @@ async function bridgeDataRequest<T>(path: string, body: Record<string, unknown>)
   } catch {
     throw new Error("DBX desktop app is not running. This database type requires DBX to be running for query execution.");
   }
-  const res = await fetch(`${bridgeUrl}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${bridgeUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error("DBX desktop app is not running. This database type requires DBX to be running for query execution.");
+  }
   if (!res.ok) {
     const errBody = await res.text().catch(() => "");
     let errorMsg: string;

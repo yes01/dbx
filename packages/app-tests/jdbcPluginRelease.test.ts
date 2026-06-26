@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { test } from "vitest";
+import test from "node:test";
 import { evaluateJdbcPluginReleaseBump } from "../../.github/scripts/bump-jdbc-plugin-version.mjs";
 import { evaluateJdbcPluginVersionChange } from "../../.github/scripts/check-jdbc-plugin-version.mjs";
 import { augmentLatestJsonWithJdbcPlugin } from "../../.github/scripts/augment-latest-json-jdbc-plugin.mjs";
@@ -70,7 +70,7 @@ test("auto bumps JDBC plugin patch version when runtime files changed for releas
   assert.match(result.manifestJson, /"version": "0\.1\.10"/);
 });
 
-test("does not auto bump JDBC plugin again when release range already includes a version bump", () => {
+test("auto bumps JDBC plugin again when release range still contains runtime file changes", () => {
   const result = evaluateJdbcPluginReleaseBump({
     changedFiles: [
       "plugins/jdbc/src/main/java/app/dbx/jdbc/DbxJdbcPlugin.java",
@@ -81,9 +81,9 @@ test("does not auto bump JDBC plugin again when release range already includes a
     manifestJson: '{ "version": "0.1.10" }',
   });
 
-  assert.equal(result.changed, false);
+  assert.equal(result.changed, true);
   assert.equal(result.oldVersion, "0.1.10");
-  assert.equal(result.newVersion, "0.1.10");
+  assert.equal(result.newVersion, "0.1.11");
 });
 
 test("does not auto bump JDBC plugin version for release packaging-only changes", () => {

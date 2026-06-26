@@ -22,7 +22,7 @@ export function appDataDirFromInputs(options: { platform: NodeJS.Platform; home:
     case "win32":
       return join(options.appData || join(options.home, "AppData", "Roaming"), "com.dbx.app");
     default:
-      return join(options.home, ".local", "share", "com.dbx.app");
+      return [options.home.replace(/[\\/]+$/, ""), ".local", "share", "com.dbx.app"].join("/");
   }
 }
 
