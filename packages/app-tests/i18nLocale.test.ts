@@ -24,8 +24,8 @@ test("maps user language tags to supported locales", () => {
   assert.equal(localeFromLanguageTag("fr-FR"), null);
 });
 
-test("detects the first supported user locale and falls back to Chinese", () => {
+test("detects the first supported user locale and falls back to English", () => {
   assert.equal(detectLocaleFromLanguages(["fr-FR", "es-MX", "en-US"]), "es");
-  assert.equal(detectLocaleFromLanguages(["de-DE", "ja-JP"]), "zh-CN");
-  assert.equal(detectLocaleFromLanguages([]), "zh-CN");
+  assert.equal(detectLocaleFromLanguages(["de-DE", "ja-JP"]), "ja");
+  assert.equal(detectLocaleFromLanguages([]), "en");
 });

@@ -2,6 +2,7 @@ const CONNECTION_ERROR_PATTERNS = [
   "connection reset",
   "connection refused",
   "connection timed out",
+  "operation timed out",
   "connection closed",
   "connection lost",
   "connection not found",
