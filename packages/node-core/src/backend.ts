@@ -1,14 +1,5 @@
-import {
-  addConnection as desktopAddConnection,
-  findConnection as desktopFindConnection,
-  loadConnections as desktopLoadConnections,
-  removeConnection as desktopRemoveConnection,
-} from "./connections.js";
-import {
-  describeTable as desktopDescribeTable,
-  executeQuery as desktopExecuteQuery,
-  listTables as desktopListTables,
-} from "./database.js";
+import { addConnection as desktopAddConnection, findConnection as desktopFindConnection, loadConnections as desktopLoadConnections, removeConnection as desktopRemoveConnection } from "./connections.js";
+import { closeDatabaseResources as desktopCloseDatabaseResources, describeTable as desktopDescribeTable, executeQuery as desktopExecuteQuery, listTables as desktopListTables } from "./database.js";
 import type { ConnectionConfig } from "./connections.js";
 import type { ColumnInfo, QueryOptions, QueryResult, TableInfo } from "./database.js";
 
@@ -20,6 +11,7 @@ export interface Backend {
   listTables(config: ConnectionConfig, schema?: string): Promise<TableInfo[]>;
   describeTable(config: ConnectionConfig, table: string, schema?: string): Promise<ColumnInfo[]>;
   executeQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult>;
+  close?(): Promise<void>;
 }
 
 export async function createBackend(env: NodeJS.ProcessEnv = process.env): Promise<Backend> {
@@ -35,5 +27,6 @@ export async function createBackend(env: NodeJS.ProcessEnv = process.env): Promi
     listTables: desktopListTables,
     describeTable: desktopDescribeTable,
     executeQuery: desktopExecuteQuery,
+    close: desktopCloseDatabaseResources,
   };
 }

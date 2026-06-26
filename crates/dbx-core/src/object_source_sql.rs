@@ -122,11 +122,20 @@ pub fn build_routine_rename_object_source_statements(
 pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlInput) -> Result<Vec<String>, String> {
     let source = input.source.trim();
     if input.database_type == DatabaseType::SqlServer {
+        if input.object_type == ObjectSourceKind::View {
+            return Ok(vec![build_sqlserver_alter_view_sql(input.schema.as_deref(), &input.name, source)]);
+        }
         return Ok(vec![replace_sqlserver_create_with_create_or_alter(source)]);
     }
 
-    if matches!(input.database_type, DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::OpenGauss)
-        && input.object_type == ObjectSourceKind::View
+    if matches!(
+        input.database_type,
+        DatabaseType::Postgres
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kwdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Questdb
+    ) && input.object_type == ObjectSourceKind::View
     {
         return Ok(vec![format!(
             "CREATE OR REPLACE VIEW {} AS\n{}",
@@ -144,6 +153,23 @@ pub fn build_executable_object_source_sql(input: EditableObjectSourceSqlInput) -
     Ok(build_executable_object_source_statements(input)?.join("\n"))
 }
 
+/// Convert a raw database object source into a form suitable for the source editor.
+///
+/// This is the *editable* presentation shown to the user when they open a view,
+/// procedure, or function for editing. For SQL Server the raw `CREATE VIEW` /
+/// `CREATE PROCEDURE` is rewritten to `CREATE OR ALTER` so the user doesn't see
+/// a mismatched CREATE statement for an already-existing object. Callers that
+/// only need the first statement should use this instead of calling
+/// `build_executable_object_source_statements` and discarding rename-cleanup
+/// statements.
+pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> String {
+    let source = input.source.clone();
+    match build_executable_object_source_statements(input) {
+        Ok(statements) => statements.into_iter().next().unwrap_or_default(),
+        Err(_) => ensure_semicolon(source.trim()),
+    }
+}
+
 pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     let source = input.source.trim();
     if Regex::new(r"(?i)^(?:CREATE|ALTER)\s+").unwrap().is_match(source) {
@@ -157,9 +183,11 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     };
 
     if input.database_type.is_none()
-        || input
-            .database_type
-            .is_some_and(|database_type| is_postgres_like(database_type) || database_type == DatabaseType::OpenGauss)
+        || input.database_type.is_some_and(|database_type| {
+            is_postgres_like(database_type)
+                || database_type == DatabaseType::OpenGauss
+                || database_type == DatabaseType::Questdb
+        })
     {
         return format!("CREATE OR REPLACE VIEW {qualified_name} AS\n{}", ensure_semicolon(source));
     }
@@ -211,7 +239,9 @@ fn is_postgres_like(database_type: DatabaseType) -> bool {
         DatabaseType::Postgres
             | DatabaseType::Redshift
             | DatabaseType::Gaussdb
+            | DatabaseType::Kwdb
             | DatabaseType::OpenGauss
+            | DatabaseType::Questdb
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
             | DatabaseType::Vastbase
@@ -229,8 +259,10 @@ fn is_oracle_like(database_type: DatabaseType) -> bool {
 fn object_type_keyword(object_type: &ObjectSourceKind) -> &'static str {
     match object_type {
         ObjectSourceKind::View => "VIEW",
+        ObjectSourceKind::MaterializedView => "MATERIALIZED_VIEW",
         ObjectSourceKind::Procedure => "PROCEDURE",
         ObjectSourceKind::Function => "FUNCTION",
+        ObjectSourceKind::Sequence => "SEQUENCE",
         ObjectSourceKind::Package => "PACKAGE",
         ObjectSourceKind::PackageBody => "PACKAGE BODY",
     }
@@ -269,6 +301,20 @@ fn mysql_qualified_name(schema: Option<&str>, name: &str) -> String {
         .chain(std::iter::once(name))
         .filter(|part| !part.is_empty())
         .map(quote_mysql_identifier)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn quote_sqlserver_identifier(value: &str) -> String {
+    format!("[{}]", value.replace(']', "]]"))
+}
+
+fn sqlserver_qualified_name(schema: Option<&str>, name: &str) -> String {
+    schema
+        .into_iter()
+        .chain(std::iter::once(name))
+        .filter(|part| !part.is_empty())
+        .map(quote_sqlserver_identifier)
         .collect::<Vec<_>>()
         .join(".")
 }
@@ -374,13 +420,26 @@ fn replace_sqlserver_create_with_create_or_alter(source: &str) -> String {
         .to_string()
 }
 
+fn build_sqlserver_alter_view_sql(schema: Option<&str>, name: &str, source: &str) -> String {
+    let existing_view_statement = Regex::new(r"(?i)^CREATE\s+(?:OR\s+ALTER\s+)?VIEW\s+|^ALTER\s+VIEW\s+").unwrap();
+    if existing_view_statement.is_match(source) {
+        return ensure_semicolon(&existing_view_statement.replace(source, "ALTER VIEW "));
+    }
+
+    format!("ALTER VIEW {} AS\n{}", sqlserver_qualified_name(schema, name), ensure_semicolon(source))
+}
+
 fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
     if value.eq_ignore_ascii_case("VIEW") {
         Some(ObjectSourceKind::View)
+    } else if value.eq_ignore_ascii_case("MATERIALIZED VIEW") || value.eq_ignore_ascii_case("MATERIALIZED_VIEW") {
+        Some(ObjectSourceKind::MaterializedView)
     } else if value.eq_ignore_ascii_case("PROCEDURE") {
         Some(ObjectSourceKind::Procedure)
     } else if value.eq_ignore_ascii_case("FUNCTION") {
         Some(ObjectSourceKind::Function)
+    } else if value.eq_ignore_ascii_case("SEQUENCE") {
+        Some(ObjectSourceKind::Sequence)
     } else if value.eq_ignore_ascii_case("PACKAGE") {
         Some(ObjectSourceKind::Package)
     } else if value.eq_ignore_ascii_case("PACKAGE BODY") || value.eq_ignore_ascii_case("PACKAGE_BODY") {
@@ -431,6 +490,48 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_view_save_rewrites_create_to_alter_view() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SqlServer,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dbo".to_string()),
+            name: "new_view".to_string(),
+            source: "CREATE VIEW dbo.new_view AS SELECT * FROM AppInfo".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "ALTER VIEW dbo.new_view AS SELECT * FROM AppInfo;");
+    }
+
+    #[test]
+    fn sqlserver_view_save_rewrites_create_or_alter_to_alter_view() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SqlServer,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dbo".to_string()),
+            name: "new_view".to_string(),
+            source: "CREATE OR ALTER VIEW dbo.new_view AS SELECT * FROM AppInfo;".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "ALTER VIEW dbo.new_view AS SELECT * FROM AppInfo;");
+    }
+
+    #[test]
+    fn sqlserver_view_body_saves_as_alter_view() {
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SqlServer,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dbo".to_string()),
+            name: "new_view".to_string(),
+            source: "SELECT\n  *\nFROM AppInfo".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "ALTER VIEW [dbo].[new_view] AS\nSELECT\n  *\nFROM AppInfo;");
+    }
+
+    #[test]
     fn postgres_view_body_opens_as_create_or_replace_view() {
         let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Postgres,
@@ -447,19 +548,21 @@ mod tests {
     }
 
     #[test]
-    fn opengauss_view_body_opens_as_create_or_replace_view() {
-        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
-            database_type: DatabaseType::OpenGauss,
-            object_type: ObjectSourceKind::View,
-            schema: Some("public".to_string()),
-            name: "active users".to_string(),
-            source: " SELECT id, name FROM users WHERE active ".to_string(),
-        })
-        .unwrap();
-        assert_eq!(
-            sql,
-            "CREATE OR REPLACE VIEW \"public\".\"active users\" AS\nSELECT id, name FROM users WHERE active;"
-        );
+    fn postgres_compatible_view_body_opens_as_create_or_replace_view() {
+        for database_type in [DatabaseType::OpenGauss, DatabaseType::Kwdb] {
+            let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+                database_type,
+                object_type: ObjectSourceKind::View,
+                schema: Some("public".to_string()),
+                name: "active users".to_string(),
+                source: " SELECT id, name FROM users WHERE active ".to_string(),
+            })
+            .unwrap();
+            assert_eq!(
+                sql,
+                "CREATE OR REPLACE VIEW \"public\".\"active users\" AS\nSELECT id, name FROM users WHERE active;"
+            );
+        }
     }
 
     #[test]
@@ -551,6 +654,42 @@ mod tests {
                 "DROP PROCEDURE IF EXISTS `app`.`refresh_cache`;",
             ]
         );
+    }
+
+    #[test]
+    fn sqlserver_view_source_opened_for_editing_shows_alter_view() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SqlServer,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dbo".to_string()),
+            name: "v_active_users".to_string(),
+            source: "CREATE VIEW dbo.v_active_users AS SELECT id, name FROM users WHERE active = 1;".to_string(),
+        });
+        assert_eq!(sql, "ALTER VIEW dbo.v_active_users AS SELECT id, name FROM users WHERE active = 1;");
+    }
+
+    #[test]
+    fn sqlserver_view_body_opened_for_editing_shows_alter_view() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SqlServer,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dbo".to_string()),
+            name: "new_view".to_string(),
+            source: "SELECT\n  *\nFROM AppInfo".to_string(),
+        });
+        assert_eq!(sql, "ALTER VIEW [dbo].[new_view] AS\nSELECT\n  *\nFROM AppInfo;");
+    }
+
+    #[test]
+    fn sqlserver_procedure_source_opened_for_editing_shows_create_or_alter() {
+        let sql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SqlServer,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("dbo".to_string()),
+            name: "usp_demo".to_string(),
+            source: "CREATE PROCEDURE dbo.usp_demo AS SELECT 1;".to_string(),
+        });
+        assert_eq!(sql, "CREATE OR ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
     }
 
     #[test]

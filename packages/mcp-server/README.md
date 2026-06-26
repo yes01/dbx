@@ -14,6 +14,9 @@ Or run directly:
 npx @dbx-app/mcp-server
 ```
 
+Requires Node.js 22.13.0 or newer.
+需要 Node.js 22.13.0 或更高版本。
+
 ## Claude Code Config
 
 ```json

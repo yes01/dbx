@@ -2,6 +2,8 @@ export type DatabaseType =
   | "mysql"
   | "postgres"
   | "sqlite"
+  | "rqlite"
+  | "turso"
   | "redis"
   | "duckdb"
   | "clickhouse"
@@ -9,8 +11,14 @@ export type DatabaseType =
   | "mongodb"
   | "oracle"
   | "elasticsearch"
+  | "qdrant"
+  | "milvus"
+  | "weaviate"
+  | "chromadb"
   | "doris"
   | "starrocks"
+  | "manticoresearch"
+  | "databend"
   | "redshift"
   | "dameng"
   | "gaussdb"
@@ -18,6 +26,7 @@ export type DatabaseType =
   | "highgo"
   | "vastbase"
   | "goldendb"
+  | "kwdb"
   | "yashandb"
   | "databricks"
   | "saphana"
@@ -27,11 +36,13 @@ export type DatabaseType =
   | "exasol"
   | "opengauss"
   | "oceanbase-oracle"
+  | "questdb"
   | "gbase"
   | "access"
   | "h2"
   | "snowflake"
   | "trino"
+  | "prestosql"
   | "hive"
   | "db2"
   | "informix"
@@ -42,14 +53,59 @@ export type DatabaseType =
   | "sundb"
   | "tdengine"
   | "xugu"
+  | "iotdb"
+  | "etcd"
+  | "zookeeper"
   | "iris"
-  | "jdbc";
+  | "influxdb"
+  | "jdbc"
+  | "mq"
+  | "nacos";
 
 export interface SqlSnippet {
   id: string;
   label: string;
   prefix: string;
   body: string;
+}
+
+export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column";
+
+export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "procedure" | "function" | "column" | "object";
+
+export type CompletionAssistantMatchMode = "prefix" | "contains";
+
+export interface CompletionAssistantRequest {
+  connection_id: string;
+  database: string;
+  schema?: string | null;
+  object_kinds?: CompletionAssistantObjectKind[];
+  mask?: string;
+  case_sensitive?: boolean;
+  global_search?: boolean;
+  max_results?: number | null;
+  search_in_comments?: boolean;
+  search_in_definitions?: boolean;
+  parent_schema?: string | null;
+  parent_name?: string | null;
+  match_mode?: CompletionAssistantMatchMode | null;
+}
+
+export interface CompletionAssistantCandidate {
+  name: string;
+  kind: CompletionAssistantCandidateKind;
+  database?: string | null;
+  schema?: string | null;
+  parent_schema?: string | null;
+  parent_name?: string | null;
+  comment?: string | null;
+  data_type?: string | null;
+}
+
+export interface CompletionAssistantResponse {
+  candidates: CompletionAssistantCandidate[];
+  incomplete: boolean;
+  fallback_used: boolean;
 }
 
 export interface ConnectionConfig {
@@ -65,28 +121,18 @@ export interface ConnectionConfig {
   password: string;
   database?: string;
   visible_databases?: string[];
+  visible_schemas?: Record<string, string[]>;
   attached_databases?: AttachedDatabaseConfig[];
   color?: string;
-  ssh_enabled?: boolean;
-  ssh_host?: string;
-  ssh_port?: number;
-  ssh_user?: string;
-  ssh_password?: string;
-  ssh_key_path?: string;
-  ssh_key_passphrase?: string;
-  ssh_expose_lan?: boolean;
-  ssh_connect_timeout_secs?: number;
-  ssh_tunnels?: SshTunnelConfig[];
+  transport_layers?: TransportLayerConfig[];
   connect_timeout_secs?: number;
   query_timeout_secs?: number;
-  proxy_enabled?: boolean;
-  proxy_type?: "socks5" | "http";
-  proxy_host?: string;
-  proxy_port?: number;
-  proxy_username?: string;
-  proxy_password?: string;
+  idle_timeout_secs?: number;
+  keepalive_interval_secs?: number;
   ssl?: boolean;
   ca_cert_path?: string;
+  client_cert_path?: string;
+  client_key_path?: string;
   sysdba?: boolean;
   oracle_connection_type?: "service_name" | "sid";
   connection_string?: string;
@@ -99,8 +145,16 @@ export interface ConnectionConfig {
   redis_sentinel_password?: string;
   redis_sentinel_tls?: boolean;
   redis_cluster_nodes?: string;
+  redis_key_separator?: string;
+  etcd_endpoints?: string;
+  gbase_server?: string;
+  informix_server?: string;
+  external_config?: unknown;
   one_time?: boolean;
+  read_only?: boolean;
 }
+
+export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig);
 
 export interface SshTunnelConfig {
   id: string;
@@ -114,6 +168,19 @@ export interface SshTunnelConfig {
   key_passphrase?: string;
   connect_timeout_secs?: number;
   expose_lan?: boolean;
+  use_ssh_agent?: boolean;
+  ssh_agent_sock_path?: string;
+}
+
+export interface ProxyTunnelConfig {
+  id: string;
+  name?: string;
+  enabled?: boolean;
+  proxy_type?: "socks5" | "http";
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
 }
 
 export interface AttachedDatabaseConfig {
@@ -147,6 +214,29 @@ export interface JdbcDriverInfo {
   name: string;
   path: string;
   size: number;
+  bundle_id?: string | null;
+}
+
+export interface JdbcMavenArtifactInfo {
+  group_id: string;
+  artifact_id: string;
+  version: string;
+  classifier: string;
+  extension: string;
+  file_name: string;
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+export interface JdbcMavenBundleInfo {
+  id: string;
+  coordinate: string;
+  scope: string;
+  repositories: string[];
+  installed_at: string;
+  path: string;
+  artifacts: JdbcMavenArtifactInfo[];
 }
 
 export interface JdbcPluginStatus {
@@ -164,6 +254,18 @@ export interface DatabaseInfo {
   name: string;
 }
 
+export interface SchemaInfo {
+  name: string;
+  comment?: string | null;
+}
+
+export interface LinkedServerInfo {
+  name: string;
+  product?: string | null;
+  provider?: string | null;
+  data_source?: string | null;
+}
+
 export interface TableInfo {
   name: string;
   table_type: string;
@@ -172,7 +274,7 @@ export interface TableInfo {
   parent_name?: string | null;
 }
 
-export type DatabaseObjectType = "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY";
+export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
 
 export interface ObjectInfo {
   name: string;
@@ -185,7 +287,14 @@ export interface ObjectInfo {
   parent_name?: string | null;
 }
 
-export type ObjectSourceKind = "VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY";
+export interface ObjectStatistics {
+  name: string;
+  schema?: string | null;
+  estimated_rows?: number | null;
+  total_bytes?: number | null;
+}
+
+export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
 
 export interface ObjectSource {
   name: string;
@@ -224,22 +333,101 @@ export interface ForeignKeyInfo {
   ref_schema?: string | null;
   ref_table: string;
   ref_column: string;
+  on_update?: string | null;
+  on_delete?: string | null;
 }
 
 export interface TriggerInfo {
   name: string;
   event: string;
   timing: string;
+  statement?: string | null;
+}
+
+export interface FunctionInfo {
+  name: string;
+  function_type: string;
+  data_type: string;
+  definition: string;
+  arguments: string;
+}
+
+export interface SequenceInfo {
+  name: string;
+  data_type: string;
+  start_value: string;
+  min_value: string;
+  max_value: string;
+  increment: string;
+  cycle: boolean;
+  last_value?: string | null;
+}
+
+export interface RuleInfo {
+  name: string;
+  table_name: string;
+  definition: string;
+}
+
+export interface OwnerInfo {
+  object_name: string;
+  object_type: string;
+  owner: string;
 }
 
 export interface QueryResult {
   columns: string[];
+  /**
+   * Database type name for each column, parallel to `columns`. Optional and may
+   * be shorter/empty when a driver cannot supply types (schemaless stores,
+   * fallback query paths, older backends). Consumers must tolerate gaps.
+   */
+  column_types?: string[];
+  /**
+   * Sortable for each column. Parallel to `columns`. Optional and may
+   * be shorter/empty when a driver cannot supply sortable information.
+   */
+  column_sortables?: boolean[];
   rows: (string | number | boolean | null)[][];
   affected_rows: number;
   execution_time_ms: number;
   truncated?: boolean;
   session_id?: string | null;
   has_more?: boolean;
+}
+
+export interface QueryResultRun {
+  id: string;
+  title: string;
+  sequence: number;
+  sql: string;
+  createdAt: number;
+  result?: QueryResult;
+  results?: QueryResult[];
+  activeResultIndex?: number;
+  resultBaseSql?: string;
+  resultSortedSql?: string;
+  resultSortColumn?: string;
+  resultSortColumnIndex?: number;
+  resultSortDirection?: "asc" | "desc";
+  resultSortMode?: "database" | "local";
+  resultLocalSortOriginalRows?: QueryResult["rows"];
+  orderByInput?: string;
+  resultPageSql?: string;
+  resultPageLimit?: number;
+  resultPageOffset?: number;
+  resultCountSql?: string;
+  resultTotalRowCount?: number;
+  resultTotalRowCountLoading?: boolean;
+  resultSessionId?: string;
+  resultAccessedAt?: number;
+  resultCacheKey?: string;
+  resultCacheState?: "memory" | "disk" | "missing";
+  resultEvicted?: boolean;
+  queryAnalysis?: QueryTab["queryAnalysis"];
+  querySourceColumns?: QueryTab["querySourceColumns"];
+  queryEditabilityReason?: QueryTab["queryEditabilityReason"];
+  tableMeta?: QueryTab["tableMeta"];
 }
 
 export interface SqlTextSpan {
@@ -271,11 +459,17 @@ export type TreeNodeType =
   | "connection"
   | "connection-group"
   | "database"
+  | "linked-server-root"
+  | "linked-server"
+  | "linked-server-catalog"
+  | "linked-server-schema"
   | "schema"
   | "table"
   | "view"
+  | "materialized_view"
   | "procedure"
   | "function"
+  | "sequence"
   | "package"
   | "package-body"
   | "group-columns"
@@ -284,21 +478,31 @@ export type TreeNodeType =
   | "group-triggers"
   | "group-tables"
   | "group-views"
+  | "group-materialized-views"
   | "group-procedures"
   | "group-functions"
+  | "group-sequences"
   | "group-packages"
   | "group-partitions"
   | "object-browser"
+  | "user-admin"
   | "saved-sql-root"
   | "saved-sql-folder"
   | "saved-sql-file"
+  | "load-more"
   | "column"
   | "index"
   | "fkey"
   | "trigger"
   | "redis-db"
+  | "mq-tenant"
+  | "nacos-namespace"
+  | "etcd-root"
+  | "zookeeper-root"
   | "mongo-db"
-  | "mongo-collection";
+  | "mongo-collection"
+  | "vector-collection"
+  | "elasticsearch-index";
 
 export interface ConnectionGroup {
   id: string;
@@ -306,9 +510,7 @@ export interface ConnectionGroup {
   collapsed: boolean;
 }
 
-export type SidebarOrderEntry =
-  | { type: "group"; id: string; connectionIds: string[] }
-  | { type: "connection"; id: string };
+export type SidebarOrderEntry = { type: "group"; id: string; children?: SidebarOrderEntry[]; connectionIds?: string[] } | { type: "connection"; id: string };
 
 export interface SidebarLayout {
   groups: ConnectionGroup[];
@@ -325,17 +527,33 @@ export interface TreeNode {
   pinned?: boolean;
   connectionId?: string;
   database?: string;
+  linkedServer?: string;
+  linkedCatalog?: string;
+  linkedSchema?: string;
+  mqTenant?: string;
+  nacosNamespace?: string;
+  nacosNamespaceName?: string;
   schema?: string;
   tableName?: string;
+  tableType?: string;
   comment?: string | null;
   objectCount?: number;
   loadedKeyCount?: number;
   totalKeyCount?: number;
+  partitionParentSchema?: string;
+  partitionParentName?: string;
   hiddenChildren?: TreeNode[];
   savedSqlId?: string;
   savedSqlFolderId?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | VectorCollectionMeta;
+  loadMore?: {
+    parentId: string;
+    offset: number;
+    pageSize: number;
+  };
 }
+
+export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
 
 export interface QueryTab {
   id: string;
@@ -346,34 +564,56 @@ export interface QueryTab {
   schema?: string;
   sql: string;
   savedSqlId?: string;
+  externalSqlPath?: string;
+  originalSql?: string;
   lastExecutedSql?: string;
   resultBaseSql?: string;
   resultSortedSql?: string;
   resultSortColumn?: string;
   resultSortColumnIndex?: number;
   resultSortDirection?: "asc" | "desc";
+  resultSortMode?: "database" | "local";
+  resultLocalSortOriginalRows?: QueryResult["rows"];
   orderByInput?: string;
   resultPageSql?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
   resultCountSql?: string;
   resultTotalRowCount?: number;
+  resultTotalRowCountLoading?: boolean;
   resultSessionId?: string;
   resultAccessedAt?: number;
+  resultCacheKey?: string;
+  resultCacheState?: "memory" | "disk" | "missing";
   pinned?: boolean;
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
+  resultRuns?: QueryResultRun[];
+  activeResultRunId?: string;
+  resultAutoSave?: boolean;
   explainPlan?: import("@/lib/explainPlan").ParsedExplainPlan;
   explainError?: string;
   explainSql?: string;
   lastExplainedSql?: string;
   isExecuting: boolean;
   isCancelling?: boolean;
+  queryExecutionStartedAt?: number;
+  editorViewport?: {
+    scrollTop: number;
+    scrollLeft: number;
+  };
+  editorSelection?: {
+    anchor: number;
+    head: number;
+  };
   executionId?: string;
   isExplaining?: boolean;
   explainExecutionId?: string;
-  mode: "data" | "query" | "redis" | "mongo" | "objects" | "structure";
+  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users";
+  mqTenant?: string;
+  nacosNamespace?: string;
+  nacosNamespaceName?: string;
   structureTableName?: string;
   objectBrowser?: {
     schema?: string;
@@ -387,9 +627,12 @@ export interface QueryTab {
   tableMeta?: {
     schema?: string;
     tableName: string;
+    tableType?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
   };
+  tableMetaUpdatedAt?: number;
+  tableInfoTab?: TableInfoTab;
   queryAnalysis?: {
     schema?: string;
     schemaQuoted?: boolean;
@@ -405,27 +648,18 @@ export interface QueryTab {
     }[];
   };
   querySourceColumns?: Array<string | undefined>;
-  queryEditabilityReason?:
-    | "not-select"
-    | "cte"
-    | "set-operation"
-    | "aggregation"
-    | "external-source"
-    | "complex-source"
-    | "computed-columns"
-    | "no-table"
-    | "no-primary-key"
-    | "primary-key-not-returned"
-    | "aliased-columns"
-    | "metadata-unavailable";
+  queryEditabilityReason?: "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
   resultEvicted?: boolean;
   whereInput?: string;
+  previewSql?: string;
 }
 
 export interface SavedSqlFolder {
   id: string;
   connectionId: string;
+  parentFolderId?: string;
   name: string;
+  orderIndex?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -438,6 +672,9 @@ export interface SavedSqlFile {
   database: string;
   schema?: string;
   sql: string;
+  orderIndex?: number;
+  openCount?: number;
+  openedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -445,4 +682,14 @@ export interface SavedSqlFile {
 export interface SavedSqlLibrary {
   folders: SavedSqlFolder[];
   files: SavedSqlFile[];
+}
+
+export interface VectorCollectionMeta {
+  dimension?: number;
+}
+
+export interface CollectionInfo {
+  name: string;
+  id: string;
+  dimension?: number;
 }

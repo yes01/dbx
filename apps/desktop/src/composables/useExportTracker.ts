@@ -17,14 +17,24 @@ const taskMap = reactive<Map<string, ExportTask>>(new Map());
 export function useExportTracker() {
   const tasks = computed(() => Array.from(taskMap.values()));
 
-  const activeCount = computed(
-    () => tasks.value.filter((t) => t.status === "Running" || t.status === "Writing").length,
-  );
+  const activeCount = computed(() => tasks.value.filter((t) => t.status === "Running" || t.status === "Writing").length);
 
   const hasActive = computed(() => activeCount.value > 0);
 
+  function generateUUID() {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) {
+      return crypto.randomUUID();
+    }
+    let buffer = new Uint8Array(16);
+    crypto.getRandomValues(buffer);
+    buffer[6] = (buffer[6] & 0x0f) | 0x40;
+    return Array.from(buffer, (b) => b.toString(16).padStart(2, "0"))
+      .join("")
+      .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
+  }
+
   function addTask(tableName: string, format: "csv" | "xlsx", filePath: string): ExportTask {
-    const exportId = crypto.randomUUID();
+    const exportId = generateUUID();
     const task = reactive<ExportTask>({
       exportId,
       tableName,

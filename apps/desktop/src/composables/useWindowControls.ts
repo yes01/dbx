@@ -6,12 +6,16 @@ export function shouldReserveMacTrafficLightInset(isMac: boolean, isFullscreen: 
   return isDesktop && isMac && !isFullscreen;
 }
 
+export function shouldShowWindowControls(isMac: boolean, isDesktop = true): boolean {
+  return isDesktop && !isMac;
+}
+
 export function useWindowControls() {
   const isMaximized = ref(false);
   const isFullscreen = ref(false);
   const isMac = isMacOS();
   const isDesktop = isTauriRuntime();
-  const showControls = isDesktop && !isMac;
+  const showControls = shouldShowWindowControls(isMac, isDesktop);
 
   let unlisten: (() => void) | null = null;
 

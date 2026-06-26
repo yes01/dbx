@@ -1,9 +1,6 @@
 import { strict as assert } from "node:assert";
-import test from "node:test";
-import {
-  filterSidebarSearchRootsByConnectionState,
-  filterSidebarTree,
-} from "../../apps/desktop/src/lib/sidebarSearchTree.ts";
+import { test } from "vitest";
+import { filterSidebarSearchRootsByConnectionState, filterSidebarTree } from "../../apps/desktop/src/lib/sidebarSearchTree.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 test("preserves loaded table children when the table itself matches search", () => {
@@ -147,4 +144,30 @@ test("connection search results stay visible before connecting", () => {
     filtered.map((node) => node.id),
     ["conn:1"],
   );
+});
+
+test("connection search copies do not keep stale loading state", () => {
+  const nodes: TreeNode[] = [
+    {
+      id: "conn:1",
+      label: "Orders local",
+      type: "connection",
+      connectionId: "conn:1",
+      isLoading: true,
+      children: [
+        {
+          id: "conn:1:db",
+          label: "orders",
+          type: "database",
+          connectionId: "conn:1",
+          database: "orders",
+        },
+      ],
+    },
+  ];
+
+  const filtered = filterSidebarTree(nodes, "orders", new Set());
+
+  assert.equal(filtered[0]?.type, "connection");
+  assert.equal(filtered[0]?.isLoading, false);
 });

@@ -1,50 +1,18 @@
-import type { ObjectInfo, TreeNode } from "@/types/database";
-import { buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes } from "@/lib/tableTree";
+import type { TreeNode } from "@/types/database";
+import { sortSidebarNames } from "@/lib/databaseTree";
 
 export const SQLSERVER_DEFAULT_SCHEMA = "dbo";
 
-function isDefaultSchema(schema: string): boolean {
-  return schema.toLowerCase() === SQLSERVER_DEFAULT_SCHEMA;
-}
-
-export function buildSqlServerDatabaseTreeNodes(
-  connectionId: string,
-  database: string,
-  schemas: string[],
-  defaultSchemaObjects: ObjectInfo[],
-  options: { simpleObjectDisplay?: boolean } = {},
-): TreeNode[] {
+export function buildSqlServerDatabaseTreeNodes(connectionId: string, database: string, schemas: string[]): TreeNode[] {
   const databaseNodeId = `${connectionId}:${database}`;
-  const defaultSchema = schemas.find(isDefaultSchema) || SQLSERVER_DEFAULT_SCHEMA;
-
-  const defaultObjectNodes = options.simpleObjectDisplay
-    ? buildSimpleObjectTreeNodes({
-        nodeId: databaseNodeId,
-        connectionId,
-        database,
-        schema: defaultSchema,
-        objects: defaultSchemaObjects,
-      })
-    : buildGroupedObjectTreeNodes({
-        nodeId: databaseNodeId,
-        connectionId,
-        database,
-        schema: defaultSchema,
-        objects: defaultSchemaObjects,
-      });
-
-  const schemaNodes = schemas
-    .filter((schema) => !isDefaultSchema(schema))
-    .map((schema) => ({
-      id: `${databaseNodeId}:${schema}`,
-      label: schema,
-      type: "schema" as const,
-      connectionId,
-      database,
-      schema,
-      isExpanded: false,
-      children: [],
-    }));
-
-  return [...defaultObjectNodes, ...schemaNodes];
+  return sortSidebarNames(schemas).map((schema) => ({
+    id: `${databaseNodeId}:${schema}`,
+    label: schema,
+    type: "schema" as const,
+    connectionId,
+    database,
+    schema,
+    isExpanded: false,
+    children: [],
+  }));
 }

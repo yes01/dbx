@@ -6,26 +6,72 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::ai::{AiChatMessage, AiConversation};
+use crate::connection_secrets::{
+    MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
+    MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX,
+};
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{HistoryEntry, MAX_HISTORY};
-use crate::models::connection::ConnectionConfig;
+use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
+const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 
 pub struct Storage {
     db: SqliteHandle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabRuntimeCacheEntry {
+    pub key: String,
+    pub payload: Vec<u8>,
+    pub row_count: i64,
+    pub column_count: i64,
+    pub byte_size: i64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopSettings {
     pub show_tray_icon: bool,
     pub icon_theme: DesktopIconTheme,
+    #[serde(default)]
+    pub quit_on_close: bool,
+    #[serde(default)]
+    pub close_action_prompted: bool,
+    #[serde(default)]
+    pub debug_logging_enabled: bool,
+    #[serde(default)]
+    pub saved_sql_sync_dir: Option<String>,
+    #[serde(default)]
+    pub driver_store_dir: Option<String>,
+    #[serde(default)]
+    pub plugin_store_dir: Option<String>,
+    #[serde(default)]
+    pub agent_store_dir: Option<String>,
+    #[serde(default = "default_sidebar_table_page_size")]
+    pub sidebar_table_page_size: usize,
+}
+
+fn default_sidebar_table_page_size() -> usize {
+    1000
 }
 
 impl Default for DesktopSettings {
     fn default() -> Self {
-        Self { show_tray_icon: true, icon_theme: DesktopIconTheme::Default }
+        Self {
+            show_tray_icon: true,
+            icon_theme: DesktopIconTheme::Default,
+            quit_on_close: false,
+            close_action_prompted: false,
+            debug_logging_enabled: false,
+            saved_sql_sync_dir: None,
+            driver_store_dir: None,
+            plugin_store_dir: None,
+            agent_store_dir: None,
+            sidebar_table_page_size: default_sidebar_table_page_size(),
+        }
     }
 }
 
@@ -99,10 +145,36 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         payload_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )",
+    "CREATE TABLE IF NOT EXISTS tab_runtime_cache (
+        cache_key TEXT PRIMARY KEY,
+        payload BLOB NOT NULL,
+        row_count INTEGER NOT NULL DEFAULT 0,
+        column_count INTEGER NOT NULL DEFAULT 0,
+        byte_size INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS mq_token_records (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        algorithm TEXT NOT NULL,
+        token_fingerprint TEXT NOT NULL,
+        scope_json TEXT,
+        actions_json TEXT NOT NULL DEFAULT '[]',
+        expires_at TEXT,
+        created_at TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT ''
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_mq_token_records_connection_subject
+        ON mq_token_records (connection_id, subject, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_mq_token_records_fingerprint
+        ON mq_token_records (token_fingerprint)",
     "CREATE TABLE IF NOT EXISTS saved_sql_folders (
         id TEXT PRIMARY KEY,
         connection_id TEXT NOT NULL,
+        parent_folder_id TEXT,
         name TEXT NOT NULL DEFAULT '',
+        order_index INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
@@ -114,6 +186,9 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         database_name TEXT NOT NULL DEFAULT '',
         schema_name TEXT,
         sql_text TEXT NOT NULL DEFAULT '',
+        order_index INTEGER NOT NULL DEFAULT 0,
+        open_count INTEGER NOT NULL DEFAULT 0,
+        opened_at TEXT,
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
@@ -134,6 +209,7 @@ impl Storage {
                 conn.execute(statement, []).map_err(|e| e.to_string())?;
             }
             ensure_history_columns_sync(conn)?;
+            ensure_saved_sql_columns_sync(conn)?;
             Ok(())
         })
     }
@@ -175,6 +251,39 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
+    const FOLDER_COLUMNS: &[(&str, &str)] =
+        &[("parent_folder_id", "TEXT"), ("order_index", "INTEGER NOT NULL DEFAULT 0")];
+    const FILE_COLUMNS: &[(&str, &str)] = &[
+        ("order_index", "INTEGER NOT NULL DEFAULT 0"),
+        ("open_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("opened_at", "TEXT"),
+    ];
+
+    ensure_table_columns(conn, "saved_sql_folders", FOLDER_COLUMNS)?;
+    ensure_table_columns(conn, "saved_sql_files", FILE_COLUMNS)?;
+    Ok(())
+}
+
+fn ensure_table_columns(conn: &Connection, table_name: &str, columns: &[(&str, &str)]) -> Result<(), String> {
+    let mut stmt =
+        conn.prepare(&format!("SELECT name FROM pragma_table_info('{table_name}')")).map_err(|e| e.to_string())?;
+    let existing = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    for (name, definition) in columns {
+        if existing.contains(*name) {
+            continue;
+        }
+        conn.execute(&format!("ALTER TABLE {table_name} ADD COLUMN {name} {definition}"), [])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn ssh_tunnel_secret_segment(index: usize, hop: &crate::models::connection::SshTunnelConfig) -> String {
     if hop.id.trim().is_empty() {
         index.to_string()
@@ -191,11 +300,65 @@ fn ssh_tunnel_key_passphrase_key(index: usize, hop: &crate::models::connection::
     format!("{}{}.key_passphrase", SSH_TUNNEL_SECRET_PREFIX, ssh_tunnel_secret_segment(index, hop))
 }
 
-fn scrub_ssh_tunnel_secrets(config: &mut ConnectionConfig) {
-    for hop in &mut config.ssh_tunnels {
-        hop.password.clear();
-        hop.key_passphrase.clear();
+fn transport_layer_secret_segment(index: usize, layer: &TransportLayerConfig) -> String {
+    let id = layer.id().trim();
+    if id.is_empty() {
+        index.to_string()
+    } else {
+        id.to_string()
     }
+}
+
+fn transport_layer_ssh_password_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.ssh_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
+fn transport_layer_ssh_key_passphrase_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.ssh_key_passphrase", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
+fn transport_layer_proxy_password_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.proxy_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
+fn scrub_transport_layer_secrets(config: &mut ConnectionConfig) {
+    for layer in &mut config.transport_layers {
+        match layer {
+            TransportLayerConfig::Ssh(ssh) => {
+                ssh.password.clear();
+                ssh.key_passphrase.clear();
+            }
+            TransportLayerConfig::Proxy(proxy) => {
+                proxy.password.clear();
+            }
+        }
+    }
+}
+
+fn scrub_mq_auth_secrets(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::MessageQueue {
+        return;
+    }
+    let Some(auth) = mq_auth_object_mut(config.external_config.as_mut()) else {
+        return;
+    };
+    match mq_auth_kind(auth) {
+        Some("token") => scrub_json_secret(auth, "token"),
+        Some("basic") => scrub_json_secret(auth, "password"),
+        Some(kind) if is_api_key_auth_kind(kind) => scrub_json_secret(auth, "value"),
+        Some("oauth2") => scrub_json_secret(auth, "clientSecret"),
+        _ => {}
+    }
+}
+
+fn scrub_mq_token_signing_secret(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::MessageQueue {
+        return;
+    }
+    let Some(signing) = mq_token_signing_object_mut(config.external_config.as_mut()) else {
+        return;
+    };
+    scrub_json_secret(signing, "key");
 }
 
 fn delete_secret_prefix_in_tx(
@@ -251,44 +414,61 @@ impl Storage {
         .await
     }
 
-    pub async fn load_history_entries(&self, limit: usize, offset: usize) -> Result<Vec<HistoryEntry>, String> {
+    pub async fn load_history_entries(
+        &self,
+        limit: usize,
+        offset: usize,
+        activity_kind: Option<String>,
+    ) -> Result<Vec<HistoryEntry>, String> {
         self.with_conn(move |conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
-                     error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
-                     FROM history ORDER BY executed_at DESC LIMIT ?1 OFFSET ?2",
-                )
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map(params![limit as i64, offset as i64], |row| {
-                    Ok(HistoryEntry {
-                        id: row.get(0)?,
-                        connection_name: row.get(1)?,
-                        database: row.get(2)?,
-                        sql: row.get(3)?,
-                        executed_at: row.get(4)?,
-                        execution_time_ms: row.get::<_, i64>(5)? as u128,
-                        success: row.get(6)?,
-                        error: row.get(7)?,
-                        activity_kind: {
-                            let value: String = row.get(8)?;
-                            if value.is_empty() {
-                                "query".to_string()
-                            } else {
-                                value
-                            }
-                        },
-                        connection_id: row.get(9)?,
-                        operation: row.get(10)?,
-                        target: row.get(11)?,
-                        affected_rows: row.get(12)?,
-                        rollback_sql: row.get(13)?,
-                        details_json: row.get(14)?,
-                    })
+            let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<HistoryEntry> {
+                Ok(HistoryEntry {
+                    id: row.get(0)?,
+                    connection_name: row.get(1)?,
+                    database: row.get(2)?,
+                    sql: row.get(3)?,
+                    executed_at: row.get(4)?,
+                    execution_time_ms: row.get::<_, i64>(5)? as u128,
+                    success: row.get(6)?,
+                    error: row.get(7)?,
+                    activity_kind: {
+                        let value: String = row.get(8)?;
+                        if value.is_empty() { "query".to_string() } else { value }
+                    },
+                    connection_id: row.get(9)?,
+                    operation: row.get(10)?,
+                    target: row.get(11)?,
+                    affected_rows: row.get(12)?,
+                    rollback_sql: row.get(13)?,
+                    details_json: row.get(14)?,
                 })
-                .map_err(|e| e.to_string())?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            };
+
+            if let Some(kind) = activity_kind {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
+                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                         FROM history WHERE activity_kind = ?1 ORDER BY executed_at DESC LIMIT ?2 OFFSET ?3",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(params![kind, limit as i64, offset as i64], map_row)
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            } else {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, connection_name, database, sql_text, executed_at, execution_time_ms, success, \
+                         error, activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json \
+                         FROM history ORDER BY executed_at DESC LIMIT ?1 OFFSET ?2",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(params![limit as i64, offset as i64], map_row)
+                    .map_err(|e| e.to_string())?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            }
         })
         .await
     }
@@ -383,6 +563,51 @@ impl Storage {
             "icon_theme".to_string(),
             serde_json::to_value(desktop_settings.icon_theme).map_err(|e| e.to_string())?,
         );
+        settings.insert("quit_on_close".to_string(), serde_json::Value::Bool(desktop_settings.quit_on_close));
+        settings.insert(
+            "close_action_prompted".to_string(),
+            serde_json::Value::Bool(desktop_settings.close_action_prompted),
+        );
+        settings.insert(
+            "debug_logging_enabled".to_string(),
+            serde_json::Value::Bool(desktop_settings.debug_logging_enabled),
+        );
+        match desktop_settings.saved_sql_sync_dir.as_ref().filter(|path| !path.trim().is_empty()) {
+            Some(path) => {
+                settings.insert("saved_sql_sync_dir".to_string(), serde_json::Value::String(path.clone()));
+            }
+            None => {
+                settings.remove("saved_sql_sync_dir");
+            }
+        }
+        match desktop_settings.driver_store_dir.as_ref().filter(|path| !path.trim().is_empty()) {
+            Some(path) => {
+                settings.insert("driver_store_dir".to_string(), serde_json::Value::String(path.clone()));
+            }
+            None => {
+                settings.remove("driver_store_dir");
+            }
+        }
+        match desktop_settings.plugin_store_dir.as_ref().filter(|path| !path.trim().is_empty()) {
+            Some(path) => {
+                settings.insert("plugin_store_dir".to_string(), serde_json::Value::String(path.clone()));
+            }
+            None => {
+                settings.remove("plugin_store_dir");
+            }
+        }
+        match desktop_settings.agent_store_dir.as_ref().filter(|path| !path.trim().is_empty()) {
+            Some(path) => {
+                settings.insert("agent_store_dir".to_string(), serde_json::Value::String(path.clone()));
+            }
+            None => {
+                settings.remove("agent_store_dir");
+            }
+        }
+        settings.insert(
+            "sidebar_table_page_size".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(desktop_settings.sidebar_table_page_size)),
+        );
         self.save_app_settings_json(&settings).await
     }
 
@@ -395,6 +620,47 @@ impl Storage {
                 .or_else(|| settings.get("run_in_background").and_then(|value| value.as_bool()))
                 .unwrap_or_else(|| DesktopSettings::default().show_tray_icon),
             icon_theme: DesktopIconTheme::from_settings_value(settings.get("icon_theme")),
+            quit_on_close: settings
+                .get("quit_on_close")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_else(|| DesktopSettings::default().quit_on_close),
+            close_action_prompted: settings
+                .get("close_action_prompted")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_else(|| DesktopSettings::default().close_action_prompted),
+            debug_logging_enabled: settings
+                .get("debug_logging_enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_else(|| DesktopSettings::default().debug_logging_enabled),
+            saved_sql_sync_dir: settings
+                .get("saved_sql_sync_dir")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            driver_store_dir: settings
+                .get("driver_store_dir")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            plugin_store_dir: settings
+                .get("plugin_store_dir")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            agent_store_dir: settings
+                .get("agent_store_dir")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            sidebar_table_page_size: settings
+                .get("sidebar_table_page_size")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as usize)
+                .unwrap_or_else(|| DesktopSettings::default().sidebar_table_page_size),
         })
     }
 
@@ -548,12 +814,11 @@ impl Storage {
                 let config_id = config.id.clone();
                 let mut sanitized = config;
                 sanitized.password = String::new();
-                sanitized.ssh_password = String::new();
-                sanitized.ssh_key_passphrase = String::new();
-                scrub_ssh_tunnel_secrets(&mut sanitized);
-                sanitized.proxy_password = String::new();
+                scrub_transport_layer_secrets(&mut sanitized);
                 sanitized.redis_sentinel_password = String::new();
                 sanitized.connection_string = None;
+                scrub_mq_auth_secrets(&mut sanitized);
+                scrub_mq_token_signing_secret(&mut sanitized);
                 let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
                 tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
@@ -585,32 +850,49 @@ impl Storage {
                 let config_id = config.id.clone();
                 let mut sanitized = config.clone();
                 sanitized.password = String::new();
-                sanitized.ssh_password = String::new();
-                sanitized.ssh_key_passphrase = String::new();
-                scrub_ssh_tunnel_secrets(&mut sanitized);
-                sanitized.proxy_password = String::new();
+                scrub_transport_layer_secrets(&mut sanitized);
                 sanitized.redis_sentinel_password = String::new();
                 sanitized.connection_string = None;
+                scrub_mq_auth_secrets(&mut sanitized);
+                scrub_mq_token_signing_secret(&mut sanitized);
                 let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
                 tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
                     .map_err(|e| e.to_string())?;
 
                 persist_secret_in_tx(&tx, &config.id, "password", &config.password)?;
-                persist_secret_in_tx(&tx, &config.id, "ssh_password", &config.ssh_password)?;
-                persist_secret_in_tx(&tx, &config.id, "ssh_key_passphrase", &config.ssh_key_passphrase)?;
-                delete_secret_prefix_in_tx(&tx, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
-                for (index, hop) in config.ssh_tunnels.iter().enumerate() {
-                    persist_secret_in_tx(&tx, &config.id, &ssh_tunnel_password_key(index, hop), &hop.password)?;
-                    persist_secret_in_tx(
-                        &tx,
-                        &config.id,
-                        &ssh_tunnel_key_passphrase_key(index, hop),
-                        &hop.key_passphrase,
-                    )?;
+                delete_secret_prefix_in_tx(&tx, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
+                for (index, layer) in config.transport_layers.iter().enumerate() {
+                    match layer {
+                        TransportLayerConfig::Ssh(ssh) => {
+                            persist_secret_in_tx(
+                                &tx,
+                                &config.id,
+                                &transport_layer_ssh_password_key(index, layer),
+                                &ssh.password,
+                            )?;
+                            persist_secret_in_tx(
+                                &tx,
+                                &config.id,
+                                &transport_layer_ssh_key_passphrase_key(index, layer),
+                                &ssh.key_passphrase,
+                            )?;
+                        }
+                        TransportLayerConfig::Proxy(proxy) => {
+                            persist_secret_in_tx(
+                                &tx,
+                                &config.id,
+                                &transport_layer_proxy_password_key(index, layer),
+                                &proxy.password,
+                            )?;
+                        }
+                    }
                 }
-                persist_secret_in_tx(&tx, &config.id, "proxy_password", &config.proxy_password)?;
                 persist_secret_in_tx(&tx, &config.id, "redis_sentinel_password", &config.redis_sentinel_password)?;
+                persist_secret_in_tx(&tx, &config.id, "ssh_password", "")?;
+                persist_secret_in_tx(&tx, &config.id, "ssh_key_passphrase", "")?;
+                persist_secret_in_tx(&tx, &config.id, "proxy_password", "")?;
+                delete_secret_prefix_in_tx(&tx, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
                 if let Some(cs) = &config.connection_string {
                     persist_secret_in_tx(&tx, &config.id, "connection_string", cs)?;
                 } else {
@@ -620,6 +902,8 @@ impl Storage {
                     )
                     .map_err(|e| e.to_string())?;
                 }
+                persist_mq_auth_secrets_in_tx(&tx, &config)?;
+                persist_mq_token_signing_secret_in_tx(&tx, &config)?;
             }
 
             if configs.is_empty() {
@@ -651,19 +935,119 @@ impl Storage {
         for (id, json) in rows {
             let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
             config.password = self.get_secret(&id, "password").await?.unwrap_or_default();
-            config.ssh_password = self.get_secret(&id, "ssh_password").await?.unwrap_or_default();
-            config.ssh_key_passphrase = self.get_secret(&id, "ssh_key_passphrase").await?.unwrap_or_default();
-            for (index, hop) in config.ssh_tunnels.iter_mut().enumerate() {
-                hop.password = self.get_secret(&id, &ssh_tunnel_password_key(index, hop)).await?.unwrap_or_default();
-                hop.key_passphrase =
-                    self.get_secret(&id, &ssh_tunnel_key_passphrase_key(index, hop)).await?.unwrap_or_default();
+            for index in 0..config.transport_layers.len() {
+                let layer_for_key = config.transport_layers[index].clone();
+                match &mut config.transport_layers[index] {
+                    TransportLayerConfig::Ssh(ssh) => {
+                        ssh.password = self
+                            .get_secret(&id, &transport_layer_ssh_password_key(index, &layer_for_key))
+                            .await?
+                            .or(match &layer_for_key {
+                                TransportLayerConfig::Ssh(layer) if layer.id == "legacy" => {
+                                    self.get_secret(&id, "ssh_password").await?
+                                }
+                                TransportLayerConfig::Ssh(layer) => {
+                                    self.get_secret(&id, &ssh_tunnel_password_key(index, layer)).await?
+                                }
+                                TransportLayerConfig::Proxy(_) => None,
+                            })
+                            .unwrap_or_default();
+                        ssh.key_passphrase = self
+                            .get_secret(&id, &transport_layer_ssh_key_passphrase_key(index, &layer_for_key))
+                            .await?
+                            .or(match &layer_for_key {
+                                TransportLayerConfig::Ssh(layer) if layer.id == "legacy" => {
+                                    self.get_secret(&id, "ssh_key_passphrase").await?
+                                }
+                                TransportLayerConfig::Ssh(layer) => {
+                                    self.get_secret(&id, &ssh_tunnel_key_passphrase_key(index, layer)).await?
+                                }
+                                TransportLayerConfig::Proxy(_) => None,
+                            })
+                            .unwrap_or_default();
+                    }
+                    TransportLayerConfig::Proxy(proxy) => {
+                        proxy.password = self
+                            .get_secret(&id, &transport_layer_proxy_password_key(index, &layer_for_key))
+                            .await?
+                            .or(match &layer_for_key {
+                                TransportLayerConfig::Proxy(layer) if layer.id == "legacy-proxy" => {
+                                    self.get_secret(&id, "proxy_password").await?
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                    }
+                }
             }
-            config.proxy_password = self.get_secret(&id, "proxy_password").await?.unwrap_or_default();
             config.redis_sentinel_password = self.get_secret(&id, "redis_sentinel_password").await?.unwrap_or_default();
             config.connection_string = self.get_secret(&id, "connection_string").await?;
+            let needs_mq_auth_rewrite = self.hydrate_mq_auth_secrets(&id, &mut config).await?;
+            let needs_mq_token_signing_rewrite = self.hydrate_mq_token_signing_secret(&id, &mut config).await?;
+            let needs_mq_secret_rewrite = needs_mq_auth_rewrite || needs_mq_token_signing_rewrite;
+            if needs_mq_secret_rewrite {
+                let mut sanitized = config.clone().canonicalized();
+                scrub_mq_auth_secrets(&mut sanitized);
+                scrub_mq_token_signing_secret(&mut sanitized);
+                let sanitized_json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
+                let update_id = id.clone();
+                self.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE connections SET config_json = ?1 WHERE id = ?2",
+                        params![sanitized_json, update_id],
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                })
+                .await?;
+            }
             configs.push(config.canonicalized());
         }
         Ok(configs)
+    }
+
+    async fn hydrate_mq_auth_secrets(
+        &self,
+        connection_id: &str,
+        config: &mut ConnectionConfig,
+    ) -> Result<bool, String> {
+        if config.db_type != DatabaseType::MessageQueue {
+            return Ok(false);
+        }
+        let Some(auth) = mq_auth_object_mut(config.external_config.as_mut()) else {
+            return Ok(false);
+        };
+
+        let needs_rewrite = match mq_auth_kind(auth) {
+            Some("token") => hydrate_mq_json_secret(self, connection_id, MQ_AUTH_TOKEN_KEY, auth, "token").await?,
+            Some("basic") => {
+                hydrate_mq_json_secret(self, connection_id, MQ_AUTH_PASSWORD_KEY, auth, "password").await?
+            }
+            Some(kind) if is_api_key_auth_kind(kind) => {
+                hydrate_mq_json_secret(self, connection_id, MQ_AUTH_API_KEY_VALUE_KEY, auth, "value").await?
+            }
+            Some("oauth2") => {
+                hydrate_mq_json_secret(self, connection_id, MQ_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret").await?
+            }
+            _ => false,
+        };
+
+        Ok(needs_rewrite)
+    }
+
+    async fn hydrate_mq_token_signing_secret(
+        &self,
+        connection_id: &str,
+        config: &mut ConnectionConfig,
+    ) -> Result<bool, String> {
+        if config.db_type != DatabaseType::MessageQueue {
+            return Ok(false);
+        }
+        let Some(signing) = mq_token_signing_object_mut(config.external_config.as_mut()) else {
+            return Ok(false);
+        };
+
+        hydrate_mq_json_secret(self, connection_id, MQ_TOKEN_SIGNING_KEY, signing, "key").await
     }
 }
 
@@ -679,9 +1063,17 @@ impl Storage {
 
             for folder in &library.folders {
                 tx.execute(
-                    "INSERT INTO saved_sql_folders (id, connection_id, name, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?)",
-                    params![folder.id, folder.connection_id, folder.name, folder.created_at, folder.updated_at],
+                    "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        folder.id,
+                        folder.connection_id,
+                        folder.parent_folder_id,
+                        folder.name,
+                        folder.order_index,
+                        folder.created_at,
+                        folder.updated_at
+                    ],
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -689,8 +1081,8 @@ impl Storage {
             for file in &library.files {
                 tx.execute(
                     "INSERT INTO saved_sql_files \
-                     (id, connection_id, folder_id, name, database_name, schema_name, sql_text, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         file.id,
                         file.connection_id,
@@ -699,6 +1091,9 @@ impl Storage {
                         file.database,
                         file.schema,
                         file.sql,
+                        file.order_index,
+                        file.open_count,
+                        file.opened_at,
                         file.created_at,
                         file.updated_at
                     ],
@@ -715,8 +1110,8 @@ impl Storage {
         self.with_conn(|conn| {
             let mut folder_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, name, created_at, updated_at \
-                     FROM saved_sql_folders ORDER BY connection_id, name COLLATE NOCASE",
+                    "SELECT id, connection_id, parent_folder_id, name, order_index, created_at, updated_at \
+                     FROM saved_sql_folders ORDER BY COALESCE(parent_folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
             let folders = folder_stmt
@@ -724,9 +1119,11 @@ impl Storage {
                     Ok(SavedSqlFolder {
                         id: row.get(0)?,
                         connection_id: row.get(1)?,
-                        name: row.get(2)?,
-                        created_at: row.get(3)?,
-                        updated_at: row.get(4)?,
+                        parent_folder_id: row.get(2)?,
+                        name: row.get(3)?,
+                        order_index: row.get(4)?,
+                        created_at: row.get(5)?,
+                        updated_at: row.get(6)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -735,8 +1132,8 @@ impl Storage {
 
             let mut file_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, schema_name, sql_text, created_at, updated_at \
-                     FROM saved_sql_files ORDER BY connection_id, folder_id, name COLLATE NOCASE",
+                    "SELECT id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                     FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
             let files = file_stmt
@@ -749,8 +1146,11 @@ impl Storage {
                         database: row.get(4)?,
                         schema: row.get(5)?,
                         sql: row.get(6)?,
-                        created_at: row.get(7)?,
-                        updated_at: row.get(8)?,
+                        order_index: row.get(7)?,
+                        open_count: row.get(8)?,
+                        opened_at: row.get(9)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -766,13 +1166,23 @@ impl Storage {
         let folder = folder.clone();
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO saved_sql_folders (id, connection_id, name, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?) \
+                "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
+                 parent_folder_id = excluded.parent_folder_id, \
                  name = excluded.name, \
+                 order_index = excluded.order_index, \
                  updated_at = excluded.updated_at",
-                params![folder.id, folder.connection_id, folder.name, folder.created_at, folder.updated_at],
+                params![
+                    folder.id,
+                    folder.connection_id,
+                    folder.parent_folder_id,
+                    folder.name,
+                    folder.order_index,
+                    folder.created_at,
+                    folder.updated_at
+                ],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -784,8 +1194,27 @@ impl Storage {
         let id = id.to_string();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM saved_sql_files WHERE folder_id = ?1", [id.as_str()]).map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM saved_sql_folders WHERE id = ?1", [id.as_str()]).map_err(|e| e.to_string())?;
+            let mut folder_ids = vec![id.clone()];
+            let mut index = 0;
+            while index < folder_ids.len() {
+                let parent_id = folder_ids[index].clone();
+                let mut stmt = tx
+                    .prepare("SELECT id FROM saved_sql_folders WHERE parent_folder_id = ?1")
+                    .map_err(|e| e.to_string())?;
+                let child_ids = stmt
+                    .query_map([parent_id.as_str()], |row| row.get::<_, String>(0))
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+                folder_ids.extend(child_ids);
+                index += 1;
+            }
+            for folder_id in folder_ids.iter().rev() {
+                tx.execute("DELETE FROM saved_sql_files WHERE folder_id = ?1", [folder_id.as_str()])
+                    .map_err(|e| e.to_string())?;
+                tx.execute("DELETE FROM saved_sql_folders WHERE id = ?1", [folder_id.as_str()])
+                    .map_err(|e| e.to_string())?;
+            }
             tx.commit().map_err(|e| e.to_string())
         })
         .await
@@ -796,8 +1225,8 @@ impl Storage {
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO saved_sql_files \
-                 (id, connection_id, folder_id, name, database_name, schema_name, sql_text, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, connection_id, folder_id, name, database_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  folder_id = excluded.folder_id, \
@@ -805,6 +1234,9 @@ impl Storage {
                  database_name = excluded.database_name, \
                  schema_name = excluded.schema_name, \
                  sql_text = excluded.sql_text, \
+                 order_index = excluded.order_index, \
+                 open_count = excluded.open_count, \
+                 opened_at = excluded.opened_at, \
                  updated_at = excluded.updated_at",
                 params![
                     file.id,
@@ -814,6 +1246,9 @@ impl Storage {
                     file.database,
                     file.schema,
                     file.sql,
+                    file.order_index,
+                    file.open_count,
+                    file.opened_at,
                     file.created_at,
                     file.updated_at
                 ],
@@ -876,6 +1311,76 @@ impl Storage {
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
+        })
+        .await
+    }
+}
+
+// MQ token records
+
+#[cfg(feature = "mq-admin")]
+impl Storage {
+    pub async fn save_mq_token_record(&self, record: &crate::mq::MqTokenRecord) -> Result<(), String> {
+        let record = record.clone();
+        self.with_conn(move |conn| {
+            let scope_json = record
+                .scope
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            let actions_json = serde_json::to_string(&record.actions).map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT OR REPLACE INTO mq_token_records \
+                 (id, connection_id, subject, algorithm, token_fingerprint, scope_json, actions_json, expires_at, created_at, note) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    record.id,
+                    record.connection_id,
+                    record.subject,
+                    record.algorithm.as_str(),
+                    record.token_fingerprint,
+                    scope_json,
+                    actions_json,
+                    record.expires_at,
+                    record.created_at,
+                    record.note
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_mq_token_records(
+        &self,
+        connection_id: &str,
+        subject: Option<&str>,
+    ) -> Result<Vec<crate::mq::MqTokenRecord>, String> {
+        let connection_id = connection_id.to_string();
+        let subject = subject.map(str::to_string);
+        self.with_conn(move |conn| {
+            let sql = if subject.is_some() {
+                "SELECT id, connection_id, subject, algorithm, token_fingerprint, scope_json, actions_json, expires_at, created_at, note \
+                 FROM mq_token_records WHERE connection_id = ?1 AND subject = ?2 ORDER BY created_at DESC"
+            } else {
+                "SELECT id, connection_id, subject, algorithm, token_fingerprint, scope_json, actions_json, expires_at, created_at, note \
+                 FROM mq_token_records WHERE connection_id = ?1 ORDER BY created_at DESC"
+            };
+            let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+            let rows = if let Some(subject) = subject {
+                stmt.query_map(params![connection_id, subject], mq_token_record_from_row)
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?
+            } else {
+                stmt.query_map(params![connection_id], mq_token_record_from_row)
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?
+            };
+            Ok(rows)
         })
         .await
     }
@@ -948,6 +1453,69 @@ impl Storage {
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
+        })
+        .await
+    }
+}
+
+// Tab runtime cache
+
+impl Storage {
+    pub async fn save_tab_runtime_cache(
+        &self,
+        key: &str,
+        payload: Vec<u8>,
+        row_count: i64,
+        column_count: i64,
+    ) -> Result<(), String> {
+        let key = key.to_string();
+        let byte_size = payload.len() as i64;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO tab_runtime_cache \
+                 (cache_key, payload, row_count, column_count, byte_size, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, datetime('now')) \
+                 ON CONFLICT(cache_key) DO UPDATE SET \
+                 payload = excluded.payload, row_count = excluded.row_count, column_count = excluded.column_count, \
+                 byte_size = excluded.byte_size, updated_at = excluded.updated_at",
+                params![key, payload, row_count, column_count, byte_size],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_tab_runtime_cache(&self, key: &str) -> Result<Option<TabRuntimeCacheEntry>, String> {
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT cache_key, payload, row_count, column_count, byte_size, updated_at \
+                 FROM tab_runtime_cache WHERE cache_key = ?1",
+                [key],
+                |row| {
+                    Ok(TabRuntimeCacheEntry {
+                        key: row.get(0)?,
+                        payload: row.get(1)?,
+                        row_count: row.get(2)?,
+                        column_count: row.get(3)?,
+                        byte_size: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn delete_tab_runtime_cache(&self, key: &str) -> Result<(), String> {
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM tab_runtime_cache WHERE cache_key = ?1", [key])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
         .await
     }
@@ -1132,6 +1700,163 @@ fn persist_secret_in_tx(
     Ok(())
 }
 
+fn persist_mq_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionConfig) -> Result<(), String> {
+    if config.db_type != DatabaseType::MessageQueue {
+        delete_secret_prefix_in_tx(tx, &config.id, MQ_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    }
+
+    let Some(auth) = mq_auth_object(config.external_config.as_ref()) else {
+        delete_secret_prefix_in_tx(tx, &config.id, MQ_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    };
+
+    match mq_auth_kind(auth) {
+        Some("none") => delete_secret_prefix_in_tx(tx, &config.id, MQ_AUTH_SECRET_PREFIX)?,
+        Some("token") => replace_mq_auth_secret_in_tx(tx, &config.id, MQ_AUTH_TOKEN_KEY, auth, "token")?,
+        Some("basic") => replace_mq_auth_secret_in_tx(tx, &config.id, MQ_AUTH_PASSWORD_KEY, auth, "password")?,
+        Some(kind) if is_api_key_auth_kind(kind) => {
+            replace_mq_auth_secret_in_tx(tx, &config.id, MQ_AUTH_API_KEY_VALUE_KEY, auth, "value")?
+        }
+        Some("oauth2") => {
+            replace_mq_auth_secret_in_tx(tx, &config.id, MQ_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret")?
+        }
+        _ => delete_secret_prefix_in_tx(tx, &config.id, MQ_AUTH_SECRET_PREFIX)?,
+    }
+
+    Ok(())
+}
+
+fn replace_mq_auth_secret_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    connection_id: &str,
+    key: &str,
+    auth: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), String> {
+    let current = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty());
+    let existing = if current.is_none() { get_secret_in_tx(tx, connection_id, key)? } else { None };
+    delete_secret_prefix_in_tx(tx, connection_id, MQ_AUTH_SECRET_PREFIX)?;
+    match current {
+        Some(secret) => persist_secret_in_tx(tx, connection_id, key, secret),
+        None => match existing {
+            Some(secret) => persist_secret_in_tx(tx, connection_id, key, &secret),
+            None => Ok(()),
+        },
+    }
+}
+
+fn get_secret_in_tx(tx: &rusqlite::Transaction<'_>, connection_id: &str, key: &str) -> Result<Option<String>, String> {
+    tx.query_row(
+        "SELECT secret FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+        params![connection_id, key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+fn persist_mq_token_signing_secret_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    config: &ConnectionConfig,
+) -> Result<(), String> {
+    if config.db_type != DatabaseType::MessageQueue {
+        delete_secret_prefix_in_tx(tx, &config.id, MQ_TOKEN_SIGNING_SECRET_PREFIX)?;
+        return Ok(());
+    }
+
+    let Some(signing) = mq_token_signing_object(config.external_config.as_ref()) else {
+        delete_secret_prefix_in_tx(tx, &config.id, MQ_TOKEN_SIGNING_SECRET_PREFIX)?;
+        return Ok(());
+    };
+
+    persist_json_secret_if_present_in_tx(tx, &config.id, MQ_TOKEN_SIGNING_KEY, signing, "key")
+}
+
+fn persist_json_secret_if_present_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    connection_id: &str,
+    key: &str,
+    auth: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), String> {
+    if let Some(secret) = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty()) {
+        persist_secret_in_tx(tx, connection_id, key, secret)?;
+    }
+    Ok(())
+}
+
+async fn hydrate_mq_json_secret(
+    storage: &Storage,
+    connection_id: &str,
+    key: &str,
+    auth: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<bool, String> {
+    if let Some(secret) = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty()) {
+        storage.set_secret(connection_id, key, secret).await?;
+        Ok(true)
+    } else if let Some(secret) = storage.get_secret(connection_id, key).await? {
+        auth.insert(field.to_string(), serde_json::Value::String(secret));
+        Ok(false)
+    } else {
+        Ok(false)
+    }
+}
+
+fn scrub_json_secret(auth: &mut serde_json::Map<String, serde_json::Value>, field: &str) {
+    if auth.contains_key(field) {
+        auth.insert(field.to_string(), serde_json::Value::String(String::new()));
+    }
+}
+
+fn mq_auth_kind(auth: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+    auth.get("kind").and_then(serde_json::Value::as_str)
+}
+
+fn mq_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    value?.get("auth")?.as_object()
+}
+
+fn mq_auth_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    value?.get_mut("auth")?.as_object_mut()
+}
+
+fn mq_token_signing_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    value?.get("tokenSigning")?.as_object()
+}
+
+fn mq_token_signing_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    value?.get_mut("tokenSigning")?.as_object_mut()
+}
+
+fn is_api_key_auth_kind(kind: &str) -> bool {
+    matches!(kind, "apiKey" | "api_key" | "apikey")
+}
+
+#[cfg(feature = "mq-admin")]
+fn mq_token_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::mq::MqTokenRecord> {
+    let algorithm: String = row.get(3)?;
+    let scope_json: Option<String> = row.get(5)?;
+    let actions_json: String = row.get(6)?;
+    Ok(crate::mq::MqTokenRecord {
+        id: row.get(0)?,
+        connection_id: row.get(1)?,
+        subject: row.get(2)?,
+        algorithm: serde_json::from_value(serde_json::Value::String(algorithm)).map_err(map_from_sql_err)?,
+        token_fingerprint: row.get(4)?,
+        scope: scope_json.as_deref().map(serde_json::from_str).transpose().map_err(map_from_sql_err)?,
+        actions: serde_json::from_str(&actions_json).map_err(map_from_sql_err)?,
+        expires_at: row.get(7)?,
+        created_at: row.get(8)?,
+        note: row.get(9)?,
+    })
+}
+
 fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
 }
@@ -1139,11 +1864,212 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::{DesktopIconTheme, DesktopSettings, Storage};
+    use crate::connection_secrets::{MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY};
+    use crate::models::connection::{ConnectionConfig, DatabaseType};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("dbx-storage-{name}-{}-{stamp}.db", std::process::id()))
+    }
+
+    fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: id.to_string(),
+            name: "Pulsar".to_string(),
+            db_type: DatabaseType::MessageQueue,
+            driver_profile: Some("pulsar".to_string()),
+            driver_label: Some("Apache Pulsar".to_string()),
+            url_params: None,
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            username: String::new(),
+            password: String::new(),
+            database: None,
+            visible_databases: None,
+            visible_schemas: None,
+            attached_databases: Vec::new(),
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 30,
+            query_timeout_secs: 300,
+            idle_timeout_secs: 600,
+            keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: None,
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: ":".to_string(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: Some(serde_json::json!({
+                "systemKind": "pulsar",
+                "adminUrl": "http://127.0.0.1:8080",
+                "auth": {
+                    "kind": "token",
+                    "token": token
+                }
+            })),
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            read_only: false,
+        }
+    }
+
+    async fn raw_connection_json(storage: &Storage, id: &str) -> String {
+        let id = id.to_string();
+        storage
+            .with_conn(move |conn| {
+                conn.query_row("SELECT config_json FROM connections WHERE id = ?1", [id], |row| row.get::<_, String>(0))
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn insert_raw_connection(storage: &Storage, config: &ConnectionConfig) {
+        let id = config.id.clone();
+        let json = serde_json::to_string(config).unwrap();
+        storage
+            .with_conn(move |conn| {
+                conn.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", rusqlite::params![id, json])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+    }
+
+    fn mq_token(config: &ConnectionConfig) -> Option<&str> {
+        config.external_config.as_ref()?.get("auth")?.get("token")?.as_str()
+    }
+
+    fn mq_token_signing_key(config: &ConnectionConfig) -> Option<&str> {
+        config.external_config.as_ref()?.get("tokenSigning")?.get("key")?.as_str()
+    }
+
+    #[tokio::test]
+    async fn save_connections_moves_mq_auth_token_to_secret_table_and_restores_it() {
+        let path = temp_db_path("mq-token-secrets");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage.save_connections(&[mq_connection("pulsar", "mq-token-secret")]).await.unwrap();
+
+        let raw_json = raw_connection_json(&storage, "pulsar").await;
+        assert!(!raw_json.contains("mq-token-secret"));
+        let persisted: ConnectionConfig = serde_json::from_str(&raw_json).unwrap();
+        assert_eq!(mq_token(&persisted), Some(""));
+        assert_eq!(storage.get_secret("pulsar", MQ_AUTH_TOKEN_KEY).await.unwrap().as_deref(), Some("mq-token-secret"));
+
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(mq_token(&loaded[0]), Some("mq-token-secret"));
+    }
+
+    #[tokio::test]
+    async fn metadata_save_scrubs_mq_auth_token_and_preserves_existing_secret() {
+        let path = temp_db_path("mq-token-metadata");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let original = mq_connection("pulsar", "existing-token");
+        storage.save_connections(&[original.clone()]).await.unwrap();
+
+        let mut metadata = original;
+        metadata.name = "Pulsar renamed".to_string();
+        if let Some(auth) = metadata.external_config.as_mut().and_then(|value| value.get_mut("auth")) {
+            auth["token"] = serde_json::Value::String("new-token-that-should-not-persist".to_string());
+        }
+
+        storage.save_connection_metadata_preserving_secrets(&[metadata]).await.unwrap();
+
+        let raw_json = raw_connection_json(&storage, "pulsar").await;
+        assert!(!raw_json.contains("existing-token"));
+        assert!(!raw_json.contains("new-token-that-should-not-persist"));
+        assert_eq!(storage.get_secret("pulsar", MQ_AUTH_TOKEN_KEY).await.unwrap().as_deref(), Some("existing-token"));
+
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].name, "Pulsar renamed");
+        assert_eq!(mq_token(&loaded[0]), Some("existing-token"));
+    }
+
+    #[tokio::test]
+    async fn load_connections_migrates_legacy_mq_auth_token_out_of_config_json() {
+        let path = temp_db_path("mq-token-legacy-migration");
+        let storage = Storage::open(&path).await.unwrap();
+        insert_raw_connection(&storage, &mq_connection("pulsar", "legacy-token")).await;
+
+        let loaded = storage.load_connections().await.unwrap();
+
+        assert_eq!(mq_token(&loaded[0]), Some("legacy-token"));
+        assert_eq!(storage.get_secret("pulsar", MQ_AUTH_TOKEN_KEY).await.unwrap().as_deref(), Some("legacy-token"));
+        let raw_json = raw_connection_json(&storage, "pulsar").await;
+        assert!(!raw_json.contains("legacy-token"));
+        let persisted: ConnectionConfig = serde_json::from_str(&raw_json).unwrap();
+        assert_eq!(mq_token(&persisted), Some(""));
+    }
+
+    #[tokio::test]
+    async fn save_connections_deletes_stale_mq_auth_secrets_when_kind_changes() {
+        let path = temp_db_path("mq-auth-kind-change");
+        let storage = Storage::open(&path).await.unwrap();
+        storage.save_connections(&[mq_connection("pulsar", "old-token")]).await.unwrap();
+        let mut config = mq_connection("pulsar", "");
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": "http://127.0.0.1:8080",
+            "auth": {
+                "kind": "basic",
+                "username": "admin",
+                "password": "basic-secret"
+            }
+        }));
+
+        storage.save_connections(&[config]).await.unwrap();
+
+        assert_eq!(storage.get_secret("pulsar", MQ_AUTH_TOKEN_KEY).await.unwrap(), None);
+        assert_eq!(storage.get_secret("pulsar", MQ_AUTH_PASSWORD_KEY).await.unwrap().as_deref(), Some("basic-secret"));
+    }
+
+    #[tokio::test]
+    async fn save_connections_moves_mq_token_signing_key_to_secret_table_and_restores_it() {
+        let path = temp_db_path("mq-token-signing-secret");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = mq_connection("pulsar", "");
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": "http://127.0.0.1:8080",
+            "auth": { "kind": "none" },
+            "tokenSigning": {
+                "algorithm": "hs256",
+                "key": "broker-signing-secret"
+            }
+        }));
+
+        storage.save_connections(&[config]).await.unwrap();
+
+        let raw_json = raw_connection_json(&storage, "pulsar").await;
+        assert!(!raw_json.contains("broker-signing-secret"));
+        let persisted: ConnectionConfig = serde_json::from_str(&raw_json).unwrap();
+        assert_eq!(mq_token_signing_key(&persisted), Some(""));
+        assert_eq!(
+            storage.get_secret("pulsar", MQ_TOKEN_SIGNING_KEY).await.unwrap().as_deref(),
+            Some("broker-signing-secret")
+        );
+
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(mq_token_signing_key(&loaded[0]), Some("broker-signing-secret"));
     }
 
     #[tokio::test]
@@ -1175,14 +2101,36 @@ mod tests {
 
         storage.save_password_hash("hash-1").await.unwrap();
         storage
-            .save_desktop_settings(&DesktopSettings { show_tray_icon: false, icon_theme: DesktopIconTheme::Black })
+            .save_desktop_settings(&DesktopSettings {
+                show_tray_icon: false,
+                icon_theme: DesktopIconTheme::Black,
+                quit_on_close: true,
+                close_action_prompted: false,
+                debug_logging_enabled: true,
+                saved_sql_sync_dir: None,
+                driver_store_dir: Some("/tmp/dbx-drivers".to_string()),
+                plugin_store_dir: Some("/tmp/dbx-plugins".to_string()),
+                agent_store_dir: Some("/tmp/dbx-agents".to_string()),
+                sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
+            })
             .await
             .unwrap();
 
         assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-1".to_string()));
         assert_eq!(
             storage.load_desktop_settings().await.unwrap(),
-            DesktopSettings { show_tray_icon: false, icon_theme: DesktopIconTheme::Black }
+            DesktopSettings {
+                show_tray_icon: false,
+                icon_theme: DesktopIconTheme::Black,
+                quit_on_close: true,
+                close_action_prompted: false,
+                debug_logging_enabled: true,
+                saved_sql_sync_dir: None,
+                driver_store_dir: Some("/tmp/dbx-drivers".to_string()),
+                plugin_store_dir: Some("/tmp/dbx-plugins".to_string()),
+                agent_store_dir: Some("/tmp/dbx-agents".to_string()),
+                sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
+            }
         );
     }
 
@@ -1206,6 +2154,24 @@ mod tests {
         assert_eq!(settings.get("run_in_background"), None);
         assert_eq!(settings.get("show_tray_icon").and_then(|value| value.as_bool()), Some(true));
         assert_eq!(settings.get("icon_theme").and_then(|value| value.as_str()), Some("black"));
+        assert_eq!(settings.get("debug_logging_enabled").and_then(|value| value.as_bool()), Some(false));
+        assert_eq!(
+            settings.get("sidebar_table_page_size").and_then(|value| value.as_u64()),
+            Some(DesktopSettings::default().sidebar_table_page_size as u64)
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_settings_persist_sidebar_table_page_size() {
+        let path = temp_db_path("desktop-settings-sidebar-page-size");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage
+            .save_desktop_settings(&DesktopSettings { sidebar_table_page_size: 1234, ..DesktopSettings::default() })
+            .await
+            .unwrap();
+
+        assert_eq!(storage.load_desktop_settings().await.unwrap().sidebar_table_page_size, 1234);
     }
 
     #[tokio::test]
@@ -1214,7 +2180,11 @@ mod tests {
         let storage = Storage::open(&path).await.unwrap();
 
         storage
-            .save_desktop_settings(&DesktopSettings { show_tray_icon: false, icon_theme: DesktopIconTheme::Black })
+            .save_desktop_settings(&DesktopSettings {
+                show_tray_icon: false,
+                icon_theme: DesktopIconTheme::Black,
+                ..DesktopSettings::default()
+            })
             .await
             .unwrap();
         storage.save_password_hash("hash-2").await.unwrap();
@@ -1222,7 +2192,11 @@ mod tests {
         assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-2".to_string()));
         assert_eq!(
             storage.load_desktop_settings().await.unwrap(),
-            DesktopSettings { show_tray_icon: false, icon_theme: DesktopIconTheme::Black }
+            DesktopSettings {
+                show_tray_icon: false,
+                icon_theme: DesktopIconTheme::Black,
+                ..DesktopSettings::default()
+            }
         );
     }
 
@@ -1247,5 +2221,23 @@ mod tests {
             vec!["conn-1".to_string(), "conn-1:db:main".to_string()]
         );
         assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-3".to_string()));
+    }
+
+    #[tokio::test]
+    async fn tab_runtime_cache_roundtrips_binary_payloads() {
+        let path = temp_db_path("tab-runtime-cache");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage.save_tab_runtime_cache("tab:1:result", vec![1, 2, 3, 4], 10, 3).await.unwrap();
+        let entry = storage.load_tab_runtime_cache("tab:1:result").await.unwrap().unwrap();
+
+        assert_eq!(entry.key, "tab:1:result");
+        assert_eq!(entry.payload, vec![1, 2, 3, 4]);
+        assert_eq!(entry.row_count, 10);
+        assert_eq!(entry.column_count, 3);
+        assert_eq!(entry.byte_size, 4);
+
+        storage.delete_tab_runtime_cache("tab:1:result").await.unwrap();
+        assert_eq!(storage.load_tab_runtime_cache("tab:1:result").await.unwrap(), None);
     }
 }

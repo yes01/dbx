@@ -1,4 +1,4 @@
-use crate::models::connection::ConnectionConfig;
+use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -7,9 +7,17 @@ pub const MAIN_PASSWORD_KEY: &str = "password";
 pub const SSH_PASSWORD_KEY: &str = "ssh_password";
 pub const SSH_KEY_PASSPHRASE_KEY: &str = "ssh_key_passphrase";
 pub const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
+pub const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 pub const PROXY_PASSWORD_KEY: &str = "proxy_password";
 pub const REDIS_SENTINEL_PASSWORD_KEY: &str = "redis_sentinel_password";
 pub const CONNECTION_STRING_KEY: &str = "connection_string";
+pub const MQ_AUTH_SECRET_PREFIX: &str = "mq.auth.";
+pub const MQ_AUTH_TOKEN_KEY: &str = "mq.auth.token";
+pub const MQ_AUTH_PASSWORD_KEY: &str = "mq.auth.password";
+pub const MQ_AUTH_API_KEY_VALUE_KEY: &str = "mq.auth.api_key_value";
+pub const MQ_AUTH_CLIENT_SECRET_KEY: &str = "mq.auth.client_secret";
+pub const MQ_TOKEN_SIGNING_SECRET_PREFIX: &str = "mq.token_signing.";
+pub const MQ_TOKEN_SIGNING_KEY: &str = "mq.token_signing.key";
 
 pub trait ConnectionSecretStore {
     fn set_secret(&self, connection_id: &str, key: &str, secret: &str) -> Result<(), String>;
@@ -30,7 +38,23 @@ impl FileSecretStore {
     }
 
     fn read_store(&self) -> HashMap<String, String> {
-        std::fs::read_to_string(&self.path).ok().and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()
+        match std::fs::read_to_string(&self.path) {
+            Ok(json) => match serde_json::from_str(&json) {
+                Ok(map) => map,
+                Err(e) => {
+                    log::warn!(
+                        "Failed to parse secret store at {:?}: {}. Returning empty store. This may indicate file corruption.",
+                        self.path, e
+                    );
+                    HashMap::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::default(),
+            Err(e) => {
+                log::warn!("Failed to read secret store at {:?}: {}. Returning empty store.", self.path, e);
+                HashMap::default()
+            }
+        }
     }
 
     fn write_store(&self, map: &HashMap<String, String>) -> Result<(), String> {
@@ -72,16 +96,21 @@ pub fn save_connections_to_file(
     delete_removed_connection_secrets(path, configs, store)?;
     for config in configs {
         persist_secret(store, &config.id, MAIN_PASSWORD_KEY, &config.password)?;
-        persist_secret(store, &config.id, SSH_PASSWORD_KEY, &config.ssh_password)?;
-        persist_secret(store, &config.id, SSH_KEY_PASSPHRASE_KEY, &config.ssh_key_passphrase)?;
-        delete_secret_prefix(store, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
-        for (index, hop) in config.ssh_tunnels.iter().enumerate() {
-            persist_secret(store, &config.id, &ssh_tunnel_password_key(index, hop), &hop.password)?;
-            persist_secret(store, &config.id, &ssh_tunnel_key_passphrase_key(index, hop), &hop.key_passphrase)?;
+        delete_secret_prefix(store, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
+        for (index, layer) in config.transport_layers.iter().enumerate() {
+            persist_transport_layer_secrets(store, &config.id, index, layer)?;
         }
-        persist_secret(store, &config.id, PROXY_PASSWORD_KEY, &config.proxy_password)?;
         persist_secret(store, &config.id, REDIS_SENTINEL_PASSWORD_KEY, &config.redis_sentinel_password)?;
         persist_optional_secret(store, &config.id, CONNECTION_STRING_KEY, config.connection_string.as_deref())?;
+        persist_mq_auth_secrets(store, config)?;
+        persist_mq_token_signing_secret(store, config)?;
+
+        // New configs persist transport-layer secrets only. Remove legacy transport secret slots after the
+        // migrated layer values have been written so old configs do not keep two sources of truth.
+        store.delete_secret(&config.id, SSH_PASSWORD_KEY)?;
+        store.delete_secret(&config.id, SSH_KEY_PASSPHRASE_KEY)?;
+        store.delete_secret(&config.id, PROXY_PASSWORD_KEY)?;
+        delete_secret_prefix(store, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
     }
 
     write_sanitized_connections(path, configs)
@@ -107,51 +136,7 @@ pub fn load_connections_from_file(
             needs_rewrite = true;
         }
 
-        if config.ssh_password.is_empty() {
-            if let Some(secret) = store.get_secret(&config.id, SSH_PASSWORD_KEY)? {
-                config.ssh_password = secret;
-            }
-        } else {
-            store.set_secret(&config.id, SSH_PASSWORD_KEY, &config.ssh_password)?;
-            needs_rewrite = true;
-        }
-
-        if config.ssh_key_passphrase.is_empty() {
-            if let Some(secret) = store.get_secret(&config.id, SSH_KEY_PASSPHRASE_KEY)? {
-                config.ssh_key_passphrase = secret;
-            }
-        } else {
-            store.set_secret(&config.id, SSH_KEY_PASSPHRASE_KEY, &config.ssh_key_passphrase)?;
-            needs_rewrite = true;
-        }
-
-        for (index, hop) in config.ssh_tunnels.iter_mut().enumerate() {
-            if hop.password.is_empty() {
-                if let Some(secret) = store.get_secret(&config.id, &ssh_tunnel_password_key(index, hop))? {
-                    hop.password = secret;
-                }
-            } else {
-                store.set_secret(&config.id, &ssh_tunnel_password_key(index, hop), &hop.password)?;
-                needs_rewrite = true;
-            }
-            if hop.key_passphrase.is_empty() {
-                if let Some(secret) = store.get_secret(&config.id, &ssh_tunnel_key_passphrase_key(index, hop))? {
-                    hop.key_passphrase = secret;
-                }
-            } else {
-                store.set_secret(&config.id, &ssh_tunnel_key_passphrase_key(index, hop), &hop.key_passphrase)?;
-                needs_rewrite = true;
-            }
-        }
-
-        if config.proxy_password.is_empty() {
-            if let Some(secret) = store.get_secret(&config.id, PROXY_PASSWORD_KEY)? {
-                config.proxy_password = secret;
-            }
-        } else {
-            store.set_secret(&config.id, PROXY_PASSWORD_KEY, &config.proxy_password)?;
-            needs_rewrite = true;
-        }
+        hydrate_transport_layer_secrets(store, config, &mut needs_rewrite)?;
 
         if config.redis_sentinel_password.is_empty() {
             if let Some(secret) = store.get_secret(&config.id, REDIS_SENTINEL_PASSWORD_KEY)? {
@@ -173,6 +158,8 @@ pub fn load_connections_from_file(
                 }
             }
         }
+        hydrate_mq_auth_secrets(store, config, &mut needs_rewrite)?;
+        hydrate_mq_token_signing_secret(store, config, &mut needs_rewrite)?;
     }
 
     if needs_rewrite {
@@ -180,6 +167,134 @@ pub fn load_connections_from_file(
     }
 
     Ok(configs)
+}
+
+fn persist_transport_layer_secrets(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    index: usize,
+    layer: &TransportLayerConfig,
+) -> Result<(), String> {
+    match layer {
+        TransportLayerConfig::Ssh(ssh) => {
+            persist_secret(store, connection_id, &transport_layer_ssh_password_key(index, layer), &ssh.password)?;
+            persist_secret(
+                store,
+                connection_id,
+                &transport_layer_ssh_key_passphrase_key(index, layer),
+                &ssh.key_passphrase,
+            )?;
+        }
+        TransportLayerConfig::Proxy(proxy) => {
+            persist_secret(store, connection_id, &transport_layer_proxy_password_key(index, layer), &proxy.password)?;
+        }
+    }
+    Ok(())
+}
+
+fn hydrate_transport_layer_secrets(
+    store: &dyn ConnectionSecretStore,
+    config: &mut ConnectionConfig,
+    needs_rewrite: &mut bool,
+) -> Result<(), String> {
+    for index in 0..config.transport_layers.len() {
+        let layer_for_key = config.transport_layers[index].clone();
+        match &mut config.transport_layers[index] {
+            TransportLayerConfig::Ssh(ssh) => {
+                let password_key = transport_layer_ssh_password_key(index, &layer_for_key);
+                if ssh.password.is_empty() {
+                    if let Some(secret) = store.get_secret(&config.id, &password_key)?.or(legacy_ssh_password_secret(
+                        store,
+                        &config.id,
+                        index,
+                        &layer_for_key,
+                    )?) {
+                        ssh.password = secret;
+                    }
+                } else {
+                    store.set_secret(&config.id, &password_key, &ssh.password)?;
+                    *needs_rewrite = true;
+                }
+
+                let passphrase_key = transport_layer_ssh_key_passphrase_key(index, &layer_for_key);
+                if ssh.key_passphrase.is_empty() {
+                    if let Some(secret) = store
+                        .get_secret(&config.id, &passphrase_key)?
+                        .or(legacy_ssh_key_passphrase_secret(store, &config.id, index, &layer_for_key)?)
+                    {
+                        ssh.key_passphrase = secret;
+                    }
+                } else {
+                    store.set_secret(&config.id, &passphrase_key, &ssh.key_passphrase)?;
+                    *needs_rewrite = true;
+                }
+            }
+            TransportLayerConfig::Proxy(proxy) => {
+                let password_key = transport_layer_proxy_password_key(index, &layer_for_key);
+                if proxy.password.is_empty() {
+                    if let Some(secret) = store.get_secret(&config.id, &password_key)?.or(legacy_proxy_password_secret(
+                        store,
+                        &config.id,
+                        &layer_for_key,
+                    )?) {
+                        proxy.password = secret;
+                    }
+                } else {
+                    store.set_secret(&config.id, &password_key, &proxy.password)?;
+                    *needs_rewrite = true;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn legacy_ssh_password_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    index: usize,
+    layer: &TransportLayerConfig,
+) -> Result<Option<String>, String> {
+    if let TransportLayerConfig::Ssh(ssh) = layer {
+        if ssh.id == "legacy" {
+            if let Some(secret) = store.get_secret(connection_id, SSH_PASSWORD_KEY)? {
+                return Ok(Some(secret));
+            }
+        }
+        store.get_secret(connection_id, &ssh_tunnel_password_key(index, ssh))
+    } else {
+        Ok(None)
+    }
+}
+
+fn legacy_ssh_key_passphrase_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    index: usize,
+    layer: &TransportLayerConfig,
+) -> Result<Option<String>, String> {
+    if let TransportLayerConfig::Ssh(ssh) = layer {
+        if ssh.id == "legacy" {
+            if let Some(secret) = store.get_secret(connection_id, SSH_KEY_PASSPHRASE_KEY)? {
+                return Ok(Some(secret));
+            }
+        }
+        store.get_secret(connection_id, &ssh_tunnel_key_passphrase_key(index, ssh))
+    } else {
+        Ok(None)
+    }
+}
+
+fn legacy_proxy_password_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    layer: &TransportLayerConfig,
+) -> Result<Option<String>, String> {
+    if matches!(layer, TransportLayerConfig::Proxy(proxy) if proxy.id == "legacy-proxy") {
+        store.get_secret(connection_id, PROXY_PASSWORD_KEY)
+    } else {
+        Ok(None)
+    }
 }
 
 fn delete_removed_connection_secrets(
@@ -204,7 +319,10 @@ fn delete_removed_connection_secrets(
         store.delete_secret(&config.id, SSH_PASSWORD_KEY)?;
         store.delete_secret(&config.id, SSH_KEY_PASSPHRASE_KEY)?;
         delete_secret_prefix(store, &config.id, SSH_TUNNEL_SECRET_PREFIX)?;
+        delete_secret_prefix(store, &config.id, TRANSPORT_LAYER_SECRET_PREFIX)?;
         store.delete_secret(&config.id, CONNECTION_STRING_KEY)?;
+        delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?;
+        delete_secret_prefix(store, &config.id, MQ_TOKEN_SIGNING_SECRET_PREFIX)?;
     }
     Ok(())
 }
@@ -242,6 +360,193 @@ fn delete_secret_prefix(
     store.delete_secret_prefix(connection_id, key_prefix)
 }
 
+fn persist_mq_auth_secrets(store: &dyn ConnectionSecretStore, config: &ConnectionConfig) -> Result<(), String> {
+    if config.db_type != DatabaseType::MessageQueue {
+        delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    }
+
+    let Some(auth) = mq_auth_object(config.external_config.as_ref()) else {
+        delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    };
+
+    match mq_auth_kind(auth).as_deref() {
+        Some("none") => delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?,
+        Some("token") => replace_mq_auth_secret(store, &config.id, MQ_AUTH_TOKEN_KEY, auth, "token")?,
+        Some("basic") => replace_mq_auth_secret(store, &config.id, MQ_AUTH_PASSWORD_KEY, auth, "password")?,
+        Some("apiKey") | Some("api_key") | Some("apikey") => {
+            replace_mq_auth_secret(store, &config.id, MQ_AUTH_API_KEY_VALUE_KEY, auth, "value")?
+        }
+        Some("oauth2") => replace_mq_auth_secret(store, &config.id, MQ_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret")?,
+        _ => delete_secret_prefix(store, &config.id, MQ_AUTH_SECRET_PREFIX)?,
+    }
+
+    Ok(())
+}
+
+fn replace_mq_auth_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    key: &str,
+    auth: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), String> {
+    let current = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty());
+    let existing = if current.is_none() { store.get_secret(connection_id, key)? } else { None };
+    delete_secret_prefix(store, connection_id, MQ_AUTH_SECRET_PREFIX)?;
+    match current {
+        Some(secret) => store.set_secret(connection_id, key, secret),
+        None => match existing {
+            Some(secret) => store.set_secret(connection_id, key, &secret),
+            None => Ok(()),
+        },
+    }
+}
+
+fn persist_mq_token_signing_secret(store: &dyn ConnectionSecretStore, config: &ConnectionConfig) -> Result<(), String> {
+    if config.db_type != DatabaseType::MessageQueue {
+        delete_secret_prefix(store, &config.id, MQ_TOKEN_SIGNING_SECRET_PREFIX)?;
+        return Ok(());
+    }
+
+    let Some(signing) = mq_token_signing_object(config.external_config.as_ref()) else {
+        delete_secret_prefix(store, &config.id, MQ_TOKEN_SIGNING_SECRET_PREFIX)?;
+        return Ok(());
+    };
+
+    persist_json_secret_if_present(store, &config.id, MQ_TOKEN_SIGNING_KEY, signing, "key")
+}
+
+fn hydrate_mq_auth_secrets(
+    store: &dyn ConnectionSecretStore,
+    config: &mut ConnectionConfig,
+    needs_rewrite: &mut bool,
+) -> Result<(), String> {
+    if config.db_type != DatabaseType::MessageQueue {
+        return Ok(());
+    }
+
+    let Some(auth) = mq_auth_object_mut(config.external_config.as_mut()) else {
+        return Ok(());
+    };
+
+    match mq_auth_kind(auth).as_deref() {
+        Some("token") => hydrate_json_secret(store, &config.id, MQ_AUTH_TOKEN_KEY, auth, "token", needs_rewrite)?,
+        Some("basic") => hydrate_json_secret(store, &config.id, MQ_AUTH_PASSWORD_KEY, auth, "password", needs_rewrite)?,
+        Some("apiKey") | Some("api_key") | Some("apikey") => {
+            hydrate_json_secret(store, &config.id, MQ_AUTH_API_KEY_VALUE_KEY, auth, "value", needs_rewrite)?
+        }
+        Some("oauth2") => {
+            hydrate_json_secret(store, &config.id, MQ_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret", needs_rewrite)?
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn hydrate_mq_token_signing_secret(
+    store: &dyn ConnectionSecretStore,
+    config: &mut ConnectionConfig,
+    needs_rewrite: &mut bool,
+) -> Result<(), String> {
+    if config.db_type != DatabaseType::MessageQueue {
+        return Ok(());
+    }
+
+    let Some(signing) = mq_token_signing_object_mut(config.external_config.as_mut()) else {
+        return Ok(());
+    };
+
+    hydrate_json_secret(store, &config.id, MQ_TOKEN_SIGNING_KEY, signing, "key", needs_rewrite)
+}
+
+fn persist_json_secret_if_present(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    key: &str,
+    auth: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), String> {
+    match auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty()) {
+        Some(secret) => store.set_secret(connection_id, key, secret),
+        None => Ok(()),
+    }
+}
+
+fn hydrate_json_secret(
+    store: &dyn ConnectionSecretStore,
+    connection_id: &str,
+    key: &str,
+    auth: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    needs_rewrite: &mut bool,
+) -> Result<(), String> {
+    match auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty()) {
+        Some(secret) => {
+            store.set_secret(connection_id, key, secret)?;
+            *needs_rewrite = true;
+        }
+        None => {
+            if let Some(secret) = store.get_secret(connection_id, key)? {
+                auth.insert(field.to_string(), serde_json::Value::String(secret));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scrub_mq_auth_secrets(config: &mut ConnectionConfig) {
+    let Some(auth) = mq_auth_object_mut(config.external_config.as_mut()) else {
+        return;
+    };
+    match mq_auth_kind(auth).as_deref() {
+        Some("token") => scrub_json_secret(auth, "token"),
+        Some("basic") => scrub_json_secret(auth, "password"),
+        Some("apiKey") | Some("api_key") | Some("apikey") => scrub_json_secret(auth, "value"),
+        Some("oauth2") => scrub_json_secret(auth, "clientSecret"),
+        _ => {}
+    }
+}
+
+fn scrub_mq_token_signing_secret(config: &mut ConnectionConfig) {
+    let Some(signing) = mq_token_signing_object_mut(config.external_config.as_mut()) else {
+        return;
+    };
+    scrub_json_secret(signing, "key");
+}
+
+fn scrub_json_secret(auth: &mut serde_json::Map<String, serde_json::Value>, field: &str) {
+    if auth.contains_key(field) {
+        auth.insert(field.to_string(), serde_json::Value::String(String::new()));
+    }
+}
+
+fn mq_auth_kind(auth: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    auth.get("kind").and_then(serde_json::Value::as_str).map(ToString::to_string)
+}
+
+fn mq_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    value?.get("auth")?.as_object()
+}
+
+fn mq_auth_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    value?.get_mut("auth")?.as_object_mut()
+}
+
+fn mq_token_signing_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    value?.get("tokenSigning")?.as_object()
+}
+
+fn mq_token_signing_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    value?.get_mut("tokenSigning")?.as_object_mut()
+}
+
 fn ssh_tunnel_secret_segment(index: usize, hop: &crate::models::connection::SshTunnelConfig) -> String {
     if hop.id.trim().is_empty() {
         index.to_string()
@@ -256,6 +561,27 @@ fn ssh_tunnel_password_key(index: usize, hop: &crate::models::connection::SshTun
 
 fn ssh_tunnel_key_passphrase_key(index: usize, hop: &crate::models::connection::SshTunnelConfig) -> String {
     format!("{}{}.key_passphrase", SSH_TUNNEL_SECRET_PREFIX, ssh_tunnel_secret_segment(index, hop))
+}
+
+fn transport_layer_secret_segment(index: usize, layer: &TransportLayerConfig) -> String {
+    let id = layer.id().trim();
+    if id.is_empty() {
+        index.to_string()
+    } else {
+        id.to_string()
+    }
+}
+
+fn transport_layer_ssh_password_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.ssh_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
+fn transport_layer_ssh_key_passphrase_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.ssh_key_passphrase", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
+fn transport_layer_proxy_password_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.proxy_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
 
 fn read_connections(path: &Path) -> Result<Vec<ConnectionConfig>, String> {
@@ -275,15 +601,21 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
         .cloned()
         .map(|mut config| {
             config.password.clear();
-            config.ssh_password.clear();
-            config.ssh_key_passphrase.clear();
-            for hop in &mut config.ssh_tunnels {
-                hop.password.clear();
-                hop.key_passphrase.clear();
+            for layer in &mut config.transport_layers {
+                match layer {
+                    TransportLayerConfig::Ssh(ssh) => {
+                        ssh.password.clear();
+                        ssh.key_passphrase.clear();
+                    }
+                    TransportLayerConfig::Proxy(proxy) => {
+                        proxy.password.clear();
+                    }
+                }
             }
-            config.proxy_password.clear();
             config.redis_sentinel_password.clear();
             config.connection_string = None;
+            scrub_mq_auth_secrets(&mut config);
+            scrub_mq_token_signing_secret(&mut config);
             config
         })
         .collect()
@@ -297,9 +629,10 @@ pub fn secret_account(connection_id: &str, key: &str) -> String {
 mod tests {
     use super::{
         load_connections_from_file, save_connections_to_file, ConnectionSecretStore, CONNECTION_STRING_KEY,
-        MAIN_PASSWORD_KEY, REDIS_SENTINEL_PASSWORD_KEY, SSH_PASSWORD_KEY,
+        MAIN_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, REDIS_SENTINEL_PASSWORD_KEY,
+        SSH_PASSWORD_KEY,
     };
-    use crate::models::connection::{ConnectionConfig, DatabaseType, ProxyType, SshTunnelConfig};
+    use crate::models::connection::{ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::path::Path;
@@ -358,7 +691,7 @@ mod tests {
         dir.join("connections.json")
     }
 
-    fn connection(id: &str, password: &str, ssh_password: &str) -> ConnectionConfig {
+    fn connection(id: &str, password: &str, _ssh_password: &str) -> ConnectionConfig {
         ConnectionConfig {
             id: id.to_string(),
             name: format!("{id} connection"),
@@ -372,28 +705,18 @@ mod tests {
             password: password.to_string(),
             database: Some("postgres".to_string()),
             visible_databases: None,
+            visible_schemas: None,
             attached_databases: Vec::new(),
             color: None,
-            ssh_enabled: !ssh_password.is_empty(),
-            ssh_host: String::new(),
-            ssh_port: 22,
-            ssh_user: String::new(),
-            ssh_password: ssh_password.to_string(),
-            ssh_key_path: String::new(),
-            ssh_key_passphrase: String::new(),
-            ssh_expose_lan: false,
-            ssh_connect_timeout_secs: crate::models::connection::default_ssh_connect_timeout_secs(),
-            ssh_tunnels: Vec::new(),
+            transport_layers: Vec::new(),
             connect_timeout_secs: crate::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: crate::models::connection::default_query_timeout_secs(),
-            proxy_enabled: false,
-            proxy_type: ProxyType::Socks5,
-            proxy_host: String::new(),
-            proxy_port: 1080,
-            proxy_username: String::new(),
-            proxy_password: String::new(),
+            idle_timeout_secs: crate::models::connection::default_idle_timeout_secs(),
+            keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
             sysdba: false,
             oracle_connection_type: None,
             connection_string: None,
@@ -404,10 +727,15 @@ mod tests {
             redis_sentinel_password: String::new(),
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
+            redis_key_separator: crate::models::connection::default_redis_key_separator(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            read_only: false,
         }
     }
 
@@ -424,6 +752,8 @@ mod tests {
             key_passphrase: passphrase.to_string(),
             connect_timeout_secs: 5,
             expose_lan: false,
+            use_ssh_agent: false,
+            ssh_agent_sock_path: String::new(),
         }
     }
 
@@ -437,22 +767,25 @@ mod tests {
         let path = temp_connections_file("save-redacts");
         let store = MemorySecretStore::default();
         let mut config = connection("main", "db-secret", "ssh-secret");
-        config.ssh_tunnels = vec![ssh_hop("hop-1", "hop-secret", "hop-key")];
+        config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_hop("hop-1", "hop-secret", "hop-key"))];
         config.redis_sentinel_password = "sentinel-secret".to_string();
         let configs = vec![config];
 
         save_connections_to_file(&path, &configs, &store).unwrap();
 
         assert_eq!(store.get_existing("main", MAIN_PASSWORD_KEY).as_deref(), Some("db-secret"));
-        assert_eq!(store.get_existing("main", SSH_PASSWORD_KEY).as_deref(), Some("ssh-secret"));
-        assert_eq!(store.get_existing("main", "ssh_tunnels.hop-1.password").as_deref(), Some("hop-secret"));
-        assert_eq!(store.get_existing("main", "ssh_tunnels.hop-1.key_passphrase").as_deref(), Some("hop-key"));
+        assert_eq!(store.get_existing("main", "transport_layers.hop-1.ssh_password").as_deref(), Some("hop-secret"));
+        assert_eq!(store.get_existing("main", "transport_layers.hop-1.ssh_key_passphrase").as_deref(), Some("hop-key"));
         assert_eq!(store.get_existing("main", REDIS_SENTINEL_PASSWORD_KEY).as_deref(), Some("sentinel-secret"));
         let persisted = read_configs(&path);
         assert_eq!(persisted[0].password, "");
-        assert_eq!(persisted[0].ssh_password, "");
-        assert_eq!(persisted[0].ssh_tunnels[0].password, "");
-        assert_eq!(persisted[0].ssh_tunnels[0].key_passphrase, "");
+        match &persisted[0].transport_layers[0] {
+            TransportLayerConfig::Ssh(ssh) => {
+                assert_eq!(ssh.password, "");
+                assert_eq!(ssh.key_passphrase, "");
+            }
+            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+        }
         assert_eq!(persisted[0].redis_sentinel_password, "");
     }
 
@@ -466,16 +799,20 @@ mod tests {
         store.set_existing("main", "ssh_tunnels.hop-1.key_passphrase", "hop-key");
         store.set_existing("main", REDIS_SENTINEL_PASSWORD_KEY, "sentinel-secret");
         let mut sanitized_config = connection("main", "", "");
-        sanitized_config.ssh_tunnels = vec![ssh_hop("hop-1", "", "")];
+        sanitized_config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_hop("hop-1", "", ""))];
         let sanitized = vec![sanitized_config];
         std::fs::write(&path, serde_json::to_string_pretty(&sanitized).unwrap()).unwrap();
 
         let loaded = load_connections_from_file(&path, &store).unwrap();
 
         assert_eq!(loaded[0].password, "db-secret");
-        assert_eq!(loaded[0].ssh_password, "ssh-secret");
-        assert_eq!(loaded[0].ssh_tunnels[0].password, "hop-secret");
-        assert_eq!(loaded[0].ssh_tunnels[0].key_passphrase, "hop-key");
+        match &loaded[0].transport_layers[0] {
+            TransportLayerConfig::Ssh(ssh) => {
+                assert_eq!(ssh.password, "hop-secret");
+                assert_eq!(ssh.key_passphrase, "hop-key");
+            }
+            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+        }
         assert_eq!(loaded[0].redis_sentinel_password, "sentinel-secret");
     }
 
@@ -483,18 +820,38 @@ mod tests {
     fn load_connections_migrates_plaintext_passwords_and_rewrites_sanitized_file() {
         let path = temp_connections_file("migrates-plaintext");
         let store = MemorySecretStore::default();
-        let legacy = vec![connection("legacy", "plain-db", "plain-ssh")];
+        let legacy = serde_json::json!([{
+            "id": "legacy",
+            "name": "legacy connection",
+            "db_type": "postgres",
+            "host": "localhost",
+            "port": 5432,
+            "username": "postgres",
+            "password": "plain-db",
+            "database": "postgres",
+            "ssh_enabled": true,
+            "ssh_host": "bastion",
+            "ssh_port": 22,
+            "ssh_user": "user",
+            "ssh_password": "plain-ssh"
+        }]);
         std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
 
         let loaded = load_connections_from_file(&path, &store).unwrap();
 
         assert_eq!(loaded[0].password, "plain-db");
-        assert_eq!(loaded[0].ssh_password, "plain-ssh");
+        match &loaded[0].transport_layers[0] {
+            TransportLayerConfig::Ssh(ssh) => assert_eq!(ssh.password, "plain-ssh"),
+            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+        }
         assert_eq!(store.get_existing("legacy", MAIN_PASSWORD_KEY).as_deref(), Some("plain-db"));
-        assert_eq!(store.get_existing("legacy", SSH_PASSWORD_KEY).as_deref(), Some("plain-ssh"));
+        assert_eq!(store.get_existing("legacy", "transport_layers.legacy.ssh_password").as_deref(), Some("plain-ssh"));
         let persisted = read_configs(&path);
         assert_eq!(persisted[0].password, "");
-        assert_eq!(persisted[0].ssh_password, "");
+        match &persisted[0].transport_layers[0] {
+            TransportLayerConfig::Ssh(ssh) => assert_eq!(ssh.password, ""),
+            TransportLayerConfig::Proxy(_) => panic!("expected ssh layer"),
+        }
     }
 
     #[test]
@@ -533,5 +890,148 @@ mod tests {
 
         let loaded = load_connections_from_file(&path, &store).unwrap();
         assert_eq!(loaded[0].connection_string.as_deref(), Some("mongodb://user:secret@localhost/app"));
+    }
+
+    #[test]
+    fn save_connections_moves_mq_auth_secrets_to_secret_store_and_restores_them() {
+        let path = temp_connections_file("mq-auth");
+        let store = MemorySecretStore::default();
+        let mut config = connection("pulsar", "", "");
+        config.db_type = DatabaseType::MessageQueue;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": "http://localhost:8080",
+            "auth": {
+                "kind": "token",
+                "token": "mq-token-secret"
+            }
+        }));
+
+        save_connections_to_file(&path, &[config], &store).unwrap();
+
+        assert_eq!(store.get_existing("pulsar", "mq.auth.token").as_deref(), Some("mq-token-secret"));
+        let persisted_json = std::fs::read_to_string(&path).unwrap();
+        assert!(!persisted_json.contains("mq-token-secret"));
+
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        let auth = loaded[0].external_config.as_ref().and_then(|value| value.get("auth")).expect("restored MQ auth");
+        assert_eq!(auth.get("token").and_then(serde_json::Value::as_str), Some("mq-token-secret"));
+    }
+
+    #[test]
+    fn save_connections_moves_mq_basic_and_oauth_secrets_to_secret_store_and_restores_them() {
+        let path = temp_connections_file("mq-auth-multiple");
+        let store = MemorySecretStore::default();
+        let mut basic = connection("basic", "", "");
+        basic.db_type = DatabaseType::MessageQueue;
+        basic.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": "http://localhost:8080",
+            "auth": {
+                "kind": "basic",
+                "username": "admin",
+                "password": "basic-secret"
+            }
+        }));
+        let mut oauth = connection("oauth", "", "");
+        oauth.db_type = DatabaseType::MessageQueue;
+        oauth.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": "http://localhost:8080",
+            "auth": {
+                "kind": "oauth2",
+                "issuerUrl": "https://issuer/token",
+                "clientId": "client",
+                "clientSecret": "oauth-secret"
+            }
+        }));
+
+        save_connections_to_file(&path, &[basic, oauth], &store).unwrap();
+
+        assert_eq!(store.get_existing("basic", "mq.auth.password").as_deref(), Some("basic-secret"));
+        assert_eq!(store.get_existing("oauth", "mq.auth.client_secret").as_deref(), Some("oauth-secret"));
+        let persisted_json = std::fs::read_to_string(&path).unwrap();
+        assert!(!persisted_json.contains("basic-secret"));
+        assert!(!persisted_json.contains("oauth-secret"));
+
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        let basic_auth = loaded[0].external_config.as_ref().and_then(|value| value.get("auth")).unwrap();
+        let oauth_auth = loaded[1].external_config.as_ref().and_then(|value| value.get("auth")).unwrap();
+        assert_eq!(basic_auth.get("password").and_then(serde_json::Value::as_str), Some("basic-secret"));
+        assert_eq!(oauth_auth.get("clientSecret").and_then(serde_json::Value::as_str), Some("oauth-secret"));
+    }
+
+    #[test]
+    fn save_connections_preserves_existing_mq_secret_when_config_is_sanitized() {
+        let path = temp_connections_file("mq-auth-preserve");
+        let store = MemorySecretStore::default();
+        store.set_existing("pulsar", "mq.auth.token", "existing-token");
+        let mut config = connection("pulsar", "", "");
+        config.db_type = DatabaseType::MessageQueue;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": "http://localhost:8080",
+            "auth": {
+                "kind": "token",
+                "token": ""
+            }
+        }));
+
+        save_connections_to_file(&path, &[config], &store).unwrap();
+
+        assert_eq!(store.get_existing("pulsar", "mq.auth.token").as_deref(), Some("existing-token"));
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        let auth = loaded[0].external_config.as_ref().and_then(|value| value.get("auth")).unwrap();
+        assert_eq!(auth.get("token").and_then(serde_json::Value::as_str), Some("existing-token"));
+    }
+
+    #[test]
+    fn save_connections_deletes_stale_mq_auth_secrets_when_kind_changes() {
+        let path = temp_connections_file("mq-auth-kind-change");
+        let store = MemorySecretStore::default();
+        store.set_existing("pulsar", MQ_AUTH_TOKEN_KEY, "old-token");
+        let mut config = connection("pulsar", "", "");
+        config.db_type = DatabaseType::MessageQueue;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": "http://localhost:8080",
+            "auth": {
+                "kind": "basic",
+                "username": "admin",
+                "password": "basic-secret"
+            }
+        }));
+
+        save_connections_to_file(&path, &[config], &store).unwrap();
+
+        assert_eq!(store.get_existing("pulsar", MQ_AUTH_TOKEN_KEY), None);
+        assert_eq!(store.get_existing("pulsar", MQ_AUTH_PASSWORD_KEY).as_deref(), Some("basic-secret"));
+    }
+
+    #[test]
+    fn save_connections_moves_mq_token_signing_key_to_secret_store_and_restores_it() {
+        let path = temp_connections_file("mq-token-signing");
+        let store = MemorySecretStore::default();
+        let mut config = connection("pulsar", "", "");
+        config.db_type = DatabaseType::MessageQueue;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "pulsar",
+            "adminUrl": "http://localhost:8080",
+            "auth": { "kind": "none" },
+            "tokenSigning": {
+                "algorithm": "hs256",
+                "key": "broker-signing-secret"
+            }
+        }));
+
+        save_connections_to_file(&path, &[config], &store).unwrap();
+
+        assert_eq!(store.get_existing("pulsar", MQ_TOKEN_SIGNING_KEY).as_deref(), Some("broker-signing-secret"));
+        let persisted_json = std::fs::read_to_string(&path).unwrap();
+        assert!(!persisted_json.contains("broker-signing-secret"));
+
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        let signing = loaded[0].external_config.as_ref().and_then(|value| value.get("tokenSigning")).unwrap();
+        assert_eq!(signing.get("key").and_then(serde_json::Value::as_str), Some("broker-signing-secret"));
     }
 }

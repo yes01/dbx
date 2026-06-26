@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import {
@@ -17,6 +17,8 @@ import {
   Eraser,
   Eye,
   FileCode,
+  GripVertical,
+  ListTree,
   Upload,
   Loader2,
   Network,
@@ -43,29 +45,15 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import * as api from "@/lib/api";
-import type { ConnectionConfig, ObjectInfo, ObjectSourceKind } from "@/types/database";
+import type { ConnectionConfig, ForeignKeyInfo, ObjectInfo, ObjectSourceKind, ObjectStatistics } from "@/types/database";
+import { sortTablesByFkDependency, type TableWithFk } from "@/lib/tableDependencySort";
 import { isSchemaAware } from "@/lib/databaseCapabilities";
-import {
-  supportsSchemaDiagram,
-  supportsTableImport,
-  supportsTableStructureEditing,
-  supportsTableTruncate,
-} from "@/lib/databaseFeatureSupport";
+import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/databaseFeatureSupport";
+import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { buildTableSelectSql } from "@/lib/tableSelectSql";
-import {
-  buildDropObjectSql,
-  buildDuplicateTableStructureSql,
-  buildEmptyTableSql,
-  buildTruncateTableSql,
-  type TableAdminSqlOptions,
-} from "@/lib/dbAdminSql";
+import { buildDropObjectSql, buildDuplicateTableStructureSql, buildEmptyTableSql, buildTruncateTableSql, type TableAdminSqlOptions } from "@/lib/dbAdminSql";
 import { useToast } from "@/composables/useToast";
-import {
-  buildExecutableObjectSourceStatements,
-  buildRoutineRenameObjectSourceStatements,
-  objectSourceSaveExecutionMode,
-  supportsSourceBackedRoutineRename,
-} from "@/lib/objectSourceEditor";
+import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, objectSourceSaveExecutionMode, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/objectRenameSql";
 import { buildViewDdl } from "@/lib/viewDdl";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
@@ -78,12 +66,15 @@ import { useExportTracker, type ExportTask } from "@/composables/useExportTracke
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
+import DdlViewDialog from "./DdlViewDialog.vue";
 import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   buildObjectBrowserRows,
   filterObjectBrowserRows,
+  formatObjectBrowserBytes,
+  formatObjectBrowserCount,
   formatObjectBrowserTimestamp,
   initialObjectBrowserSortDirection,
   sortObjectBrowserRows,
@@ -92,7 +83,8 @@ import {
   type ObjectBrowserSortKey,
 } from "@/lib/objectBrowserRows";
 
-type ObjectFilter = "all" | "tables" | "views" | "procedures" | "functions" | "packages";
+type ObjectFilter = "all" | "tables" | "views" | "procedures" | "functions" | "sequences" | "packages";
+type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -128,6 +120,8 @@ const sourceContent = ref("");
 const sourceError = ref("");
 const sourceRow = ref<ObjectBrowserRow | null>(null);
 const sourceEditing = ref(false);
+const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
+const tableStructureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const sourceDraft = ref("");
 const sourceSaving = ref(false);
 const sourceSaveError = ref("");
@@ -150,46 +144,54 @@ const duplicateTarget = ref<ObjectBrowserRow | null>(null);
 const duplicateTableName = ref("");
 const showProcedureExecutionConfirm = ref(false);
 const procedureExecutionTarget = ref<ObjectBrowserRow | null>(null);
+const ddlDialogTarget = ref<ObjectBrowserRow | null>(null);
+const showDdlDialog = ref(false);
 const selectedTableIds = ref<Set<string>>(new Set());
 const expandedPartitionParentIds = ref<Set<string>>(new Set());
 const showBatchDropConfirm = ref(false);
 const batchDropPreviewSql = ref("");
+const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
+  select: 34,
+  name: 360,
+  type: 110,
+  estimatedRows: 110,
+  totalBytes: 100,
+  created_at: 150,
+  updated_at: 150,
+  comment: 260,
+});
 let loadId = 0;
+let stopColumnResize: (() => void) | null = null;
 
 // Export via background tracker
 const { addTask: addExportTask } = useExportTracker();
 
-const needsSchema = computed(() => isSchemaAware(props.connection.db_type));
+const needsSchema = computed(() => isSchemaAware(props.connection.db_type) && !connectionUsesDatabaseObjectTreeMode(props.connection));
 const tableCount = computed(() => rows.value.filter((row) => row.type === "TABLE").length);
-const viewCount = computed(() => rows.value.filter((row) => row.type === "VIEW").length);
+const viewCount = computed(() => rows.value.filter((row) => row.type === "VIEW" || row.type === "MATERIALIZED_VIEW").length);
 const procedureCount = computed(() => rows.value.filter((row) => row.type === "PROCEDURE").length);
 const functionCount = computed(() => rows.value.filter((row) => row.type === "FUNCTION").length);
-const packageCount = computed(
-  () => rows.value.filter((row) => row.type === "PACKAGE" || row.type === "PACKAGE_BODY").length,
-);
-const canOpenStructureEditor = computed(() => supportsTableStructureEditing(props.connection.db_type));
-const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(props.connection.db_type));
-const canOpenTableImport = computed(() => !!props.database && supportsTableImport(props.connection.db_type));
-const supportsTruncateTable = computed(() => supportsTableTruncate(props.connection.db_type));
-const sourceDialect = computed<"mysql" | "postgres" | "sqlserver">(() => {
-  if (
-    props.connection.db_type === "postgres" ||
-    props.connection.db_type === "gaussdb" ||
-    props.connection.db_type === "opengauss"
-  )
-    return "postgres";
-  if (props.connection.db_type === "sqlserver") return "sqlserver";
-  return "mysql";
-});
+const sequenceCount = computed(() => rows.value.filter((row) => row.type === "SEQUENCE").length);
+const packageCount = computed(() => rows.value.filter((row) => row.type === "PACKAGE" || row.type === "PACKAGE_BODY").length);
+const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tableStructureDatabaseType.value));
+const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
+const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
+const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
+const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => {
-  switch (props.connection.db_type) {
+  switch (effectiveDatabaseType.value) {
     case "mysql":
     case "postgres":
     case "sqlite":
     case "sqlserver":
-      return props.connection.db_type;
+      return effectiveDatabaseType.value;
+    case "rqlite":
+    case "turso":
+      return "sqlite";
     case "gaussdb":
+    case "kwdb":
     case "opengauss":
+    case "questdb":
       return "postgres";
     default:
       return "generic";
@@ -203,6 +205,7 @@ const objectFilters = computed<ObjectFilter[]>(() =>
       ["views", viewCount.value],
       ["procedures", procedureCount.value],
       ["functions", functionCount.value],
+      ["sequences", sequenceCount.value],
       ["packages", packageCount.value],
     ] as Array<[ObjectFilter, number]>
   )
@@ -210,15 +213,24 @@ const objectFilters = computed<ObjectFilter[]>(() =>
     .map(([filter]) => filter),
 );
 const showObjectFilter = computed(() => objectFilters.value.length > 2);
-const hasComments = computed(() => rows.value.some((row) => row.comment?.trim()));
 const hasCreatedAt = computed(() => rows.value.some((row) => row.created_at?.trim()));
 const hasUpdatedAt = computed(() => rows.value.some((row) => row.updated_at?.trim()));
+const objectBrowserColumns = computed<ObjectBrowserColumnKey[]>(() => {
+  const columns: ObjectBrowserColumnKey[] = ["select", "name", "type", "estimatedRows", "totalBytes"];
+  if (hasCreatedAt.value) columns.push("created_at");
+  if (hasUpdatedAt.value) columns.push("updated_at");
+  columns.push("comment");
+  return columns;
+});
 const gridTemplateColumns = computed(() => {
-  const columns = ["34px", "minmax(0,1fr)", "120px"];
-  if (hasCreatedAt.value) columns.push("150px");
-  if (hasUpdatedAt.value) columns.push("150px");
-  if (hasComments.value) columns.push("minmax(160px,0.7fr)");
-  return columns.join(" ");
+  return objectBrowserColumns.value
+    .map((key, index, columns) => {
+      const width = objectColumnWidths.value[key];
+      if (key === "select") return `${width}px`;
+      if (index === columns.length - 1) return `minmax(${width}px,1fr)`;
+      return `${width}px`;
+    })
+    .join(" ");
 });
 const partitionRowsByParentId = computed(() => {
   const groups = new Map<string, ObjectBrowserRow[]>();
@@ -238,24 +250,22 @@ const selectedTableRows = computed(() => {
   return selectableRows.value.filter((row) => ids.has(row.id));
 });
 const selectedTableCount = computed(() => selectedTableRows.value.length);
-const allVisibleTablesSelected = computed(
-  () =>
-    visibleSelectableRows.value.length > 0 &&
-    visibleSelectableRows.value.every((row) => selectedTableIds.value.has(row.id)),
-);
+const allVisibleTablesSelected = computed(() => visibleSelectableRows.value.length > 0 && visibleSelectableRows.value.every((row) => selectedTableIds.value.has(row.id)));
 
 function iconFor(row: ObjectBrowserRow) {
-  if (row.type === "VIEW") return Eye;
+  if (row.type === "VIEW" || row.type === "MATERIALIZED_VIEW") return Eye;
   if (row.type === "PROCEDURE") return ScrollText;
   if (row.type === "FUNCTION") return Braces;
+  if (row.type === "SEQUENCE") return ListTree;
   if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") return Package;
   return Table2;
 }
 
 function typeLabel(type: ObjectBrowserRow["type"]) {
-  if (type === "VIEW") return t("objects.view");
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return t("objects.view");
   if (type === "PROCEDURE") return t("objects.procedure");
   if (type === "FUNCTION") return t("objects.function");
+  if (type === "SEQUENCE") return t("objects.sequence");
   if (type === "PACKAGE") return t("objects.package");
   if (type === "PACKAGE_BODY") return t("objects.packageBody");
   return t("objects.table");
@@ -275,11 +285,55 @@ function toggleSort(key: ObjectBrowserSortKey) {
   sortDirection.value = initialObjectBrowserSortDirection(key);
 }
 
+function minimumColumnWidth(key: ObjectBrowserColumnKey) {
+  if (key === "select") return 34;
+  if (key === "name" || key === "comment") return 120;
+  return 72;
+}
+
+function onObjectColumnResizeStart(key: ObjectBrowserColumnKey, event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  stopColumnResize?.();
+
+  const startX = event.clientX;
+  const startWidth = objectColumnWidths.value[key];
+  const minWidth = minimumColumnWidth(key);
+  document.body.classList.add("select-none", "cursor-col-resize");
+
+  const onMove = (moveEvent: MouseEvent) => {
+    objectColumnWidths.value = {
+      ...objectColumnWidths.value,
+      [key]: Math.max(minWidth, startWidth + moveEvent.clientX - startX),
+    };
+  };
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    document.body.classList.remove("select-none", "cursor-col-resize");
+    stopColumnResize = null;
+  };
+
+  stopColumnResize = onUp;
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+function resetObjectColumnWidth(key: ObjectBrowserColumnKey, width: number, event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  objectColumnWidths.value = {
+    ...objectColumnWidths.value,
+    [key]: width,
+  };
+}
+
 function rowMatchesObjectFilter(row: ObjectBrowserRow) {
   if (objectFilter.value === "tables") return row.type === "TABLE";
-  if (objectFilter.value === "views") return row.type === "VIEW";
+  if (objectFilter.value === "views") return row.type === "VIEW" || row.type === "MATERIALIZED_VIEW";
   if (objectFilter.value === "procedures") return row.type === "PROCEDURE";
   if (objectFilter.value === "functions") return row.type === "FUNCTION";
+  if (objectFilter.value === "sequences") return row.type === "SEQUENCE";
   if (objectFilter.value === "packages") return row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
   return true;
 }
@@ -290,9 +344,7 @@ function groupedFilteredRows() {
   const candidateIds = new Set(candidateRows.map((row) => row.id));
   const matchingRows = filterObjectBrowserRows(candidateRows, query);
   const matchingIds = new Set(matchingRows.map((row) => row.id));
-  const parentIdsWithMatchingPartitions = new Set(
-    matchingRows.flatMap((row) => (row.partitionParentId ? [row.partitionParentId] : [])),
-  );
+  const parentIdsWithMatchingPartitions = new Set(matchingRows.flatMap((row) => (row.partitionParentId ? [row.partitionParentId] : [])));
   const rootRows = candidateRows.filter((row) => {
     if (row.partitionParentId) return false;
     if (!query) return true;
@@ -308,8 +360,7 @@ function groupedFilteredRows() {
     const parentMatches = matchingIds.has(row.id);
     const shouldShowPartitions = expandedPartitionParentIds.value.has(row.id) || !!query;
     if (!shouldShowPartitions) continue;
-    const visiblePartitions =
-      query && !parentMatches ? partitions.filter((partition) => matchingIds.has(partition.id)) : partitions;
+    const visiblePartitions = query && !parentMatches ? partitions.filter((partition) => matchingIds.has(partition.id)) : partitions;
     result.push(...sortObjectBrowserRows(visiblePartitions, sortKey.value, sortDirection.value));
   }
 
@@ -317,9 +368,10 @@ function groupedFilteredRows() {
 }
 
 function iconClass(type: ObjectBrowserRow["type"]) {
-  if (type === "VIEW") return "text-purple-500";
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "text-purple-500";
   if (type === "PROCEDURE") return "text-blue-500";
   if (type === "FUNCTION") return "text-amber-500";
+  if (type === "SEQUENCE") return "text-emerald-500";
   if (type === "PACKAGE" || type === "PACKAGE_BODY") return "text-cyan-500";
   return "text-green-500";
 }
@@ -337,20 +389,11 @@ function togglePartitionParent(row: ObjectBrowserRow) {
 }
 
 function canOpenSource(row: ObjectBrowserRow) {
-  return (
-    row.type === "VIEW" ||
-    row.type === "PROCEDURE" ||
-    row.type === "FUNCTION" ||
-    row.type === "PACKAGE" ||
-    row.type === "PACKAGE_BODY"
-  );
+  return row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
 }
 
 function canRename(row: ObjectBrowserRow) {
-  return (
-    supportsObjectRename(props.connection.db_type, row.type) ||
-    supportsSourceBackedRoutineRename(props.connection.db_type, row.type as ObjectSourceKind)
-  );
+  return supportsObjectRename(effectiveDatabaseType.value, row.type) || supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind);
 }
 
 function sourceTitle(row: ObjectBrowserRow | null) {
@@ -386,16 +429,17 @@ async function openSource(row: ObjectBrowserRow) {
   sourceSaveError.value = "";
   sourceLoading.value = true;
   try {
-    const result = await api.getObjectSource(
-      props.connection.id,
-      props.database,
-      row.schema || selectedSchema.value || props.database,
-      row.name,
-      row.type as ObjectSourceKind,
-    );
-    sourceContent.value = result.source;
-    sourceDraft.value = result.source;
-    sourceEditing.value = true;
+    const result = await api.getObjectSource(props.connection.id, props.database, row.schema || selectedSchema.value || props.database, row.name, row.type as ObjectSourceKind);
+    const editable = await api.buildEditableObjectSource({
+      databaseType: effectiveDatabaseType.value,
+      objectType: row.type as ObjectSourceKind,
+      schema: row.schema || selectedSchema.value || props.database,
+      name: row.name,
+      source: result.source,
+    });
+    sourceContent.value = editable;
+    sourceDraft.value = editable;
+    sourceEditing.value = row.type !== "SEQUENCE";
   } catch (e: any) {
     sourceError.value = e?.message || String(e);
   } finally {
@@ -404,17 +448,11 @@ async function openSource(row: ObjectBrowserRow) {
 }
 
 async function openViewDdl(row: ObjectBrowserRow) {
-  if (row.type !== "VIEW") return;
+  if (row.type !== "VIEW" && row.type !== "MATERIALIZED_VIEW") return;
   try {
-    const result = await api.getObjectSource(
-      props.connection.id,
-      props.database,
-      row.schema || selectedSchema.value || props.database,
-      row.name,
-      "VIEW",
-    );
+    const result = await api.getObjectSource(props.connection.id, props.database, row.schema || selectedSchema.value || props.database, row.name, "VIEW");
     const ddl = await buildViewDdl({
-      databaseType: props.connection.db_type,
+      databaseType: effectiveDatabaseType.value,
       schema: row.schema || selectedSchema.value || props.database,
       name: row.name,
       source: result.source,
@@ -431,7 +469,7 @@ async function openNewQuery(row: ObjectBrowserRow) {
   queryStore.updateSql(
     tabId,
     await buildTableSelectSql({
-      databaseType: props.connection.db_type,
+      databaseType: effectiveDatabaseType.value,
       schema: row.schema || selectedSchema.value,
       tableName: row.name,
       limit: 100,
@@ -485,13 +523,13 @@ async function refreshRenamePreviewSql() {
     renamePreviewSqlText.value = "";
     return;
   }
-  if (supportsSourceBackedRoutineRename(props.connection.db_type, row.type as ObjectSourceKind)) {
+  if (supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind)) {
     renamePreviewSqlText.value = `-- Recreate ${row.type} from source, then drop the original object.`;
     return;
   }
   try {
     const sql = await buildRenameObjectSql({
-      databaseType: props.connection.db_type,
+      databaseType: effectiveDatabaseType.value,
       objectType: row.type,
       schema: row.schema || selectedSchema.value,
       oldName: row.name,
@@ -514,16 +552,10 @@ async function confirmRename() {
   renameError.value = "";
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    if (supportsSourceBackedRoutineRename(props.connection.db_type, row.type as ObjectSourceKind)) {
-      const source = await api.getObjectSource(
-        props.connection.id,
-        props.database,
-        schema,
-        row.name,
-        row.type as ObjectSourceKind,
-      );
+    if (supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind)) {
+      const source = await api.getObjectSource(props.connection.id, props.database, schema, row.name, row.type as ObjectSourceKind);
       const statements = await buildRoutineRenameObjectSourceStatements({
-        databaseType: props.connection.db_type,
+        databaseType: effectiveDatabaseType.value,
         objectType: row.type as ObjectSourceKind,
         schema,
         name: row.name,
@@ -535,7 +567,7 @@ async function confirmRename() {
       }
     } else {
       const sql = await buildRenameObjectSql({
-        databaseType: props.connection.db_type,
+        databaseType: effectiveDatabaseType.value,
         objectType: row.type,
         schema,
         oldName: row.name,
@@ -547,11 +579,7 @@ async function confirmRename() {
     showRenameDialog.value = false;
     if (sourceRow.value?.id === row.id) closeSource();
     await reload();
-    await connectionStore.refreshObjectListTreeNode(
-      props.connection.id,
-      props.database,
-      row.schema || selectedSchema.value,
-    );
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
   } catch (e: any) {
     renameError.value = e?.message || String(e);
   }
@@ -562,27 +590,16 @@ async function confirmDrop() {
   const row = dropTarget.value;
   try {
     const sql = await buildDropObjectSql({
-      databaseType: props.connection.db_type,
+      databaseType: effectiveDatabaseType.value,
       objectType: row.type,
       schema: row.schema || selectedSchema.value,
       name: row.name,
     });
     await api.executeQuery(props.connection.id, props.database, sql);
-    const successKey =
-      row.type === "VIEW"
-        ? "contextMenu.dropViewSuccess"
-        : row.type === "PROCEDURE"
-          ? "contextMenu.dropProcedureSuccess"
-          : row.type === "FUNCTION"
-            ? "contextMenu.dropFunctionSuccess"
-            : "contextMenu.dropTableSuccess";
+    const successKey = row.type === "VIEW" ? "contextMenu.dropViewSuccess" : row.type === "PROCEDURE" ? "contextMenu.dropProcedureSuccess" : row.type === "FUNCTION" ? "contextMenu.dropFunctionSuccess" : "contextMenu.dropTableSuccess";
     toast(t(successKey, { name: row.name }));
     await reload();
-    await connectionStore.refreshObjectListTreeNode(
-      props.connection.id,
-      props.database,
-      row.schema || selectedSchema.value,
-    );
+    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -592,7 +609,7 @@ async function confirmDrop() {
 function dropConfirmTitle(): string {
   if (!dropTarget.value) return "";
   const type = dropTarget.value.type;
-  if (type === "VIEW") return t("contextMenu.confirmDropViewTitle");
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return t("contextMenu.confirmDropViewTitle");
   if (type === "PROCEDURE") return t("contextMenu.confirmDropProcedureTitle");
   if (type === "FUNCTION") return t("contextMenu.confirmDropFunctionTitle");
   return t("contextMenu.confirmDropTableTitle");
@@ -602,7 +619,7 @@ function dropConfirmMessage(): string {
   if (!dropTarget.value) return "";
   const name = dropTarget.value.name;
   const type = dropTarget.value.type;
-  if (type === "VIEW") return t("contextMenu.confirmDropViewMessage", { name });
+  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return t("contextMenu.confirmDropViewMessage", { name });
   if (type === "PROCEDURE") return t("contextMenu.confirmDropProcedureMessage", { name });
   if (type === "FUNCTION") return t("contextMenu.confirmDropFunctionMessage", { name });
   return t("contextMenu.confirmDropTableMessage", { name });
@@ -679,7 +696,7 @@ function openDatabaseExport(row: ObjectBrowserRow) {
     connectionId: props.connection.id,
     database: props.database,
     schema: row.schema || selectedSchema.value,
-    tableName: row.type === "TABLE" || row.type === "VIEW" ? row.name : undefined,
+    tableName: row.type === "TABLE" || row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" ? row.name : undefined,
   };
 }
 
@@ -723,11 +740,29 @@ function openBatchDatabaseExport() {
   };
 }
 
+async function fetchSortedTableRowsForDrop(): Promise<ObjectBrowserRow[]> {
+  const rows = [...selectedTableRows.value];
+  if (rows.length <= 1) return rows;
+
+  const fkResults = await Promise.all(rows.map((row) => api.listForeignKeys(props.connection.id, props.database, row.schema || selectedSchema.value || "", row.name).catch(() => [] as ForeignKeyInfo[])));
+
+  const tablesWithFk: TableWithFk[] = rows.map((row, i) => ({
+    name: row.name,
+    schema: row.schema || selectedSchema.value,
+    foreignKeys: fkResults[i] ?? [],
+  }));
+
+  const sorted = sortTablesByFkDependency(tablesWithFk);
+  const nameToRow = new Map(rows.map((r) => [r.name, r]));
+  return sorted.map((t) => nameToRow.get(t.name)!).filter(Boolean);
+}
+
 async function refreshBatchDropPreviewSql() {
   const statements: string[] = [];
-  for (const row of selectedTableRows.value) {
+  const sortedRows = await fetchSortedTableRowsForDrop();
+  for (const row of sortedRows) {
     const sql = await buildDropObjectSql({
-      databaseType: props.connection.db_type,
+      databaseType: effectiveDatabaseType.value,
       objectType: "TABLE",
       schema: row.schema || selectedSchema.value,
       name: row.name,
@@ -745,12 +780,12 @@ function requestBatchDropTables() {
 }
 
 async function confirmBatchDropTables() {
-  const targets = [...selectedTableRows.value];
+  const targets = await fetchSortedTableRowsForDrop();
   if (targets.length === 0) return;
   try {
     for (const row of targets) {
       const sql = await buildDropObjectSql({
-        databaseType: props.connection.db_type,
+        databaseType: effectiveDatabaseType.value,
         objectType: "TABLE",
         schema: row.schema || selectedSchema.value,
         name: row.name,
@@ -769,7 +804,7 @@ async function confirmBatchDropTables() {
 async function exportStructure(row: ObjectBrowserRow) {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name);
+    const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" ? "VIEW" : undefined);
     await saveFileContent(ddl + "\n", `${row.name}.sql`, "SQL", "sql");
   } catch (e: any) {
     console.error("Export structure failed:", e);
@@ -779,14 +814,10 @@ async function exportStructure(row: ObjectBrowserRow) {
 async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
   try {
     const schema = row.schema || selectedSchema.value;
-    const queryColumns =
-      props.connection.db_type === "neo4j"
-        ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name)).map(
-            (column) => column.name,
-          )
-        : undefined;
+    const tableColumns = format === "sql" ? await api.getColumns(props.connection.id, props.database, schema || props.database, row.name) : undefined;
+    const queryColumns = props.connection.db_type === "neo4j" ? (tableColumns ?? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name))).map((column) => column.name) : undefined;
     const result = await fetchTableDataForExport({
-      databaseType: props.connection.db_type,
+      databaseType: effectiveDatabaseType.value,
       schema,
       tableName: row.name,
       columns: queryColumns,
@@ -810,10 +841,11 @@ async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
     }
 
     const content = await formatSqlInsert({
-      databaseType: props.connection.db_type,
+      databaseType: effectiveDatabaseType.value,
       schema,
       tableName: row.name,
       columns: result.columns,
+      columnTypes: tableColumns ? columnTypesForResultColumns(result.columns, tableColumns) : undefined,
       rows: result.rows,
     });
     await saveFileContent(content, `${row.name}.sql`, "SQL", "sql");
@@ -821,6 +853,11 @@ async function exportDataLegacy(row: ObjectBrowserRow, format: "json" | "sql") {
   } catch (e: any) {
     toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
   }
+}
+
+function columnTypesForResultColumns(columns: string[], tableColumns: Array<{ name: string; data_type: string }>): Array<string | undefined> {
+  const typesByName = new Map(tableColumns.map((column) => [column.name.toLocaleLowerCase(), column.data_type]));
+  return columns.map((column) => typesByName.get(column.toLocaleLowerCase()));
 }
 
 async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql") {
@@ -863,15 +900,11 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx") {
 
   let task: ExportTask | null = null;
   try {
-    const queryColumns =
-      props.connection.db_type === "neo4j"
-        ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name)).map(
-            (column) => column.name,
-          )
-        : undefined;
+    const queryColumns = props.connection.db_type === "neo4j" ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name)).map((column) => column.name) : undefined;
 
     task = addExportTask(row.name, format, filePath);
     const currentTask = task;
+    const rowLimit = settingsStore.editorSettings.exportRowLimitEnabled ? settingsStore.editorSettings.exportRowLimit : null;
     const request: api.TableExportRequest = {
       exportId: currentTask.exportId,
       connectionId: props.connection.id,
@@ -882,6 +915,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx") {
       format,
       columns: queryColumns,
       batchSize: settingsStore.editorSettings.exportBatchSize,
+      rowLimit,
     };
 
     const terminalProgress = await api.startTableExport(request, (progress) => {
@@ -916,7 +950,7 @@ async function confirmDuplicateStructure() {
   try {
     const schema = row.schema || selectedSchema.value;
     const sql = await buildDuplicateTableStructureSql({
-      databaseType: props.connection.db_type,
+      databaseType: effectiveDatabaseType.value,
       schema,
       sourceName: row.name,
       targetName: newName,
@@ -932,7 +966,7 @@ async function confirmDuplicateStructure() {
 
 function tableAdminSqlOptions(row: ObjectBrowserRow): TableAdminSqlOptions {
   return {
-    databaseType: props.connection.db_type,
+    databaseType: effectiveDatabaseType.value,
     schema: row.schema || selectedSchema.value,
     tableName: row.name,
   };
@@ -1026,14 +1060,14 @@ async function saveSource() {
   sourceSaveError.value = "";
   try {
     const statements = await buildExecutableObjectSourceStatements({
-      databaseType: props.connection.db_type,
+      databaseType: effectiveDatabaseType.value,
       objectType: row.type as ObjectSourceKind,
       schema,
       name: row.name,
       source: sourceDraft.value,
     });
     for (const sql of statements) {
-      if (objectSourceSaveExecutionMode(props.connection.db_type) === "single") {
+      if (objectSourceSaveExecutionMode(effectiveDatabaseType.value) === "single") {
         await api.executeQuery(props.connection.id, props.database, sql, schema);
       } else {
         await api.executeScript(props.connection.id, props.database, sql, schema);
@@ -1085,11 +1119,8 @@ async function loadObjects() {
     });
     const availableTableIds = new Set(rows.value.filter((row) => row.type === "TABLE").map((row) => row.id));
     setSelectedTableIds(new Set([...selectedTableIds.value].filter((id) => availableTableIds.has(id))));
-    expandedPartitionParentIds.value = new Set(
-      [...expandedPartitionParentIds.value].filter((id) =>
-        rows.value.some((row) => row.id === id && row.partitionCount),
-      ),
-    );
+    expandedPartitionParentIds.value = new Set([...expandedPartitionParentIds.value].filter((id) => rows.value.some((row) => row.id === id && row.partitionCount)));
+    void loadObjectStatistics(id, schema);
   } catch (e: any) {
     if (id !== loadId) return;
     error.value = e?.message || String(e);
@@ -1101,6 +1132,39 @@ async function loadObjects() {
       }
     }
   }
+}
+
+async function loadObjectStatistics(id: number, schema: string) {
+  if (!rows.value.some((row) => row.type === "TABLE")) return;
+  try {
+    const stats = await api.listObjectStatistics(props.connection.id, props.database, schema);
+    if (id !== loadId || stats.length === 0) return;
+    mergeObjectStatistics(stats, schema);
+  } catch (e) {
+    console.debug("[ObjectBrowser] table statistics unavailable", e);
+  }
+}
+
+function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string) {
+  const statsByKey = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
+  rows.value = rows.value.map((row) => {
+    if (row.type !== "TABLE") return row;
+    const stat = statsByKey.get(objectStatisticKey(row.schema || fallbackSchema, row.name));
+    if (!stat) return row;
+    return {
+      ...row,
+      estimatedRows: normalizeStatisticNumber(stat.estimated_rows),
+      totalBytes: normalizeStatisticNumber(stat.total_bytes),
+    };
+  });
+}
+
+function objectStatisticKey(schema: string | undefined, name: string) {
+  return `${schema || ""}\0${name}`.toLowerCase();
+}
+
+function normalizeStatisticNumber(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 async function reload() {
@@ -1121,23 +1185,13 @@ function filterCount(filter: ObjectFilter) {
   if (filter === "views") return viewCount.value;
   if (filter === "procedures") return procedureCount.value;
   if (filter === "functions") return functionCount.value;
+  if (filter === "sequences") return sequenceCount.value;
   if (filter === "packages") return packageCount.value;
   return rows.value.length;
 }
 
 function filterLabel(filter: ObjectFilter) {
-  const key =
-    filter === "tables"
-      ? "objects.tables"
-      : filter === "views"
-        ? "objects.views"
-        : filter === "procedures"
-          ? "objects.procedures"
-          : filter === "functions"
-            ? "objects.functions"
-            : filter === "packages"
-              ? "objects.packages"
-              : "objects.all";
+  const key = filter === "tables" ? "objects.tables" : filter === "views" ? "objects.views" : filter === "procedures" ? "objects.procedures" : filter === "functions" ? "objects.functions" : filter === "sequences" ? "objects.sequences" : filter === "packages" ? "objects.packages" : "objects.all";
   return `${t(key)} ${filterCount(filter)}`;
 }
 
@@ -1160,6 +1214,10 @@ function onSearchKeydown(event: KeyboardEvent) {
 }
 
 defineExpose({ focusSearch });
+
+onBeforeUnmount(() => {
+  stopColumnResize?.();
+});
 
 watch(
   () => [props.connection.id, props.database, props.schema] as const,
@@ -1191,17 +1249,19 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
 function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     { label: t("contextMenu.viewData"), action: () => openRow(item), icon: Table2 },
-    ...(canOpenStructureEditor.value
-      ? [{ label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }]
-      : []),
-    ...(canRename(item)
-      ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }]
-      : []),
+    {
+      label: t("contextMenu.viewDdl"),
+      action: () => {
+        ddlDialogTarget.value = item;
+        showDdlDialog.value = true;
+      },
+      icon: FileCode,
+    },
+    ...(canOpenStructureEditor.value ? [{ label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
+    ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
-    ...(canOpenTableImport.value
-      ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }]
-      : []),
+    ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
     { label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft },
     { label: "", separator: true },
     exportDataSubmenu(item),
@@ -1243,9 +1303,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { label: t("contextMenu.editView"), action: () => openSource(item), icon: PencilLine },
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
     { label: t("contextMenu.viewDdl"), action: () => openViewDdl(item), icon: ScrollText },
-    ...(canRename(item)
-      ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }]
-      : []),
+    ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     { label: "", separator: true },
@@ -1266,13 +1324,9 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
-    ...(item.type === "PROCEDURE"
-      ? [{ label: t("contextMenu.executeProcedure"), action: () => openProcedureExecution(item), icon: Play }]
-      : []),
+    ...(item.type === "PROCEDURE" ? [{ label: t("contextMenu.executeProcedure"), action: () => openProcedureExecution(item), icon: Play }] : []),
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
-    ...(canRename(item)
-      ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }]
-      : []),
+    ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: "", separator: true },
     {
       label: item.type === "PROCEDURE" ? t("contextMenu.dropProcedure") : t("contextMenu.dropFunction"),
@@ -1295,7 +1349,8 @@ function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (item.type === "TABLE") return getTableMenuItems(item);
-  if (item.type === "VIEW") return getViewMenuItems(item);
+  if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") return getViewMenuItems(item);
+  if (item.type === "SEQUENCE") return getPackageMenuItems(item);
   if (item.type === "PACKAGE" || item.type === "PACKAGE_BODY") return getPackageMenuItems(item);
   return getProcFuncMenuItems(item);
 }
@@ -1309,19 +1364,11 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <div class="min-w-0 truncate text-sm font-medium">
           {{ props.database }}<template v-if="selectedSchema"> / {{ selectedSchema }}</template>
         </div>
-        <div class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-xs text-muted-foreground">
-          {{ filteredRows.length }} / {{ rows.length }}
-        </div>
+        <div class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-xs text-muted-foreground">{{ filteredRows.length }} / {{ rows.length }}</div>
       </div>
       <div class="flex min-w-[240px] flex-1 items-center gap-2">
         <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <Input
-          v-model="search"
-          data-object-search-input
-          class="h-7 text-xs"
-          :placeholder="t('objects.search')"
-          @keydown="onSearchKeydown"
-        />
+        <Input v-model="search" data-object-search-input class="h-7 text-xs" :placeholder="t('objects.search')" @keydown="onSearchKeydown" />
         <div v-if="showObjectFilter" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
           <button
             v-for="filter in objectFilters"
@@ -1338,12 +1385,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           </button>
         </div>
       </div>
-      <Select
-        v-if="needsSchema"
-        :model-value="selectedSchema"
-        :disabled="loadingSchemas"
-        @update:model-value="onSchemaChange"
-      >
+      <Select v-if="needsSchema" :model-value="selectedSchema" :disabled="loadingSchemas" @update:model-value="onSchemaChange">
         <SelectTrigger class="h-7 w-36 text-xs">
           <SelectValue :placeholder="loadingSchemas ? t('objects.loadingSchemas') : t('objects.schema')" />
         </SelectTrigger>
@@ -1380,74 +1422,105 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     <div v-else-if="error" class="flex flex-1 items-center justify-center px-6 text-center text-sm text-destructive">
       {{ error }}
     </div>
-    <div
-      v-else-if="filteredRows.length === 0"
-      class="flex flex-1 items-center justify-center text-sm text-muted-foreground"
-    >
+    <div v-else-if="filteredRows.length === 0" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
       {{ t("objects.empty") }}
     </div>
     <div v-else class="flex min-h-0 flex-1 flex-col">
-      <div
-        class="grid h-8 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground"
-        :style="{ gridTemplateColumns }"
-      >
-        <button
-          class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent"
-          type="button"
-          :disabled="visibleSelectableRows.length === 0"
-          @click="toggleVisibleTableSelection"
-        >
-          <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
-          <Square v-else class="h-3.5 w-3.5" />
-        </button>
-        <button class="flex min-w-0 items-center gap-1 truncate text-left" type="button" @click="toggleSort('name')">
-          <span class="truncate">{{ t("objects.name") }}</span>
-          <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
-        </button>
-        <button class="flex min-w-0 items-center gap-1 truncate text-left" type="button" @click="toggleSort('type')">
-          <span class="truncate">{{ t("objects.type") }}</span>
-          <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
-        </button>
-        <button
-          v-if="hasCreatedAt"
-          class="flex min-w-0 items-center gap-1 truncate text-left"
-          type="button"
-          @click="toggleSort('created_at')"
-        >
-          <span class="truncate">{{ t("objects.createdAt") }}</span>
-          <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
-        </button>
-        <button
-          v-if="hasUpdatedAt"
-          class="flex min-w-0 items-center gap-1 truncate text-left"
-          type="button"
-          @click="toggleSort('updated_at')"
-        >
-          <span class="truncate">{{ t("objects.updatedAt") }}</span>
-          <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
-        </button>
-        <button
-          v-if="hasComments"
-          class="flex min-w-0 items-center gap-1 truncate text-left"
-          type="button"
-          @click="toggleSort('comment')"
-        >
-          <span class="truncate">{{ t("objects.comment") }}</span>
-          <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
-        </button>
+      <div class="grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns }">
+        <div class="relative flex min-w-0 items-center">
+          <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
+            <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
+            <Square v-else class="h-3.5 w-3.5" />
+          </button>
+          <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('select', $event)" @dblclick="resetObjectColumnWidth('select', 34, $event)">
+            <GripVertical class="h-3 w-3" />
+          </div>
+        </div>
+        <div class="relative flex min-w-0 items-center">
+          <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('name')">
+            <span class="truncate">{{ t("objects.name") }}</span>
+            <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
+          </button>
+          <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('name', $event)" @dblclick="resetObjectColumnWidth('name', 360, $event)">
+            <GripVertical class="h-3 w-3" />
+          </div>
+        </div>
+        <div class="relative flex min-w-0 items-center">
+          <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('type')">
+            <span class="truncate">{{ t("objects.type") }}</span>
+            <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
+          </button>
+          <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('type', $event)" @dblclick="resetObjectColumnWidth('type', 110, $event)">
+            <GripVertical class="h-3 w-3" />
+          </div>
+        </div>
+        <div class="relative flex min-w-0 items-center justify-end">
+          <button class="flex min-w-0 items-center justify-end gap-1 truncate pr-4 text-right" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
+            <span class="truncate">{{ t("objects.rows") }}</span>
+            <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
+          </button>
+          <div
+            class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+            @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
+            @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
+          >
+            <GripVertical class="h-3 w-3" />
+          </div>
+        </div>
+        <div class="relative flex min-w-0 items-center justify-end">
+          <button class="flex min-w-0 items-center justify-end gap-1 truncate pr-4 text-right" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
+            <span class="truncate">{{ t("objects.size") }}</span>
+            <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
+          </button>
+          <div
+            class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+            @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
+            @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
+          >
+            <GripVertical class="h-3 w-3" />
+          </div>
+        </div>
+        <div v-if="hasCreatedAt" class="relative flex min-w-0 items-center">
+          <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('created_at')">
+            <span class="truncate">{{ t("objects.createdAt") }}</span>
+            <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
+          </button>
+          <div
+            class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+            @mousedown="onObjectColumnResizeStart('created_at', $event)"
+            @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
+          >
+            <GripVertical class="h-3 w-3" />
+          </div>
+        </div>
+        <div v-if="hasUpdatedAt" class="relative flex min-w-0 items-center">
+          <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('updated_at')">
+            <span class="truncate">{{ t("objects.updatedAt") }}</span>
+            <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
+          </button>
+          <div
+            class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+            @mousedown="onObjectColumnResizeStart('updated_at', $event)"
+            @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
+          >
+            <GripVertical class="h-3 w-3" />
+          </div>
+        </div>
+        <div class="relative flex min-w-0 items-center">
+          <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('comment')">
+            <span class="truncate">{{ t("objects.comment") }}</span>
+            <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
+          </button>
+          <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('comment', $event)" @dblclick="resetObjectColumnWidth('comment', 260, $event)">
+            <GripVertical class="h-3 w-3" />
+          </div>
+        </div>
       </div>
-      <RecycleScroller
-        class="object-browser-scroller min-h-0 flex-1"
-        :items="filteredRows"
-        :item-size="38"
-        :buffer="600"
-        :skip-hover="true"
-        key-field="id"
-      >
+      <RecycleScroller class="object-browser-scroller min-h-0 flex-1" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
         <template #default="{ item }">
           <CustomContextMenu :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
             <div
-              class="grid h-[38px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
+              class="grid h-[34px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
               :class="{
                 'bg-accent/40': sourceRow?.id === item.id,
                 'bg-primary/5': selectedTableIds.has(item.id),
@@ -1456,12 +1529,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               @click="onRowClick(item, $event)"
               @contextmenu="onContextMenu"
             >
-              <button
-                class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-                type="button"
-                :class="{ invisible: item.type !== 'TABLE' }"
-                @click.stop="toggleTableSelection(item)"
-              >
+              <button class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" :class="{ invisible: item.type !== 'TABLE' }" @click.stop="toggleTableSelection(item)">
                 <CheckSquare v-if="selectedTableIds.has(item.id)" class="h-3.5 w-3.5 text-primary" />
                 <Square v-else class="h-3.5 w-3.5" />
               </button>
@@ -1479,29 +1547,24 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 <span v-else class="h-5 w-5 shrink-0" :class="{ 'ml-4': item.partitionParentId }" />
                 <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
                 <span class="truncate text-[13px] font-medium text-foreground">{{ item.name }}</span>
-                <span
-                  v-if="item.partitionCount"
-                  class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground"
-                >
+                <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
                   {{ t("objects.partitions", { count: item.partitionCount }) }}
                 </span>
               </div>
               <div class="truncate text-xs text-muted-foreground">{{ typeLabel(item.type) }}</div>
-              <div
-                v-if="hasCreatedAt"
-                class="truncate text-xs tabular-nums text-muted-foreground"
-                :title="formatObjectBrowserTimestamp(item.created_at)"
-              >
+              <div class="truncate text-right text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
+                {{ formatObjectBrowserCount(item.estimatedRows) }}
+              </div>
+              <div class="truncate text-right text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserCount(item.totalBytes)">
+                {{ formatObjectBrowserBytes(item.totalBytes) }}
+              </div>
+              <div v-if="hasCreatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
                 {{ formatObjectBrowserTimestamp(item.created_at) }}
               </div>
-              <div
-                v-if="hasUpdatedAt"
-                class="truncate text-xs tabular-nums text-muted-foreground"
-                :title="formatObjectBrowserTimestamp(item.updated_at)"
-              >
+              <div v-if="hasUpdatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.updated_at)">
                 {{ formatObjectBrowserTimestamp(item.updated_at) }}
               </div>
-              <div v-if="hasComments" class="truncate text-xs text-muted-foreground" :title="item.comment || ''">
+              <div class="truncate text-xs text-muted-foreground" :title="item.comment || ''">
                 {{ item.comment || "" }}
               </div>
             </div>
@@ -1512,45 +1575,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <div class="flex h-8 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
           <Code2 class="h-3.5 w-3.5 text-muted-foreground" />
           <span class="min-w-0 flex-1 truncate text-xs font-medium">{{ sourceTitle(sourceRow) }}</span>
-          <Button
-            v-if="sourceEditing"
-            variant="ghost"
-            size="sm"
-            class="h-6 px-2 text-xs"
-            :disabled="sourceSaving || !sourceDraft.trim()"
-            @click="saveSource"
-          >
+          <Button v-if="sourceEditing" variant="ghost" size="sm" class="h-6 px-2 text-xs" :disabled="sourceSaving || !sourceDraft.trim()" @click="saveSource">
             <Loader2 v-if="sourceSaving" class="mr-1 h-3 w-3 animate-spin" />
             {{ t("objects.saveSource") }}
           </Button>
-          <Button
-            v-if="sourceEditing"
-            variant="ghost"
-            size="sm"
-            class="h-6 px-2 text-xs"
-            :disabled="sourceSaving"
-            @click="cancelEditSource"
-          >
+          <Button v-if="sourceEditing" variant="ghost" size="sm" class="h-6 px-2 text-xs" :disabled="sourceSaving" @click="cancelEditSource">
             {{ t("objects.cancelEdit") }}
           </Button>
-          <Button
-            v-if="!sourceEditing"
-            variant="ghost"
-            size="icon"
-            class="h-5 w-5"
-            :disabled="!sourceContent"
-            @click="copySource"
-          >
+          <Button v-if="!sourceEditing" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="copySource">
             <Copy class="h-3 w-3" />
           </Button>
-          <Button
-            v-if="!sourceEditing"
-            variant="ghost"
-            size="icon"
-            class="h-5 w-5"
-            :disabled="!sourceContent"
-            @click="editSource"
-          >
+          <Button v-if="!sourceEditing" variant="ghost" size="icon" class="h-5 w-5" :disabled="!sourceContent" @click="editSource">
             <PencilLine class="h-3 w-3" />
           </Button>
           <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSource">
@@ -1564,17 +1599,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           {{ sourceError }}
         </div>
         <div v-else-if="sourceEditing" class="flex min-h-0 flex-1 flex-col" data-object-source-editor>
-          <QueryEditor
-            v-model="sourceDraft"
-            class="min-h-0 flex-1"
-            :connection-id="props.connection.id"
-            :database="props.database"
-            :database-type="props.connection.db_type"
-            :dialect="sourceDialect"
-            :format-dialect="sourceFormatDialect"
-            force-word-wrap
-            @save="saveSource"
-          />
+          <QueryEditor v-model="sourceDraft" class="min-h-0 flex-1" :connection-id="props.connection.id" :database="props.database" :schema="selectedSchema" :database-type="props.connection.db_type" :dialect="sourceDialect" :format-dialect="sourceFormatDialect" force-word-wrap @save="saveSource" />
           <div v-if="sourceSaveError" class="shrink-0 border-t px-3 py-2 text-xs text-destructive">
             {{ sourceSaveError }}
           </div>
@@ -1586,6 +1611,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           class="min-h-0 flex-1"
           :connection-id="props.connection.id"
           :database="props.database"
+          :schema="selectedSchema"
           :database-type="props.connection.db_type"
           :dialect="sourceDialect"
           :format-dialect="sourceFormatDialect"
@@ -1597,22 +1623,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </div>
   </div>
 
-  <DangerConfirmDialog
-    v-model:open="showDropConfirm"
-    :title="dropConfirmTitle()"
-    :details="dropConfirmMessage()"
-    :confirm-label="t('dangerDialog.deleteConfirm')"
-    @confirm="confirmDrop"
-  />
+  <DangerConfirmDialog v-model:open="showDropConfirm" :title="dropConfirmTitle()" :details="dropConfirmMessage()" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDrop" />
 
-  <DangerConfirmDialog
-    v-model:open="showBatchDropConfirm"
-    :title="t('objects.confirmBatchDropTitle')"
-    :message="t('objects.confirmBatchDropMessage', { count: selectedTableCount })"
-    :sql="batchDropPreviewSql"
-    :confirm-label="t('objects.dropSelected')"
-    @confirm="confirmBatchDropTables"
-  />
+  <DangerConfirmDialog v-model:open="showBatchDropConfirm" :title="t('objects.confirmBatchDropTitle')" :message="t('objects.confirmBatchDropMessage', { count: selectedTableCount })" :sql="batchDropPreviewSql" :confirm-label="t('objects.dropSelected')" @confirm="confirmBatchDropTables" />
 
   <Dialog v-model:open="showRenameDialog">
     <DialogContent class="sm:max-w-[420px]">
@@ -1620,16 +1633,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <DialogTitle>{{ t("contextMenu.renameObjectTitle") }}</DialogTitle>
       </DialogHeader>
       <div class="grid gap-3">
-        <Input
-          v-model="renameInput"
-          :placeholder="t('contextMenu.renameObjectNamePlaceholder')"
-          @keydown.enter.prevent="confirmRename"
-        />
-        <pre
-          v-if="renamePreviewSqlText"
-          class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap"
-          v-html="highlight(renamePreviewSqlText)"
-        ></pre>
+        <Input v-model="renameInput" :placeholder="t('contextMenu.renameObjectNamePlaceholder')" @keydown.enter.prevent="confirmRename" />
+        <pre v-if="renamePreviewSqlText" class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(renamePreviewSqlText)"></pre>
         <p v-if="renameError" class="text-sm text-destructive">{{ renameError }}</p>
       </div>
       <DialogFooter>
@@ -1650,14 +1655,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     @confirm="confirmTruncateTable"
   />
 
-  <DangerConfirmDialog
-    v-model:open="showEmptyConfirm"
-    :title="t('contextMenu.confirmEmptyTableTitle')"
-    :message="t('contextMenu.confirmEmptyTableMessage', { name: emptyTarget?.name ?? '' })"
-    :sql="emptyPreviewSql"
-    :confirm-label="t('contextMenu.emptyTable')"
-    @confirm="confirmEmptyTable"
-  />
+  <DangerConfirmDialog v-model:open="showEmptyConfirm" :title="t('contextMenu.confirmEmptyTableTitle')" :message="t('contextMenu.confirmEmptyTableMessage', { name: emptyTarget?.name ?? '' })" :sql="emptyPreviewSql" :confirm-label="t('contextMenu.emptyTable')" @confirm="confirmEmptyTable" />
 
   <ProcedureExecutionDialog
     v-if="procedureExecutionTarget"
@@ -1676,11 +1674,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.duplicateNameTitle") }}</DialogTitle>
       </DialogHeader>
-      <Input
-        v-model="duplicateTableName"
-        :placeholder="t('contextMenu.duplicateNamePlaceholder')"
-        @keydown.enter.prevent="confirmDuplicateStructure"
-      />
+      <Input v-model="duplicateTableName" :placeholder="t('contextMenu.duplicateNamePlaceholder')" @keydown.enter.prevent="confirmDuplicateStructure" />
       <DialogFooter>
         <Button variant="outline" @click="showDuplicateDialog = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button :disabled="!duplicateTableName.trim()" @click="confirmDuplicateStructure">
@@ -1689,6 +1683,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <DdlViewDialog v-if="ddlDialogTarget" :connection-id="props.connection.id" :database="props.database" :schema="ddlDialogTarget.schema || selectedSchema" :table-name="ddlDialogTarget.name" :dialect="sourceDialect" v-model:open="showDdlDialog" />
 </template>
 
 <style scoped>

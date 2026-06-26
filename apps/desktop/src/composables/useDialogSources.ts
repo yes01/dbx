@@ -10,6 +10,7 @@ const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
 const showDiagramDialog = ref(false);
 const showTableImportDialog = ref(false);
+const showTableDataGenerateDialog = ref(false);
 const showFieldLineageDialog = ref(false);
 const showDatabaseSearchDialog = ref(false);
 const showDatabaseExportDialog = ref(false);
@@ -39,6 +40,10 @@ const tableImportPrefillConnectionId = ref("");
 const tableImportPrefillDatabase = ref("");
 const tableImportPrefillSchema = ref("");
 const tableImportPrefillTable = ref("");
+const tableDataGeneratePrefillConnectionId = ref("");
+const tableDataGeneratePrefillDatabase = ref("");
+const tableDataGeneratePrefillSchema = ref("");
+const tableDataGeneratePrefillTable = ref("");
 const lineagePrefillConnectionId = ref("");
 const lineagePrefillDatabase = ref("");
 const lineagePrefillSchema = ref("");
@@ -144,6 +149,20 @@ export function useDialogSources() {
     );
 
     watch(
+      () => connectionStore.tableDataGenerateSource,
+      (v) => {
+        if (v) {
+          tableDataGeneratePrefillConnectionId.value = v.connectionId;
+          tableDataGeneratePrefillDatabase.value = v.database;
+          tableDataGeneratePrefillSchema.value = v.schema ?? "";
+          tableDataGeneratePrefillTable.value = v.tableName;
+          showTableDataGenerateDialog.value = true;
+          connectionStore.tableDataGenerateSource = null;
+        }
+      },
+    );
+
+    watch(
       () => connectionStore.fieldLineageSource,
       (v) => {
         if (v) {
@@ -200,11 +219,11 @@ export function useDialogSources() {
       showConfigPassphraseDialog.value = false;
       toast(t("configExport.exportSuccess"), 2000);
     } catch (e: any) {
-      configPassphraseError.value = e?.message || String(e);
+      configPassphraseError.value = e?.message === "crypto_unavailable" ? t("configExport.cryptoUnavailable") : e?.message || String(e);
     }
   }
 
-  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" = "dbx") {
+  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" = "dbx") {
     try {
       const result = await connectionStore.readImportFile(source);
       if (!result) return;
@@ -215,13 +234,20 @@ export function useDialogSources() {
         showConfigPassphraseDialog.value = true;
       } else {
         const { count, layout } = await connectionStore.importConnectionsFromFile(result.content, null);
+        // For DataGrip imports, read Keychain passwords
+        let keychainFilled = 0;
+        if (source === "datagrip" && count > 0) {
+          keychainFilled = await connectionStore.applyDataGripKeychainPasswords();
+        }
         toast(
           count > 0
             ? source === "navicat"
               ? t("configExport.importNavicatSuccess", { count })
               : source === "dbeaver"
                 ? t("configExport.importDbeaverSuccess", { count })
-                : t("configExport.importSuccess", { count })
+                : source === "datagrip"
+                  ? t("configExport.importDatagripSuccess", { count: count, filled: keychainFilled })
+                  : t("configExport.importSuccess", { count })
             : t("configExport.importNone"),
           4000,
         );
@@ -245,8 +271,7 @@ export function useDialogSources() {
         showImportLayoutConfirm.value = true;
       }
     } catch (e: any) {
-      configPassphraseError.value =
-        e?.message === "wrong_passphrase" ? t("configExport.wrongPassphrase") : e?.message || String(e);
+      configPassphraseError.value = e?.message === "wrong_passphrase" ? t("configExport.wrongPassphrase") : e?.message === "crypto_unavailable" ? t("configExport.cryptoUnavailable") : e?.message || String(e);
     }
   }
 
@@ -257,6 +282,7 @@ export function useDialogSources() {
     showSqlFileDialog,
     showDiagramDialog,
     showTableImportDialog,
+    showTableDataGenerateDialog,
     showFieldLineageDialog,
     showDatabaseSearchDialog,
     showDatabaseExportDialog,
@@ -285,6 +311,10 @@ export function useDialogSources() {
     tableImportPrefillDatabase,
     tableImportPrefillSchema,
     tableImportPrefillTable,
+    tableDataGeneratePrefillConnectionId,
+    tableDataGeneratePrefillDatabase,
+    tableDataGeneratePrefillSchema,
+    tableDataGeneratePrefillTable,
     lineagePrefillConnectionId,
     lineagePrefillDatabase,
     lineagePrefillSchema,

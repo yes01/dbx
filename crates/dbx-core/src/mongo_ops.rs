@@ -2,30 +2,47 @@ use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::mongo_document_id_params;
 use crate::db::elasticsearch_driver;
 use crate::db::mongo_driver::{self, MongoDocumentResult};
+use crate::db::vector_driver;
+
+fn sort_names(mut names: Vec<String>) -> Vec<String> {
+    names.sort_by(|left, right| {
+        let left_lower = left.to_lowercase();
+        let right_lower = right.to_lowercase();
+        left_lower.cmp(&right_lower).then_with(|| left.cmp(right))
+    });
+    names
+}
+
+async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
+    state.get_or_create_pool(connection_id, None).await.map(|_| ())
+}
 
 pub async fn mongo_list_databases_core(state: &AppState, connection_id: &str) -> Result<Vec<String>, String> {
+    ensure_document_pool(state, connection_id).await?;
     let fallback_database = configured_mongo_database(state, connection_id).await;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => match mongo_driver::list_databases(client).await {
-            Ok(databases) => Ok(databases),
+            Ok(databases) => Ok(sort_names(databases)),
             Err(error) if mongo_list_databases_unauthorized(&error) => {
                 fallback_mongo_database(&error, fallback_database)
             }
             Err(error) => Err(error),
         },
-        PoolKind::Elasticsearch(_) => Ok(vec!["default".to_string()]),
+        PoolKind::Elasticsearch(_) | PoolKind::VectorDb(_) => Ok(vec!["default".to_string()]),
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             match client.mongo_list_databases::<Vec<serde_json::Value>>().await {
-                Ok(result) => Ok(result.iter().filter_map(|v| v.get("name")?.as_str().map(String::from)).collect()),
+                Ok(result) => {
+                    Ok(sort_names(result.iter().filter_map(|v| v.get("name")?.as_str().map(String::from)).collect()))
+                }
                 Err(error) if mongo_list_databases_unauthorized(&error) => {
                     fallback_mongo_database(&error, fallback_database)
                 }
                 Err(error) => Err(error),
             }
         }
-        _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
+        _ => Err("Not a MongoDB/Elasticsearch/vector connection".to_string()),
     }
 }
 
@@ -43,25 +60,71 @@ fn mongo_list_databases_unauthorized(error: &str) -> bool {
     lower.contains("not authorized") && lower.contains("listdatabases")
 }
 
+use crate::db::vector_driver::CollectionInfo;
+
 pub async fn mongo_list_collections_core(
     state: &AppState,
     connection_id: &str,
     database: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<CollectionInfo>, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
-        PoolKind::MongoDb(client) => mongo_driver::list_collections(client, database).await,
-        PoolKind::Elasticsearch(client) => elasticsearch_driver::list_indices(client).await,
+        PoolKind::MongoDb(client) => {
+            let names = sort_names(mongo_driver::list_collections(client, database).await?);
+            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None }).collect())
+        }
+        PoolKind::Elasticsearch(client) => {
+            let names = sort_names(elasticsearch_driver::list_indices(client).await?);
+            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None }).collect())
+        }
+        PoolKind::VectorDb(client) => vector_driver::list_collections(client).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
-            client.mongo_list_collections(database).await
+            let names = sort_names(client.mongo_list_collections(database).await?);
+            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None }).collect())
         }
-        _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
+        _ => Err("Not a MongoDB/Elasticsearch/vector connection".to_string()),
+    }
+}
+
+pub async fn mongo_create_database_core(state: &AppState, connection_id: &str, database: &str) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::create_database(client, database).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support create database".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_drop_database_core(state: &AppState, connection_id: &str, database: &str) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::drop_database(client, database).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support drop database".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_drop_collection_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::drop_collection(client, database, collection).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support drop collection".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn mongo_find_documents_core(
+pub async fn document_find_documents_core(
     state: &AppState,
     connection_id: &str,
     database: &str,
@@ -71,6 +134,7 @@ pub async fn mongo_find_documents_core(
     filter: Option<&str>,
     sort: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
@@ -79,7 +143,13 @@ pub async fn mongo_find_documents_core(
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
             drop(connections);
-            elasticsearch_driver::find_documents(&client, collection, skip, limit).await
+            elasticsearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
+        }
+        PoolKind::VectorDb(client) => {
+            let client = client.clone();
+            drop(connections);
+            let _ = (database, filter, sort);
+            vector_driver::find_documents(&client, collection, skip, limit).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -94,8 +164,22 @@ pub async fn mongo_find_documents_core(
                 }))
                 .await
         }
-        _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
+        _ => Err("Not a MongoDB/Elasticsearch/vector connection".to_string()),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn mongo_find_documents_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    sort: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    document_find_documents_core(state, connection_id, database, collection, skip, limit, filter, sort).await
 }
 
 pub async fn mongo_aggregate_documents_core(
@@ -106,6 +190,7 @@ pub async fn mongo_aggregate_documents_core(
     pipeline_json: &str,
     max_rows: Option<usize>,
 ) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
@@ -123,6 +208,7 @@ pub async fn mongo_insert_document_core(
     collection: &str,
     doc_json: &str,
 ) -> Result<String, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::insert_document(client, database, collection, doc_json).await,
@@ -153,6 +239,7 @@ pub async fn mongo_insert_documents_core(
     collection: &str,
     docs_json: &str,
 ) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::insert_documents(client, database, collection, docs_json).await,
@@ -169,6 +256,7 @@ pub async fn mongo_update_document_core(
     id: &str,
     doc_json: &str,
 ) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::update_document(client, database, collection, id, doc_json).await,
@@ -202,6 +290,7 @@ pub async fn mongo_update_documents_core(
     update_json: &str,
     many: bool,
 ) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
@@ -219,6 +308,7 @@ pub async fn mongo_delete_document_core(
     collection: &str,
     id: &str,
 ) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::delete_document(client, database, collection, id).await,
@@ -245,6 +335,7 @@ pub async fn mongo_delete_documents_core(
     filter_json: &str,
     many: bool,
 ) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
@@ -257,7 +348,19 @@ pub async fn mongo_delete_documents_core(
 
 #[cfg(test)]
 mod tests {
-    use super::{fallback_mongo_database, mongo_list_databases_unauthorized};
+    use super::{fallback_mongo_database, mongo_list_databases_unauthorized, sort_names};
+
+    #[test]
+    fn sorts_names_case_insensitively() {
+        let sorted = sort_names(vec![
+            "movies".to_string(),
+            "Comments".to_string(),
+            "users".to_string(),
+            "embedded_movies".to_string(),
+        ]);
+
+        assert_eq!(sorted, vec!["Comments", "embedded_movies", "movies", "users"]);
+    }
 
     #[test]
     fn detects_mongo_list_databases_unauthorized_errors() {

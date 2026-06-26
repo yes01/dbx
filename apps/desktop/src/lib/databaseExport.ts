@@ -15,6 +15,7 @@ export interface ExportedTableSql {
   qualifiedTableName?: string;
   ddl?: string;
   columns: string[];
+  columnTypes?: Array<string | null | undefined>;
   rows: QueryResult["rows"];
   truncated?: boolean;
 }
@@ -25,6 +26,9 @@ export interface BuildDatabaseSqlExportOptions {
   tables: ExportedTableSql[];
   rowLimitPerTable?: number;
   insertBatchSize?: number;
+  connectionId?: string;
+  database?: string;
+  schema?: string;
 }
 
 export interface BuildExportInsertStatementsOptions {
@@ -33,6 +37,7 @@ export interface BuildExportInsertStatementsOptions {
   tableName?: string;
   qualifiedTableName?: string;
   columns: string[];
+  columnTypes?: Array<string | null | undefined>;
   rows: QueryResult["rows"];
   batchSize?: number;
 }

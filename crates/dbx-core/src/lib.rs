@@ -1,9 +1,15 @@
 pub mod agent_catalog;
 pub mod agent_connection;
+pub mod agent_events;
+pub mod agent_kv;
+pub mod agent_loop;
 pub mod agent_manager;
 pub mod agent_runtime;
 pub mod agent_service;
+pub mod agent_tools;
 pub mod ai;
+pub mod ai_cli_agent;
+pub mod ai_codex_cli;
 pub mod cloud_sync;
 pub mod connection;
 pub mod connection_secrets;
@@ -15,16 +21,22 @@ pub mod database_export;
 pub mod database_search_sql;
 pub mod db;
 pub mod db_admin_sql;
+pub mod driver_runtime;
 pub mod external;
 pub mod history;
 pub mod jdbc;
 pub mod models;
 pub mod mongo_ops;
+#[cfg(feature = "mq-admin")]
+pub mod mq;
+pub mod nacos;
 pub mod object_source_sql;
+pub mod path_utils;
 pub mod plugins;
 pub mod query;
 pub mod query_cancel;
 pub mod query_execution_sql;
+pub mod query_result_export;
 pub mod query_result_sql;
 pub mod redis_ops;
 pub mod saved_sql;
@@ -35,11 +47,14 @@ pub mod sql_analysis;
 pub mod sql_dialect;
 pub mod sql_editability;
 pub mod sql_file_import;
+pub mod sql_risk;
+pub mod sqlite_backup;
 pub mod storage;
 pub mod table_export;
 pub mod table_import;
 pub mod table_structure_sql;
 pub mod text_export;
+pub mod token_usage;
 pub mod transfer;
 pub mod types;
 pub mod update;
@@ -47,8 +62,8 @@ pub mod xlsx_export;
 
 pub const R2_CDN_BASE: &str = "https://dl.dbxio.com/";
 
-pub fn download_candidate_urls(_fallback_url: &str, r2_path: &str) -> Vec<String> {
-    vec![format!("{R2_CDN_BASE}{r2_path}")]
+pub fn download_candidate_urls(github_url: &str, r2_path: &str) -> Vec<String> {
+    vec![format!("{R2_CDN_BASE}{r2_path}"), github_url.to_string()]
 }
 
 use std::pin::Pin;
@@ -57,13 +72,13 @@ type ResponseFuture = Pin<Box<dyn std::future::Future<Output = Result<reqwest::R
 
 pub async fn race_download(
     client: &reqwest::Client,
-    fallback_url: &str,
+    github_url: &str,
     r2_path: &str,
     user_agent: &str,
 ) -> Result<reqwest::Response, String> {
     use futures::future::select_ok;
 
-    let urls = download_candidate_urls(fallback_url, r2_path);
+    let urls = download_candidate_urls(github_url, r2_path);
     let mut futs: Vec<ResponseFuture> = Vec::with_capacity(urls.len());
 
     for url in urls {
@@ -91,12 +106,18 @@ mod tests {
     use super::download_candidate_urls;
 
     #[test]
-    fn download_candidates_use_internal_cdn_only() {
+    fn download_candidates_exclude_third_party_github_proxy() {
         let urls = download_candidate_urls(
-            "https://example.invalid/releases/latest/download/latest.json",
+            "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
             "releases/latest/latest.json",
         );
 
-        assert_eq!(urls, vec!["https://dl.dbxio.com/releases/latest/latest.json"]);
+        assert_eq!(
+            urls,
+            vec![
+                "https://dl.dbxio.com/releases/latest/latest.json",
+                "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+            ]
+        );
     }
 }

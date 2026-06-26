@@ -1,7 +1,9 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
@@ -19,50 +21,30 @@ pub struct ConnectionConfig {
     pub database: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_databases: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_schemas: Option<HashMap<String, Vec<String>>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
     pub color: Option<String>,
-    #[serde(default)]
-    pub ssh_enabled: bool,
-    #[serde(default)]
-    pub ssh_host: String,
-    #[serde(default = "default_ssh_port")]
-    pub ssh_port: u16,
-    #[serde(default)]
-    pub ssh_user: String,
-    #[serde(default)]
-    pub ssh_password: String,
-    #[serde(default)]
-    pub ssh_key_path: String,
-    #[serde(default)]
-    pub ssh_key_passphrase: String,
-    #[serde(default)]
-    pub ssh_expose_lan: bool,
-    #[serde(default = "default_ssh_connect_timeout_secs")]
-    pub ssh_connect_timeout_secs: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ssh_tunnels: Vec<SshTunnelConfig>,
+    pub transport_layers: Vec<TransportLayerConfig>,
     #[serde(default = "default_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
     #[serde(default = "default_query_timeout_secs")]
     pub query_timeout_secs: u64,
-    #[serde(default)]
-    pub proxy_enabled: bool,
-    #[serde(default)]
-    pub proxy_type: ProxyType,
-    #[serde(default)]
-    pub proxy_host: String,
-    #[serde(default = "default_proxy_port")]
-    pub proxy_port: u16,
-    #[serde(default)]
-    pub proxy_username: String,
-    #[serde(default)]
-    pub proxy_password: String,
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_keepalive_interval_secs")]
+    pub keepalive_interval_secs: u64,
     #[serde(default)]
     pub ssl: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ca_cert_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_cert_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_key_path: String,
     #[serde(default)]
     pub sysdba: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +65,16 @@ pub struct ConnectionConfig {
     pub redis_sentinel_tls: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub redis_cluster_nodes: String,
+    #[serde(default = "default_redis_key_separator", skip_serializing_if = "is_default_redis_separator")]
+    pub redis_key_separator: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub etcd_endpoints: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gbase_server: String,
+    /// Informix server name (INFORMIXSERVER). When empty, the agent
+    /// derives it from the hostname.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub informix_server: String,
     /// Typed configuration for external tabular sources.
     #[serde(default)]
     pub external_config: Option<serde_json::Value>,
@@ -92,6 +84,45 @@ pub struct ConnectionConfig {
     pub jdbc_driver_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub one_time: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum TransportLayerConfig {
+    Ssh(SshTunnelConfig),
+    Proxy(ProxyTunnelConfig),
+}
+
+impl TransportLayerConfig {
+    pub fn id(&self) -> &str {
+        match self {
+            TransportLayerConfig::Ssh(layer) => &layer.id,
+            TransportLayerConfig::Proxy(layer) => &layer.id,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            TransportLayerConfig::Ssh(layer) => &layer.name,
+            TransportLayerConfig::Proxy(layer) => &layer.name,
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        match self {
+            TransportLayerConfig::Ssh(layer) => layer.enabled,
+            TransportLayerConfig::Proxy(layer) => layer.enabled,
+        }
+    }
+
+    pub fn endpoint(&self) -> (&str, u16) {
+        match self {
+            TransportLayerConfig::Ssh(layer) => (&layer.host, layer.port),
+            TransportLayerConfig::Proxy(layer) => (&layer.host, layer.port),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,6 +149,33 @@ pub struct SshTunnelConfig {
     pub connect_timeout_secs: u64,
     #[serde(default)]
     pub expose_lan: bool,
+    #[serde(default)]
+    pub use_ssh_agent: bool,
+    /// Custom SSH agent socket path (e.g. `~/.ssh/agent.sock`).
+    /// When set and `use_ssh_agent` is true, this path is used instead of
+    /// the `SSH_AUTH_SOCK` environment variable.
+    #[serde(default)]
+    pub ssh_agent_sock_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyTunnelConfig {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub proxy_type: ProxyType,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default = "default_proxy_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,11 +197,19 @@ pub fn default_ssh_connect_timeout_secs() -> u64 {
 }
 
 pub fn default_connect_timeout_secs() -> u64 {
-    5
+    10
 }
 
 pub fn default_query_timeout_secs() -> u64 {
     30
+}
+
+pub fn default_idle_timeout_secs() -> u64 {
+    60
+}
+
+pub fn default_keepalive_interval_secs() -> u64 {
+    60
 }
 
 fn default_proxy_port() -> u16 {
@@ -154,7 +220,15 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub fn default_redis_key_separator() -> String {
+    ":".to_string()
+}
+
+fn is_default_redis_separator(value: &str) -> bool {
+    value == ":"
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum ProxyType {
@@ -169,6 +243,7 @@ pub enum DatabaseType {
     Mysql,
     Postgres,
     Sqlite,
+    Rqlite,
     Redis,
     #[serde(rename = "duckdb")]
     DuckDb,
@@ -182,9 +257,20 @@ pub enum DatabaseType {
     Oracle,
     #[serde(rename = "elasticsearch")]
     Elasticsearch,
+    #[serde(rename = "qdrant")]
+    Qdrant,
+    #[serde(rename = "milvus")]
+    Milvus,
+    #[serde(rename = "weaviate")]
+    Weaviate,
+    #[serde(rename = "chromadb")]
+    ChromaDb,
     Doris,
     #[serde(rename = "starrocks")]
     StarRocks,
+    #[serde(rename = "manticoresearch")]
+    ManticoreSearch,
+    Databend,
     Redshift,
     Dameng,
     Kingbase,
@@ -192,6 +278,7 @@ pub enum DatabaseType {
     Vastbase,
     Goldendb,
     Gaussdb,
+    Kwdb,
     Yashandb,
     Databricks,
     #[serde(rename = "saphana")]
@@ -210,6 +297,8 @@ pub enum DatabaseType {
     H2,
     Snowflake,
     Trino,
+    #[serde(rename = "prestosql")]
+    PrestoSql,
     Hive,
     #[serde(rename = "db2")]
     Db2,
@@ -223,50 +312,291 @@ pub enum DatabaseType {
     Sundb,
     Tdengine,
     Xugu,
+    Iotdb,
+    Etcd,
+    #[serde(rename = "zookeeper")]
+    ZooKeeper,
+    Nacos,
     #[serde(rename = "iris")]
     Iris,
+    #[serde(rename = "turso")]
+    Turso,
+    #[serde(rename = "influxdb")]
+    InfluxDb,
+    #[serde(rename = "questdb")]
+    Questdb,
     Jdbc,
+    /// Message queue admin connection (Pulsar / Kafka / RocketMQ). The specific
+    /// system is determined by `external_config.systemKind`.
+    #[serde(rename = "mq")]
+    MessageQueue,
+}
+
+#[derive(Deserialize)]
+struct ConnectionConfigData {
+    pub id: String,
+    pub name: String,
+    pub db_type: DatabaseType,
+    #[serde(default)]
+    pub driver_profile: Option<String>,
+    #[serde(default)]
+    pub driver_label: Option<String>,
+    #[serde(default)]
+    pub url_params: Option<String>,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub database: Option<String>,
+    #[serde(default)]
+    pub visible_databases: Option<Vec<String>>,
+    #[serde(default)]
+    pub visible_schemas: Option<HashMap<String, Vec<String>>>,
+    #[serde(default)]
+    pub attached_databases: Vec<AttachedDatabaseConfig>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub transport_layers: Vec<TransportLayerConfig>,
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_query_timeout_secs")]
+    pub query_timeout_secs: u64,
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_keepalive_interval_secs")]
+    pub keepalive_interval_secs: u64,
+    #[serde(default)]
+    pub ssl: bool,
+    #[serde(default)]
+    pub ca_cert_path: String,
+    #[serde(default)]
+    pub client_cert_path: String,
+    #[serde(default)]
+    pub client_key_path: String,
+    #[serde(default)]
+    pub sysdba: bool,
+    #[serde(default)]
+    pub oracle_connection_type: Option<String>,
+    #[serde(default)]
+    pub connection_string: Option<String>,
+    #[serde(default)]
+    pub redis_connection_mode: Option<String>,
+    #[serde(default)]
+    pub redis_sentinel_master: String,
+    #[serde(default)]
+    pub redis_sentinel_nodes: String,
+    #[serde(default)]
+    pub redis_sentinel_username: String,
+    #[serde(default)]
+    pub redis_sentinel_password: String,
+    #[serde(default)]
+    pub redis_sentinel_tls: bool,
+    #[serde(default)]
+    pub redis_cluster_nodes: String,
+    #[serde(default = "default_redis_key_separator")]
+    pub redis_key_separator: String,
+    #[serde(default)]
+    pub etcd_endpoints: String,
+    #[serde(default)]
+    pub gbase_server: String,
+    #[serde(default)]
+    pub informix_server: String,
+    #[serde(default)]
+    pub external_config: Option<serde_json::Value>,
+    #[serde(default)]
+    pub jdbc_driver_class: Option<String>,
+    #[serde(default)]
+    pub jdbc_driver_paths: Vec<String>,
+    #[serde(default)]
+    pub one_time: bool,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+impl From<ConnectionConfigData> for ConnectionConfig {
+    fn from(data: ConnectionConfigData) -> Self {
+        Self {
+            id: data.id,
+            name: data.name,
+            db_type: data.db_type,
+            driver_profile: data.driver_profile,
+            driver_label: data.driver_label,
+            url_params: data.url_params,
+            host: data.host,
+            port: data.port,
+            username: data.username,
+            password: data.password,
+            database: data.database,
+            visible_databases: data.visible_databases,
+            visible_schemas: data.visible_schemas,
+            attached_databases: data.attached_databases,
+            color: data.color,
+            transport_layers: data.transport_layers,
+            connect_timeout_secs: data.connect_timeout_secs,
+            query_timeout_secs: data.query_timeout_secs,
+            idle_timeout_secs: data.idle_timeout_secs,
+            keepalive_interval_secs: data.keepalive_interval_secs,
+            ssl: data.ssl,
+            ca_cert_path: data.ca_cert_path,
+            client_cert_path: data.client_cert_path,
+            client_key_path: data.client_key_path,
+            sysdba: data.sysdba,
+            oracle_connection_type: data.oracle_connection_type,
+            connection_string: data.connection_string,
+            redis_connection_mode: data.redis_connection_mode,
+            redis_sentinel_master: data.redis_sentinel_master,
+            redis_sentinel_nodes: data.redis_sentinel_nodes,
+            redis_sentinel_username: data.redis_sentinel_username,
+            redis_sentinel_password: data.redis_sentinel_password,
+            redis_sentinel_tls: data.redis_sentinel_tls,
+            redis_cluster_nodes: data.redis_cluster_nodes,
+            redis_key_separator: data.redis_key_separator,
+            etcd_endpoints: data.etcd_endpoints,
+            gbase_server: data.gbase_server,
+            informix_server: data.informix_server,
+            external_config: data.external_config,
+            jdbc_driver_class: data.jdbc_driver_class,
+            jdbc_driver_paths: data.jdbc_driver_paths,
+            one_time: data.one_time,
+            read_only: data.read_only,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ConnectionConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = Value::deserialize(deserializer)?;
+        migrate_legacy_transport_layers(&mut value);
+        let data = ConnectionConfigData::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(data.into())
+    }
+}
+
+fn migrate_legacy_transport_layers(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if object.get("transport_layers").and_then(Value::as_array).is_some_and(|layers| !layers.is_empty()) {
+        return;
+    }
+
+    let mut layers = Vec::new();
+    let ssh_enabled = object.get("ssh_enabled").and_then(Value::as_bool).unwrap_or(false);
+    if ssh_enabled {
+        if let Some(ssh_tunnels) = object.get("ssh_tunnels").and_then(Value::as_array) {
+            for hop in ssh_tunnels {
+                let mut layer = hop.clone();
+                if let Some(layer_object) = layer.as_object_mut() {
+                    layer_object.insert("type".to_string(), Value::String("ssh".to_string()));
+                }
+                layers.push(layer);
+            }
+        }
+
+        if layers.is_empty() && string_field(object, "ssh_host").is_some() {
+            let mut layer = serde_json::Map::new();
+            layer.insert("type".to_string(), Value::String("ssh".to_string()));
+            layer.insert("id".to_string(), Value::String("legacy".to_string()));
+            layer.insert("enabled".to_string(), Value::Bool(true));
+            copy_string(object, &mut layer, "ssh_host", "host");
+            copy_u64(object, &mut layer, "ssh_port", "port", default_ssh_port() as u64);
+            copy_string(object, &mut layer, "ssh_user", "user");
+            copy_string(object, &mut layer, "ssh_password", "password");
+            copy_string(object, &mut layer, "ssh_key_path", "key_path");
+            copy_string(object, &mut layer, "ssh_key_passphrase", "key_passphrase");
+            copy_u64(
+                object,
+                &mut layer,
+                "ssh_connect_timeout_secs",
+                "connect_timeout_secs",
+                default_ssh_connect_timeout_secs(),
+            );
+            copy_bool(object, &mut layer, "ssh_expose_lan", "expose_lan");
+            layers.push(Value::Object(layer));
+        }
+    }
+
+    let proxy_enabled = object.get("proxy_enabled").and_then(Value::as_bool).unwrap_or(false);
+    if proxy_enabled && string_field(object, "proxy_host").is_some() {
+        let mut layer = serde_json::Map::new();
+        layer.insert("type".to_string(), Value::String("proxy".to_string()));
+        layer.insert("id".to_string(), Value::String("legacy-proxy".to_string()));
+        layer.insert("enabled".to_string(), Value::Bool(true));
+        copy_string(object, &mut layer, "proxy_type", "proxy_type");
+        copy_string(object, &mut layer, "proxy_host", "host");
+        copy_u64(object, &mut layer, "proxy_port", "port", default_proxy_port() as u64);
+        copy_string(object, &mut layer, "proxy_username", "username");
+        copy_string(object, &mut layer, "proxy_password", "password");
+        layers.push(Value::Object(layer));
+    }
+
+    if !layers.is_empty() {
+        object.insert("transport_layers".to_string(), Value::Array(layers));
+    }
+}
+
+fn string_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    object.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
+}
+
+fn copy_string(
+    object: &serde_json::Map<String, Value>,
+    target: &mut serde_json::Map<String, Value>,
+    from: &str,
+    to: &str,
+) {
+    if let Some(value) = object.get(from).and_then(Value::as_str) {
+        target.insert(to.to_string(), Value::String(value.to_string()));
+    }
+}
+
+fn copy_bool(
+    object: &serde_json::Map<String, Value>,
+    target: &mut serde_json::Map<String, Value>,
+    from: &str,
+    to: &str,
+) {
+    if let Some(value) = object.get(from).and_then(Value::as_bool) {
+        target.insert(to.to_string(), Value::Bool(value));
+    }
+}
+
+fn copy_u64(
+    object: &serde_json::Map<String, Value>,
+    target: &mut serde_json::Map<String, Value>,
+    from: &str,
+    to: &str,
+    default: u64,
+) {
+    let value = object.get(from).and_then(Value::as_u64).filter(|value| *value > 0).unwrap_or(default);
+    target.insert(to.to_string(), Value::Number(value.into()));
 }
 
 impl ConnectionConfig {
-    pub fn effective_ssh_connect_timeout_secs(&self) -> u64 {
-        if self.ssh_connect_timeout_secs == 0 {
-            default_ssh_connect_timeout_secs()
-        } else {
-            self.ssh_connect_timeout_secs
-        }
+    pub fn effective_transport_layers(&self) -> Vec<TransportLayerConfig> {
+        self.transport_layers.iter().filter(|layer| layer.enabled()).cloned().collect()
     }
 
     pub fn effective_ssh_tunnels(&self) -> Vec<SshTunnelConfig> {
-        if !self.ssh_enabled {
-            return Vec::new();
-        }
+        self.effective_transport_layers()
+            .into_iter()
+            .filter_map(|layer| match layer {
+                TransportLayerConfig::Ssh(ssh) => Some(ssh),
+                TransportLayerConfig::Proxy(_) => None,
+            })
+            .collect()
+    }
 
-        if !self.ssh_tunnels.is_empty() {
-            return self.ssh_tunnels.iter().filter(|hop| hop.enabled).cloned().collect();
-        }
-
-        if self.ssh_host.trim().is_empty() {
-            return Vec::new();
-        }
-
-        vec![SshTunnelConfig {
-            id: "legacy".to_string(),
-            name: String::new(),
-            enabled: true,
-            host: self.ssh_host.clone(),
-            port: self.ssh_port,
-            user: self.ssh_user.clone(),
-            password: self.ssh_password.clone(),
-            key_path: self.ssh_key_path.clone(),
-            key_passphrase: self.ssh_key_passphrase.clone(),
-            connect_timeout_secs: self.effective_ssh_connect_timeout_secs(),
-            expose_lan: self.ssh_expose_lan,
-        }]
+    pub fn has_effective_transport_layers(&self) -> bool {
+        !self.effective_transport_layers().is_empty()
     }
 
     pub fn has_effective_ssh_tunnels(&self) -> bool {
-        !self.effective_ssh_tunnels().is_empty()
+        self.effective_transport_layers().iter().any(|layer| matches!(layer, TransportLayerConfig::Ssh(_)))
     }
 
     pub fn effective_connect_timeout_secs(&self) -> u64 {
@@ -301,7 +631,9 @@ impl ConnectionConfig {
             },
             DatabaseType::Redshift => Some("dev"),
             DatabaseType::ClickHouse => Some("default"),
+            DatabaseType::Rqlite | DatabaseType::Turso => Some("main"),
             DatabaseType::Gaussdb | DatabaseType::OpenGauss => Some("postgres"),
+            DatabaseType::Kwdb => Some("defaultdb"),
             DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Yashandb => Some("yasdb"),
@@ -314,12 +646,10 @@ impl ConnectionConfig {
     }
 
     pub fn needs_bare_mysql(&self) -> bool {
-        matches!(self.db_type, DatabaseType::Doris | DatabaseType::StarRocks)
-            || self
-                .driver_profile
-                .as_deref()
-                .map(|p| p.to_lowercase())
-                .is_some_and(|p| matches!(p.as_str(), "doris" | "starrocks" | "selectdb" | "oceanbase"))
+        matches!(self.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
+            || self.driver_profile.as_deref().map(|p| p.to_lowercase()).is_some_and(|p| {
+                matches!(p.as_str(), "doris" | "starrocks" | "manticoresearch" | "selectdb" | "oceanbase")
+            })
     }
 
     pub fn canonicalized(&self) -> Self {
@@ -377,7 +707,11 @@ impl ConnectionConfig {
                 let fragment = self.redis_tls_insecure_fragment();
                 format!("{scheme}://{host}:{port}/{fragment}")
             }
-            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
+            DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
+            | DatabaseType::Databend => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
                 format!("mysql://{host}:{port}{db_part}{suffix}")
             }
@@ -386,16 +720,19 @@ impl ConnectionConfig {
                 format!("postgres://{host}:{port}{db_part}{suffix}")
             }
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
+            DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
+            DatabaseType::Turso => turso_http_url(self, raw_host, port),
             DatabaseType::SqlServer => {
                 format!("server=tcp:{host},{port};database={}", self.database.as_deref().unwrap_or("master"))
             }
             DatabaseType::MongoDb => {
                 let is_tunneled = host != self.host.as_str() || port != self.port;
                 if let Some(cs) = self.connection_string.as_deref().filter(|s| !s.is_empty()) {
+                    let cs = normalize_mongo_uri_direct_connection(cs);
                     if is_tunneled {
-                        return rewrite_mongo_uri_host(cs, &host, port);
+                        return rewrite_mongo_uri_host(&cs, &host, port);
                     }
-                    return cs.to_string();
+                    return cs;
                 }
                 let mut suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
                 if is_tunneled && !suffix.contains("directConnection=") {
@@ -408,7 +745,11 @@ impl ConnectionConfig {
                 format!("mongodb://{host}:{port}{db_part}{suffix}")
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
-            DatabaseType::Elasticsearch => {
+            DatabaseType::Elasticsearch
+            | DatabaseType::Qdrant
+            | DatabaseType::Milvus
+            | DatabaseType::Weaviate
+            | DatabaseType::ChromaDb => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }
@@ -418,6 +759,7 @@ impl ConnectionConfig {
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
             DatabaseType::Gaussdb => format!("gaussdb://{host}:{port}{db_part}"),
+            DatabaseType::Kwdb => format!("kwdb://{host}:{port}{db_part}"),
             DatabaseType::Yashandb => format!("yashandb://{host}:{port}{db_part}"),
             DatabaseType::Databricks => format!("databricks://{host}:{port}{db_part}"),
             DatabaseType::SapHana => format!("saphana://{host}:{port}{db_part}"),
@@ -434,10 +776,12 @@ impl ConnectionConfig {
                     format!("{base}?{params}")
                 }
             }
+            DatabaseType::Questdb => format!("questdb://{host}:{port}{db_part}"),
             DatabaseType::Gbase => format!("gbase://{host}:{port}{db_part}"),
             DatabaseType::H2 => format!("h2://{host}:{port}{db_part}"),
             DatabaseType::Snowflake => format!("snowflake://{host}/{db_part}"),
             DatabaseType::Trino => format!("trino://{host}:{port}{db_part}"),
+            DatabaseType::PrestoSql => format!("prestosql://{host}:{port}{db_part}"),
             DatabaseType::Hive => format!("hive://{host}:{port}{db_part}"),
             DatabaseType::Db2 => format!("db2://{host}:{port}{db_part}"),
             DatabaseType::Informix => format!("informix://{host}:{port}{db_part}"),
@@ -448,8 +792,28 @@ impl ConnectionConfig {
             DatabaseType::Sundb => format!("sundb://{host}:{port}{db_part}"),
             DatabaseType::Tdengine => format!("tdengine://{host}:{port}{db_part}"),
             DatabaseType::Xugu => format!("xugu://{host}:{port}{db_part}"),
+            DatabaseType::Iotdb => {
+                let base = format!("iotdb://{host}:{port}{db_part}");
+                if params.is_empty() {
+                    base
+                } else {
+                    format!("{base}?{params}")
+                }
+            }
+            DatabaseType::Etcd => {
+                format!("etcd://{host}:{port}")
+            }
+            DatabaseType::ZooKeeper => {
+                format!("zookeeper://{host}:{port}")
+            }
             DatabaseType::Iris => format!("iris://{host}:{port}{db_part}"),
+            DatabaseType::InfluxDb => {
+                let scheme = if self.ssl { "https" } else { "http" };
+                format!("{scheme}://{host}:{port}")
+            }
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
+            DatabaseType::MessageQueue => self.message_queue_admin_url(),
+            DatabaseType::Nacos => self.nacos_admin_url(),
         }
     }
 
@@ -477,7 +841,11 @@ impl ConnectionConfig {
                     format!("{scheme}://{username}:{password}@{host}:{port}/{fragment}")
                 }
             }
-            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
+            DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
+            | DatabaseType::Databend => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
                 format!("mysql://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
             }
@@ -486,6 +854,8 @@ impl ConnectionConfig {
                 format!("postgres://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
             }
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
+            DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
+            DatabaseType::Turso => turso_http_url(self, raw_host, port),
             DatabaseType::SqlServer => format!(
                 "server=tcp:{host},{port};user={};password={};database={}",
                 self.username,
@@ -495,10 +865,11 @@ impl ConnectionConfig {
             DatabaseType::MongoDb => {
                 let is_tunneled = host != self.host.as_str() || port != self.port;
                 if let Some(cs) = self.connection_string.as_deref().filter(|s| !s.is_empty()) {
+                    let cs = normalize_mongo_uri_direct_connection(cs);
                     if is_tunneled {
-                        return rewrite_mongo_uri_host(cs, &host, port);
+                        return rewrite_mongo_uri_host(&cs, &host, port);
                     }
-                    return cs.to_string();
+                    return cs;
                 }
                 let mut suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
                 if is_tunneled && !suffix.contains("directConnection=") {
@@ -517,7 +888,11 @@ impl ConnectionConfig {
             DatabaseType::Oracle => {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
             }
-            DatabaseType::Elasticsearch => {
+            DatabaseType::Elasticsearch
+            | DatabaseType::Qdrant
+            | DatabaseType::Milvus
+            | DatabaseType::Weaviate
+            | DatabaseType::ChromaDb => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }
@@ -538,6 +913,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Gaussdb => {
                 format!("gaussdb://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Kwdb => {
+                format!("kwdb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Yashandb => {
                 format!("yashandb://{}:{}@{host}:{port}{db_part}", username, password)
@@ -571,6 +949,9 @@ impl ConnectionConfig {
                     format!("{base}?{params}")
                 }
             }
+            DatabaseType::Questdb => {
+                format!("questdb://{}:{}@{host}:{port}{db_part}", username, password)
+            }
             DatabaseType::Gbase => {
                 format!("gbase://{}:{}@{host}:{port}{db_part}", username, password)
             }
@@ -582,6 +963,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Trino => {
                 format!("trino://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::PrestoSql => {
+                format!("prestosql://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Hive => {
                 format!("hive://{}:{}@{host}:{port}{db_part}", username, password)
@@ -613,13 +997,63 @@ impl ConnectionConfig {
             DatabaseType::Xugu => {
                 format!("xugu://{}:{}@{host}:{port}{db_part}", username, password)
             }
+            DatabaseType::Iotdb => {
+                let base = format!("iotdb://{}:{}@{host}:{port}{db_part}", username, password);
+                if params.is_empty() {
+                    base
+                } else {
+                    format!("{base}?{params}")
+                }
+            }
+            DatabaseType::Etcd => {
+                if self.username.is_empty() {
+                    format!("etcd://{host}:{port}")
+                } else {
+                    format!("etcd://{}:{}@{host}:{port}", username, password)
+                }
+            }
+            DatabaseType::ZooKeeper => {
+                if self.username.is_empty() {
+                    format!("zookeeper://{host}:{port}")
+                } else {
+                    format!("zookeeper://{}:{}@{host}:{port}", username, password)
+                }
+            }
             DatabaseType::Iris => {
                 format!("iris://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::InfluxDb => {
+                let scheme = if self.ssl { "https" } else { "http" };
+                format!("{scheme}://{host}:{port}")
             }
             DatabaseType::Jdbc => {
                 self.connection_string.as_deref().filter(|value| !value.is_empty()).unwrap_or("jdbc:").to_string()
             }
+            DatabaseType::MessageQueue => self.message_queue_admin_url(),
+            DatabaseType::Nacos => self.nacos_admin_url(),
         }
+    }
+
+    fn message_queue_admin_url(&self) -> String {
+        self.external_config
+            .as_ref()
+            .and_then(|value| value.get("adminUrl").or_else(|| value.get("admin_url")))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("mq://")
+            .to_string()
+    }
+
+    fn nacos_admin_url(&self) -> String {
+        self.external_config
+            .as_ref()
+            .and_then(|value| value.get("serverAddr").or_else(|| value.get("server_addr")))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("nacos://")
+            .to_string()
     }
 
     fn normalized_url_params(&self) -> String {
@@ -628,16 +1062,30 @@ impl ConnectionConfig {
             return normalize_bare_mysql_url_params(value);
         }
         match self.db_type {
-            DatabaseType::Mysql => normalize_mysql_url_params(value, self.ssl, self.ca_cert_path.trim().is_empty()),
-            DatabaseType::Doris | DatabaseType::StarRocks => normalize_bare_mysql_url_params(value),
+            DatabaseType::Mysql => {
+                normalize_mysql_url_params(value, self.mysql_uses_tls(), self.ca_cert_path.trim().is_empty())
+            }
+            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {
+                let params = normalize_bare_mysql_url_params(value);
+                if params.is_empty() {
+                    "enable_cleartext_plugin=true".to_string()
+                } else {
+                    format!("{params}&enable_cleartext_plugin=true")
+                }
+            }
+            DatabaseType::Databend => normalize_bare_mysql_url_params(value),
             DatabaseType::Postgres | DatabaseType::Redshift => normalize_postgres_url_params(value, self.ssl),
-            DatabaseType::MongoDb => value.trim_start_matches('?').to_string(),
+            DatabaseType::MongoDb => normalize_mongo_url_params(value, self.ssl),
             _ => value.trim_start_matches('?').to_string(),
         }
     }
 
     pub fn clickhouse_uses_tls(&self) -> bool {
         self.ssl || url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
+    }
+
+    fn mysql_uses_tls(&self) -> bool {
+        self.ssl || self.host.to_ascii_lowercase().ends_with(".tidbcloud.com")
     }
 
     fn redis_tls_insecure_fragment(&self) -> &'static str {
@@ -692,10 +1140,12 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
     let mut parts: Vec<String> = value.split('&').filter(|part| !part.is_empty()).map(str::to_string).collect();
 
     if force_tls {
-        parts.retain(|part| !url_param_key_is(part, "ssl-mode") && !url_param_key_is(part, "sslmode"));
-        if !parts.iter().any(|part| url_param_key_is(part, "require_ssl")) {
-            parts.insert(0, "require_ssl=true".to_string());
-        }
+        parts.retain(|part| {
+            !url_param_key_is(part, "ssl-mode")
+                && !url_param_key_is(part, "sslmode")
+                && !url_param_key_is(part, "require_ssl")
+        });
+        parts.insert(0, "require_ssl=true".to_string());
         if accept_invalid_certs && !parts.iter().any(|part| url_param_key_is(part, "verify_ca")) {
             parts.push("verify_ca=false".to_string());
         }
@@ -713,6 +1163,70 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
     }
 
     parts.join("&")
+}
+
+fn normalize_mongo_url_params(value: &str, force_tls: bool) -> String {
+    let value = value.trim_start_matches('?');
+    let mut parts: Vec<String> = value.split('&').filter(|part| !part.is_empty()).map(str::to_string).collect();
+
+    if force_tls {
+        parts.retain(|part| !url_param_key_is(part, "tls") && !url_param_key_is(part, "ssl"));
+        parts.insert(0, "tls=true".to_string());
+    }
+
+    parts.join("&")
+}
+
+fn normalize_mongo_uri_direct_connection(uri: &str) -> String {
+    if !mongo_uri_has_multiple_seeds(uri) || !mongo_uri_has_direct_connection_true(uri) {
+        return uri.to_string();
+    }
+
+    let (before_fragment, fragment) =
+        uri.split_once('#').map(|(base, fragment)| (base, Some(fragment))).unwrap_or((uri, None));
+    let Some((base, query)) = before_fragment.split_once('?') else {
+        return uri.to_string();
+    };
+    let params =
+        query.split('&').filter(|part| !mongo_url_param_is_direct_connection_true(part)).collect::<Vec<_>>().join("&");
+
+    let mut normalized = if params.is_empty() { base.to_string() } else { format!("{base}?{params}") };
+    if let Some(fragment) = fragment {
+        normalized.push('#');
+        normalized.push_str(fragment);
+    }
+    normalized
+}
+
+fn mongo_uri_has_multiple_seeds(uri: &str) -> bool {
+    mongo_uri_host_section(uri)
+        .map(|hosts| hosts.split(',').filter(|host| !host.trim().is_empty()).count() > 1)
+        .unwrap_or(false)
+}
+
+fn mongo_uri_host_section(uri: &str) -> Option<&str> {
+    let rest = uri.strip_prefix("mongodb://").or_else(|| uri.strip_prefix("mongodb+srv://"))?;
+    let authority = rest.split('/').next()?.split('?').next().unwrap_or(rest);
+    Some(match authority.rfind('@') {
+        Some(idx) => &authority[idx + 1..],
+        None => authority,
+    })
+}
+
+fn mongo_uri_has_direct_connection_true(uri: &str) -> bool {
+    uri.split_once('?')
+        .map(|(_, query)| {
+            query.split('#').next().unwrap_or("").split('&').any(mongo_url_param_is_direct_connection_true)
+        })
+        .unwrap_or(false)
+}
+
+fn mongo_url_param_is_direct_connection_true(part: &str) -> bool {
+    let Some((key, value)) = part.split_once('=') else {
+        return false;
+    };
+    percent_decode_str(key).decode_utf8_lossy().eq_ignore_ascii_case("directConnection")
+        && percent_decode_str(value).decode_utf8_lossy().eq_ignore_ascii_case("true")
 }
 
 fn normalize_postgres_url_params(value: &str, force_tls: bool) -> String {
@@ -817,6 +1331,55 @@ fn clickhouse_http_url(config: &ConnectionConfig, host: &str, port: u16) -> Stri
     }
     let scheme = if config.clickhouse_uses_tls() { "https" } else { "http" };
     format!("{scheme}://{}:{port}", bracket_ipv6(trimmed))
+}
+
+fn rqlite_http_url(config: &ConnectionConfig, host: &str, port: u16) -> String {
+    let trimmed = host.trim();
+    if let Some(rest) = trimmed.strip_prefix("https://") {
+        return format!("https://{}", trim_http_host_port(rest, port));
+    }
+    if let Some(rest) = trimmed.strip_prefix("http://") {
+        let scheme = if config.ssl { "https" } else { "http" };
+        return format!("{scheme}://{}", trim_http_host_port(rest, port));
+    }
+    let scheme = if config.ssl { "https" } else { "http" };
+    format!("{scheme}://{}:{port}", bracket_ipv6(trimmed))
+}
+
+fn turso_http_url(config: &ConnectionConfig, host: &str, port: u16) -> String {
+    let trimmed = host.trim();
+
+    // Handle libsql:// protocol (Turso native)
+    if let Some(rest) = trimmed.strip_prefix("libsql://") {
+        return format!("https://{}", trim_http_host_port(rest, port));
+    }
+
+    // Handle explicit https://
+    if let Some(rest) = trimmed.strip_prefix("https://") {
+        return format!("https://{}", trim_http_host_port(rest, port));
+    }
+
+    // Handle explicit http:// (respect ssl config)
+    if let Some(rest) = trimmed.strip_prefix("http://") {
+        let scheme = if config.ssl { "https" } else { "http" };
+        return format!("{scheme}://{}", trim_http_host_port(rest, port));
+    }
+
+    // Default: bare hostname -> prefer HTTPS for Turso (default port 443)
+    let scheme = if port == 443 || config.ssl { "https" } else { "http" };
+    format!("{scheme}://{}:{port}", bracket_ipv6(trimmed))
+}
+
+fn trim_http_host_port(value: &str, default_port: u16) -> String {
+    let authority = value.trim_end_matches('/').split('/').next().unwrap_or(value).split('?').next().unwrap_or(value);
+    if authority.starts_with('[') && !authority.contains("]:") {
+        return format!("{authority}:{default_port}");
+    }
+    if authority.rsplit_once(':').is_some() {
+        authority.to_string()
+    } else {
+        format!("{authority}:{default_port}")
+    }
 }
 
 fn trim_clickhouse_host_port(value: &str, default_port: u16) -> String {
@@ -977,8 +1540,8 @@ fn bracket_ipv6(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_query_timeout_secs, default_ssh_connect_timeout_secs, ConnectionConfig, DatabaseType, ProxyType,
-        SshTunnelConfig,
+        default_query_timeout_secs, default_redis_key_separator, default_ssh_connect_timeout_secs, ConnectionConfig,
+        DatabaseType, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
     };
     use std::str::FromStr;
 
@@ -996,28 +1559,18 @@ mod tests {
             password: password.to_string(),
             database: database.map(str::to_string),
             visible_databases: None,
+            visible_schemas: None,
             attached_databases: Vec::new(),
             color: None,
-            ssh_enabled: false,
-            ssh_host: String::new(),
-            ssh_port: 22,
-            ssh_user: String::new(),
-            ssh_password: String::new(),
-            ssh_key_path: String::new(),
-            ssh_key_passphrase: String::new(),
-            ssh_expose_lan: false,
-            ssh_connect_timeout_secs: default_ssh_connect_timeout_secs(),
-            ssh_tunnels: Vec::new(),
+            transport_layers: Vec::new(),
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
-            proxy_enabled: false,
-            proxy_type: ProxyType::Socks5,
-            proxy_host: String::new(),
-            proxy_port: 1080,
-            proxy_username: String::new(),
-            proxy_password: String::new(),
+            idle_timeout_secs: super::default_idle_timeout_secs(),
+            keepalive_interval_secs: super::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
             sysdba: false,
             oracle_connection_type: None,
             connection_string: None,
@@ -1028,10 +1581,15 @@ mod tests {
             redis_sentinel_password: String::new(),
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
+            redis_key_separator: default_redis_key_separator(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            read_only: false,
         }
     }
 
@@ -1043,49 +1601,28 @@ mod tests {
     }
 
     #[test]
-    fn ssh_connect_timeout_defaults_for_legacy_config() {
-        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
-            "id": "id",
-            "name": "name",
-            "db_type": "mysql",
-            "host": "10.1.2.3",
-            "port": 3306,
-            "username": "root",
-            "password": "",
-            "database": null
-        }))
-        .unwrap();
-
-        assert_eq!(config.ssh_connect_timeout_secs, default_ssh_connect_timeout_secs());
-        assert_eq!(config.effective_ssh_connect_timeout_secs(), default_ssh_connect_timeout_secs());
-        assert_eq!(config.query_timeout_secs, default_query_timeout_secs());
-        assert_eq!(config.effective_query_timeout_secs(), default_query_timeout_secs());
+    fn zookeeper_database_type_uses_stable_wire_name() {
+        assert_eq!(serde_json::to_string(&DatabaseType::ZooKeeper).unwrap(), "\"zookeeper\"");
+        assert_eq!(serde_json::from_str::<DatabaseType>("\"zookeeper\"").unwrap(), DatabaseType::ZooKeeper);
     }
 
     #[test]
-    fn proxy_fields_default_for_legacy_config() {
-        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
-            "id": "id",
-            "name": "name",
-            "db_type": "mysql",
-            "host": "10.1.2.3",
-            "port": 3306,
-            "username": "root",
-            "password": "",
-            "database": null
-        }))
-        .unwrap();
+    fn zookeeper_connection_url_uses_zookeeper_scheme() {
+        let mut config = mysql_config("", "", None);
+        config.db_type = DatabaseType::ZooKeeper;
+        config.host = "zk.local".to_string();
+        config.port = 2181;
 
-        assert_eq!(config.proxy_enabled, false);
-        assert_eq!(config.proxy_type, ProxyType::Socks5);
-        assert_eq!(config.proxy_host, "");
-        assert_eq!(config.proxy_port, 1080);
-        assert_eq!(config.proxy_username, "");
-        assert_eq!(config.proxy_password, "");
+        assert_eq!(config.connection_url_with_host("zk.local", 2181), "zookeeper://zk.local:2181");
+
+        config.username = "digest".to_string();
+        config.password = "secret".to_string();
+
+        assert_eq!(config.connection_url_with_host("zk.local", 2181), "zookeeper://digest:secret@zk.local:2181");
     }
 
     #[test]
-    fn visible_databases_round_trips_through_connection_config() {
+    fn legacy_single_ssh_config_migrates_to_transport_layer() {
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": "id",
             "name": "name",
@@ -1095,59 +1632,17 @@ mod tests {
             "username": "root",
             "password": "",
             "database": null,
-            "visible_databases": ["app", "billing"]
+            "ssh_enabled": true,
+            "ssh_host": "bastion.example.com",
+            "ssh_port": 2200,
+            "ssh_user": "deploy",
+            "ssh_password": "secret",
+            "ssh_connect_timeout_secs": 0,
+            "ssh_expose_lan": true
         }))
         .unwrap();
-
-        let saved = serde_json::to_value(config).unwrap();
-
-        assert_eq!(saved["visible_databases"], serde_json::json!(["app", "billing"]));
-    }
-
-    #[test]
-    fn duckdb_attached_databases_round_trip_through_connection_config() {
-        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
-            "id": "id",
-            "name": "DuckDB",
-            "db_type": "duckdb",
-            "host": "/tmp/main.duckdb",
-            "port": 0,
-            "username": "",
-            "password": "",
-            "database": null,
-            "attached_databases": [{ "name": "analytics", "path": "/tmp/analytics.duckdb" }]
-        }))
-        .unwrap();
-
-        let saved = serde_json::to_value(config).unwrap();
-
-        assert_eq!(
-            saved["attached_databases"],
-            serde_json::json!([{ "name": "analytics", "path": "/tmp/analytics.duckdb" }])
-        );
-    }
-
-    #[test]
-    fn ssh_connect_timeout_zero_uses_default() {
-        let mut config = mysql_config("root", "", None);
-        config.ssh_connect_timeout_secs = 0;
-
-        assert_eq!(config.effective_ssh_connect_timeout_secs(), default_ssh_connect_timeout_secs());
-    }
-
-    #[test]
-    fn effective_ssh_tunnels_adapts_legacy_single_hop() {
-        let mut config = mysql_config("root", "", None);
-        config.ssh_enabled = true;
-        config.ssh_host = "bastion.example.com".to_string();
-        config.ssh_port = 2200;
-        config.ssh_user = "deploy".to_string();
-        config.ssh_password = "secret".to_string();
-        config.ssh_connect_timeout_secs = 0;
-        config.ssh_expose_lan = true;
 
         let hops = config.effective_ssh_tunnels();
-
         assert_eq!(hops.len(), 1);
         assert_eq!(hops[0].id, "legacy");
         assert_eq!(hops[0].host, "bastion.example.com");
@@ -1159,98 +1654,121 @@ mod tests {
     }
 
     #[test]
-    fn effective_ssh_tunnels_prefers_explicit_hops() {
-        let mut config = mysql_config("root", "", None);
-        config.ssh_enabled = true;
-        config.ssh_host = "legacy.example.com".to_string();
-        config.ssh_tunnels = vec![SshTunnelConfig {
-            id: "hop-1".to_string(),
-            name: "Bastion".to_string(),
-            enabled: true,
-            host: "new.example.com".to_string(),
-            port: 22,
-            user: "alice".to_string(),
-            password: String::new(),
-            key_path: "~/.ssh/id_ed25519".to_string(),
-            key_passphrase: String::new(),
-            connect_timeout_secs: 7,
-            expose_lan: false,
-        }];
+    fn missing_connection_timeout_defaults_to_ten_seconds() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "name",
+            "db_type": "mysql",
+            "host": "10.1.2.3",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null
+        }))
+        .unwrap();
+
+        assert_eq!(config.connect_timeout_secs, 10);
+        assert_eq!(config.effective_connect_timeout_secs(), 10);
+    }
+
+    #[test]
+    fn legacy_ssh_tunnels_migrate_to_ordered_transport_layers() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "name",
+            "db_type": "mysql",
+            "host": "10.1.2.3",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "ssh_enabled": true,
+            "ssh_tunnels": [
+                { "id": "first", "host": "a", "port": 22, "user": "u" },
+                { "id": "second", "host": "b", "port": 2200, "user": "u" }
+            ]
+        }))
+        .unwrap();
 
         let hops = config.effective_ssh_tunnels();
-
-        assert_eq!(hops.len(), 1);
-        assert_eq!(hops[0].id, "hop-1");
-        assert_eq!(hops[0].host, "new.example.com");
+        assert_eq!(hops.iter().map(|hop| hop.id.as_str()).collect::<Vec<_>>(), vec!["first", "second"]);
     }
 
     #[test]
-    fn effective_ssh_tunnels_filters_disabled_explicit_hops() {
+    fn legacy_proxy_config_migrates_to_transport_layer() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "name",
+            "db_type": "mysql",
+            "host": "10.1.2.3",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "proxy_enabled": true,
+            "proxy_type": "http",
+            "proxy_host": "proxy.example.com",
+            "proxy_port": 8080,
+            "proxy_username": "alice",
+            "proxy_password": "secret"
+        }))
+        .unwrap();
+
+        assert_eq!(config.transport_layers.len(), 1);
+        match &config.transport_layers[0] {
+            TransportLayerConfig::Proxy(proxy) => {
+                assert_eq!(proxy.id, "legacy-proxy");
+                assert_eq!(proxy.proxy_type, ProxyType::Http);
+                assert_eq!(proxy.host, "proxy.example.com");
+                assert_eq!(proxy.port, 8080);
+                assert_eq!(proxy.username, "alice");
+                assert_eq!(proxy.password, "secret");
+            }
+            TransportLayerConfig::Ssh(_) => panic!("expected proxy layer"),
+        }
+    }
+
+    #[test]
+    fn existing_transport_layers_take_precedence_over_legacy_fields() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "name",
+            "db_type": "mysql",
+            "host": "10.1.2.3",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "ssh_enabled": true,
+            "ssh_host": "legacy.example.com",
+            "transport_layers": [{ "type": "proxy", "id": "proxy", "host": "proxy", "port": 1080 }]
+        }))
+        .unwrap();
+
+        assert_eq!(config.transport_layers.len(), 1);
+        assert!(matches!(&config.transport_layers[0], TransportLayerConfig::Proxy(proxy) if proxy.id == "proxy"));
+    }
+
+    #[test]
+    fn serialized_connection_config_omits_legacy_transport_fields() {
         let mut config = mysql_config("root", "", None);
-        config.ssh_enabled = true;
-        config.ssh_tunnels = vec![
-            SshTunnelConfig {
-                id: "disabled".to_string(),
-                name: String::new(),
-                enabled: false,
-                host: "disabled.example.com".to_string(),
-                port: 22,
-                user: "alice".to_string(),
-                password: "secret".to_string(),
-                key_path: String::new(),
-                key_passphrase: String::new(),
-                connect_timeout_secs: 5,
-                expose_lan: false,
-            },
-            SshTunnelConfig {
-                id: "enabled".to_string(),
-                name: String::new(),
-                enabled: true,
-                host: "enabled.example.com".to_string(),
-                port: 22,
-                user: "alice".to_string(),
-                password: "secret".to_string(),
-                key_path: String::new(),
-                key_passphrase: String::new(),
-                connect_timeout_secs: 5,
-                expose_lan: false,
-            },
-        ];
-
-        let hops = config.effective_ssh_tunnels();
-
-        assert_eq!(hops.len(), 1);
-        assert_eq!(hops[0].id, "enabled");
-    }
-
-    #[test]
-    fn effective_ssh_tunnels_empty_without_explicit_or_legacy_ssh() {
-        let config = mysql_config("root", "", None);
-
-        assert!(config.effective_ssh_tunnels().is_empty());
-        assert!(!config.has_effective_ssh_tunnels());
-    }
-
-    #[test]
-    fn effective_ssh_tunnels_does_not_fall_back_when_explicit_list_is_disabled() {
-        let mut config = mysql_config("root", "", None);
-        config.ssh_enabled = true;
-        config.ssh_host = "legacy.example.com".to_string();
-        config.ssh_tunnels = vec![SshTunnelConfig {
-            id: "disabled".to_string(),
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "proxy".to_string(),
             name: String::new(),
-            enabled: false,
-            host: "disabled.example.com".to_string(),
-            port: 22,
-            user: "alice".to_string(),
-            password: "secret".to_string(),
-            key_path: String::new(),
-            key_passphrase: String::new(),
-            connect_timeout_secs: 5,
-            expose_lan: false,
-        }];
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+        })];
 
-        assert!(config.effective_ssh_tunnels().is_empty());
+        let saved = serde_json::to_value(config).unwrap();
+
+        assert!(saved.get("transport_layers").is_some());
+        for key in ["ssh_tunnels", "ssh_host", "ssh_password", "proxy_host", "proxy_password", "proxy_enabled"] {
+            assert!(saved.get(key).is_none(), "legacy key {key} should not serialize");
+        }
     }
 
     #[test]
@@ -1439,6 +1957,19 @@ mod tests {
     }
 
     #[test]
+    fn tidb_cloud_mysql_url_requires_tls() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.host = "gateway01.us-west-2.prod.aws.tidbcloud.com".to_string();
+        config.port = 4000;
+        config.url_params = Some("require_ssl=false&charset=utf8mb4".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@gateway01.us-west-2.prod.aws.tidbcloud.com:4000/test?require_ssl=true&charset=utf8mb4&verify_ca=false&verify_identity=false"
+        );
+    }
+
+    #[test]
     fn postgres_url_appends_custom_params() {
         let mut config = mysql_config("postgres", "secret", Some("test"));
         config.db_type = DatabaseType::Postgres;
@@ -1584,6 +2115,14 @@ mod tests {
     }
 
     #[test]
+    fn kwdb_url_defaults_to_defaultdb_database() {
+        let mut config = mysql_config("root", "secret", None);
+        config.db_type = DatabaseType::Kwdb;
+
+        assert_eq!(config.connection_url(), "kwdb://root:secret@10.1.2.3:2883/defaultdb");
+    }
+
+    #[test]
     fn yashandb_url_defaults_to_yasdb_database() {
         let mut config = mysql_config("sys", "secret", None);
         config.db_type = DatabaseType::Yashandb;
@@ -1679,6 +2218,24 @@ mod tests {
     }
 
     #[test]
+    fn mongodb_form_tls_uses_standard_scheme_and_tls_param() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.ssl = true;
+
+        assert_eq!(config.connection_url(), "mongodb://root:secret@10.1.2.3:17000/admin?tls=true");
+        assert_eq!(config.redacted_connection_url(), "mongodb://10.1.2.3:17000/admin?tls=true");
+    }
+
+    #[test]
+    fn mongodb_form_tls_replaces_existing_tls_params() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.ssl = true;
+        config.url_params = Some("authSource=admin&ssl=false&tls=false".to_string());
+
+        assert_eq!(config.connection_url(), "mongodb://root:secret@10.1.2.3:17000/admin?tls=true&authSource=admin");
+    }
+
+    #[test]
     fn parse_mongo_first_host_replica_set() {
         let uri = "mongodb://user:pass@host1:27017,host2:27017,host3:27017/admin?replicaSet=rs0";
         let (host, port) = super::parse_mongo_first_host(uri).unwrap();
@@ -1732,6 +2289,30 @@ mod tests {
         let url = config.connection_url();
 
         assert_eq!(url, "mongodb://read:pass@host1:27017,host2:27017/admin?replicaSet=rs0");
+    }
+
+    #[test]
+    fn mongodb_multi_seed_connection_string_removes_direct_connection_true() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.connection_string = Some(
+            "mongodb://read:pass@host1:27017,host2:27017/admin?directConnection=true&replicaSet=rs0&authSource=admin"
+                .to_string(),
+        );
+
+        let url = config.connection_url();
+
+        assert_eq!(url, "mongodb://read:pass@host1:27017,host2:27017/admin?replicaSet=rs0&authSource=admin");
+    }
+
+    #[test]
+    fn mongodb_single_seed_connection_string_keeps_direct_connection_true() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.connection_string =
+            Some("mongodb://read:pass@host1:27017/admin?directConnection=true&authSource=admin".to_string());
+
+        let url = config.connection_url();
+
+        assert_eq!(url, "mongodb://read:pass@host1:27017/admin?directConnection=true&authSource=admin");
     }
 
     #[test]

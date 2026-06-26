@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use crate::error::AppError;
 use crate::state::WebState;
+use dbx_core::query_cancel::RunningTaskMetadata;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -269,7 +270,10 @@ pub async fn execute_query(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let registered = state.app.running_queries.register(execution_id);
+    let registered = state.app.running_queries.register_task(
+        execution_id.clone(),
+        RunningTaskMetadata::query(req.connection_id.clone(), req.database.clone(), req.client_session_id.clone()),
+    );
     let cancel_token = registered.token();
 
     let result = dbx_core::query::execute_sql_statement_with_options(
@@ -286,6 +290,7 @@ pub async fn execute_query(
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
             timeout_secs: req.timeout_secs,
+            execution_id: Some(execution_id),
         },
     )
     .await
@@ -301,7 +306,10 @@ pub async fn execute_multi(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let registered = state.app.running_queries.register(execution_id);
+    let registered = state.app.running_queries.register_task(
+        execution_id.clone(),
+        RunningTaskMetadata::query(req.connection_id.clone(), req.database.clone(), req.client_session_id.clone()),
+    );
     let cancel_token = registered.token();
 
     let result = dbx_core::query::execute_multi_core_with_options(
@@ -318,6 +326,7 @@ pub async fn execute_multi(
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
             timeout_secs: req.timeout_secs,
+            execution_id: Some(execution_id),
         },
     )
     .await
@@ -458,6 +467,77 @@ pub async fn build_explain_sql(
     Json(dbx_core::query_execution_sql::build_explain_sql(req.options))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetExplainInfoRequest {
+    pub connection_id: String,
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    pub sql: String,
+    pub mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildCreateUserSqlRequest {
+    pub username: String,
+    pub password: String,
+    pub tablespace: String,
+}
+
+pub async fn get_explain_info(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<GetExplainInfoRequest>,
+) -> Result<Json<String>, AppError> {
+    let database_for_pool = req.database.as_deref().filter(|database| !database.trim().is_empty());
+    state.app.get_or_create_pool(&req.connection_id, database_for_pool).await.map_err(AppError)?;
+
+    let client = {
+        let connections = state.app.connections.read().await;
+        let pool = connections.get(&req.connection_id).ok_or_else(|| AppError("Connection not found".to_string()))?;
+        match pool {
+            dbx_core::connection::PoolKind::Agent(client) => client.clone(),
+            _ => return Err(AppError("Connection is not an agent-based connection".to_string())),
+        }
+    };
+
+    let config = {
+        let configs = state.app.configs.read().await;
+        configs.get(&req.connection_id).cloned()
+    };
+    let config = config.ok_or_else(|| AppError("Connection config not found".to_string()))?;
+    let timeout_secs = config.query_timeout_secs;
+
+    let mut client = client.lock().await;
+    let mode = req.mode.unwrap_or_else(|| "explain".to_string());
+    if mode.eq_ignore_ascii_case("autotrace") && !dbx_core::query_execution_sql::is_safe_dameng_autotrace_sql(&req.sql)
+    {
+        return Err(AppError("unsafe".to_string()));
+    }
+    let params = serde_json::json!({
+        "sql": req.sql,
+        "database": req.database.unwrap_or_default(),
+        "schema": req.schema.unwrap_or_default(),
+        "timeoutSecs": timeout_secs as i64,
+        "mode": mode,
+    });
+
+    let result: Result<serde_json::Value, String> = client.get_explain_info::<serde_json::Value>(params).await;
+    match result {
+        Ok(serde_json::Value::String(s)) => Ok(Json(s)),
+        Ok(serde_json::Value::Object(obj)) => {
+            let plan = obj.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Ok(Json(plan))
+        }
+        Ok(val) => Err(AppError(format!("Unexpected result type from getExplainInfo: {:?}", val))),
+        Err(e) => Err(AppError(e)),
+    }
+}
+
+pub async fn build_create_user_sql(Json(req): Json<BuildCreateUserSqlRequest>) -> Result<Json<String>, AppError> {
+    Ok(Json(dbx_core::db_admin_sql::build_create_user_sql(&req.username, &req.password, &req.tablespace)))
+}
+
 pub async fn build_dropped_file_preview_sql(
     Json(req): Json<BuildDroppedFilePreviewSqlRequest>,
 ) -> Json<Option<String>> {
@@ -540,6 +620,10 @@ pub async fn build_executable_object_source_sql(
     Json(req): Json<BuildExecutableObjectSourceRequest>,
 ) -> Result<Json<String>, AppError> {
     dbx_core::object_source_sql::build_executable_object_source_sql(req.input).map(Json).map_err(AppError)
+}
+
+pub async fn build_editable_object_source(Json(req): Json<BuildExecutableObjectSourceRequest>) -> Json<String> {
+    Json(dbx_core::object_source_sql::build_editable_object_source(req.input))
 }
 
 pub async fn build_routine_rename_object_source_statements(
@@ -625,7 +709,36 @@ pub async fn build_export_sql_insert(Json(req): Json<BuildExportSqlInsertRequest
 }
 
 pub async fn build_database_sql_export(
+    State(state): State<Arc<WebState>>,
     Json(req): Json<BuildDatabaseSqlExportRequest>,
 ) -> Result<Json<String>, AppError> {
-    dbx_core::database_export::build_database_sql_export(req.options).map(Json).map_err(AppError)
+    let mut options = req.options;
+    // Sort tables by FK dependency when connection info is available.
+    if let (Some(ref conn_id), Some(ref database), Some(ref schema)) =
+        (&options.connection_id, &options.database, &options.schema)
+    {
+        if options.tables.len() > 1 {
+            let table_names: Vec<String> = options.tables.iter().filter_map(|t| t.table_name.clone()).collect();
+            if table_names.len() > 1 {
+                if let Ok(sorted_names) = dbx_core::transfer::sort_tables_by_fk_dependency(
+                    &state.app,
+                    conn_id,
+                    database,
+                    schema,
+                    &table_names,
+                    true,
+                )
+                .await
+                {
+                    options.tables.sort_by_key(|t| {
+                        sorted_names
+                            .iter()
+                            .position(|n| Some(n.as_str()) == t.table_name.as_deref())
+                            .unwrap_or(usize::MAX)
+                    });
+                }
+            }
+        }
+    }
+    dbx_core::database_export::build_database_sql_export(options).map(Json).map_err(AppError)
 }

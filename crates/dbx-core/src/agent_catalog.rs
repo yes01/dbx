@@ -18,12 +18,21 @@ pub struct AgentDriverProfile {
 }
 
 const ORACLE_PROFILES: &[AgentDriverProfile] = &[
-    AgentDriverProfile { profile: "oracle-legacy", key: "oracle-legacy", label: "Oracle Legacy", store_visible: true },
-    AgentDriverProfile { profile: "oracle-10g", key: "oracle-10g", label: "Oracle 10g", store_visible: true },
+    AgentDriverProfile { profile: "oracle-legacy", key: "oracle", label: "Oracle", store_visible: false },
+    AgentDriverProfile { profile: "oracle-10g", key: "oracle", label: "Oracle", store_visible: false },
 ];
 
-const GBASE_PROFILES: &[AgentDriverProfile] =
-    &[AgentDriverProfile { profile: "gbase8s", key: "gbase8s", label: "GBase 8s", store_visible: true }];
+const GBASE_PROFILES: &[AgentDriverProfile] = &[
+    AgentDriverProfile { profile: "gbase8s", key: "gbase8s", label: "GBase 8s", store_visible: true },
+    AgentDriverProfile { profile: "gbase8a", key: "gbase8a", label: "GBase 8a", store_visible: true },
+];
+
+const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
+    profile: "mongodb-legacy",
+    key: "mongodb",
+    label: "MongoDB (Legacy)",
+    store_visible: false,
+}];
 
 const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
@@ -58,6 +67,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         db_type: DatabaseType::Goldendb,
         key: "goldendb",
         label: "GoldenDB",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
+        db_type: DatabaseType::Databend,
+        key: "databend",
+        label: "Databend",
         store_visible: true,
         profiles: &[],
     },
@@ -112,8 +128,8 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     },
     AgentCatalogEntry {
         db_type: DatabaseType::Gbase,
-        key: "gbase",
-        label: "GBase",
+        key: "gbase8a",
+        label: "GBase 8a",
         store_visible: true,
         profiles: GBASE_PROFILES,
     },
@@ -142,7 +158,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
         db_type: DatabaseType::Trino,
         key: "trino",
-        label: "Trino (Presto)",
+        label: "Trino",
         store_visible: true,
         profiles: &[],
     },
@@ -159,6 +175,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         key: "informix",
         label: "IBM Informix",
         store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
+        db_type: DatabaseType::InfluxDb,
+        key: "influxdb",
+        label: "InfluxDB",
+        store_visible: false,
         profiles: &[],
     },
     AgentCatalogEntry {
@@ -218,11 +241,26 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         profiles: &[],
     },
     AgentCatalogEntry {
+        db_type: DatabaseType::Iotdb,
+        key: "iotdb",
+        label: "Apache IoTDB",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry { db_type: DatabaseType::Etcd, key: "etcd", label: "etcd", store_visible: true, profiles: &[] },
+    AgentCatalogEntry {
+        db_type: DatabaseType::ZooKeeper,
+        key: "zookeeper",
+        label: "Apache ZooKeeper",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
         db_type: DatabaseType::MongoDb,
         key: "mongodb",
         label: "MongoDB (Legacy)",
         store_visible: true,
-        profiles: &[],
+        profiles: MONGODB_PROFILES,
     },
     AgentCatalogEntry {
         db_type: DatabaseType::Iris,

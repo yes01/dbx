@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "TestTeam DBX",
-  "version": "0.6.0",
-  "identifier": "com.testteam.dbx",
+  "productName": "DBX",
+  "version": "0.5.39",
+  "identifier": "com.dbx.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "TestTeam DBX",
+        "title": "DBX",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
@@ -52,8 +52,7 @@
       }
     ],
     "macOS": {
-      "entitlements": "Entitlements.plist",
-      "signingIdentity": "-"
+      "entitlements": "Entitlements.plist"
     },
     "windows": {
       "nsis": {
@@ -61,13 +60,7 @@
         "template": "windows/nsis/installer.nsi"
       }
     },
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
-    ]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
   },
   "plugins": {
     "deep-link": {
@@ -77,9 +70,7 @@
     },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkxNEYyMzE3QkJCNkM3REYKUldUZng3YTdGeU5Qa1NnTUZCRVhJVkxsOWZKQWFPVCtacUgySlNlcjRDU2RmZElCQnphd25pYUMK",
-      "endpoints": [
-        "https://dl.dbxio.com/releases/latest/latest.json"
-      ]
+      "endpoints": ["https://dl.dbxio.com/releases/latest/latest.json", "https://github.com/t8y2/dbx/releases/latest/download/latest.json"]
     }
   }
 }

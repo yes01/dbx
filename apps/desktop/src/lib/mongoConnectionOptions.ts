@@ -15,6 +15,18 @@ export function setMongoUrlParam(urlParams: string | undefined, key: string, val
 }
 
 export function mongodbAuthFailureHint(message: string): string {
+  if (message.includes("cannot specify multiple seeds with directConnection=true")) {
+    return `${message}\n\nMongoDB directConnection=true can only be used with a single host. Remove directConnection=true when using a multi-host replica set URL, or keep only one reachable host if you need a direct connection.`;
+  }
+
+  if (message.includes("no records found") && message.includes("_mongodb._tcp.")) {
+    return `${message}\n\nMongoDB SRV URLs require a DNS hostname with SRV records. For an IP address or normal host:port endpoint, use mongodb://host:port instead of mongodb+srv://host.`;
+  }
+
+  if (message.includes("ReplicaSetNoPrimary") && message.includes("127.0.0.1:27017")) {
+    return `${message}\n\nThe replica set is advertising 127.0.0.1:27017, which points back to this app machine instead of the MongoDB server. Add directConnection=true for a single reachable endpoint, or reconfigure the replica set members to advertise addresses reachable from this app.`;
+  }
+
   if (message.includes("must be URL encoded") || message.includes("cannot contain unescaped %")) {
     return `${message}\n\nMongoDB URL mode requires reserved characters in usernames and passwords to be percent-encoded. For example, @ becomes %40, # becomes %23, / becomes %2F, : becomes %3A, and % becomes %25.`;
   }

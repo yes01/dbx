@@ -1,15 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import {
-  buildStructureTargetLabel,
-  combineDataTypeForDatabase,
-  createColumnDrafts,
-  createIndexDrafts,
-  getDataTypeOptions,
-  normalizeDataTypeParams,
-  parseExtraToColumnExtra,
-  toColumnNames,
-} from "../../apps/desktop/src/lib/tableStructureEditorState.ts";
+import { test } from "vitest";
+import { applyManticoreDdlColumnExtras, buildStructureTargetLabel, canEditManticoreColumnProperties, combineDataTypeForDatabase, createColumnDrafts, createIndexDrafts, generateIndexName, generateUniqueIndexName, getColumnEditorControls, getDataTypeOptions, isProtectedManticoreIdColumn, normalizeDataTypeParams, parseExtraToColumnExtra, toColumnNames } from "../../apps/desktop/src/lib/tableStructureEditorState.ts";
 import type { ColumnInfo, IndexInfo } from "../../apps/desktop/src/types/database.ts";
 
 const columns: ColumnInfo[] = [
@@ -86,6 +77,30 @@ test("creates editable column drafts from column metadata", () => {
   );
 });
 
+test("applies manticore column properties from ddl", () => {
+  const manticoreColumns: ColumnInfo[] = [
+    { name: "name", data_type: "string", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+    { name: "code", data_type: "string", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+    { name: "resource", data_type: "json", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+  ];
+  const ddl = `CREATE TABLE materials (
+name string indexed attribute,
+code string attribute,
+resource json secondary_index='1'
+)`;
+
+  const drafts = createColumnDrafts(applyManticoreDdlColumnExtras(manticoreColumns, ddl), "manticoresearch");
+
+  assert.deepEqual(
+    drafts.map((draft) => ({ name: draft.name, dataType: draft.dataType, extra: draft.extra })),
+    [
+      { name: "name", dataType: "string", extra: { manticoreIndexed: true, manticoreAttribute: true } },
+      { name: "code", dataType: "string", extra: { manticoreAttribute: true } },
+      { name: "resource", dataType: "json", extra: { manticoreSecondaryIndex: true } },
+    ],
+  );
+});
+
 test("parses MySQL extra string to ColumnExtra", () => {
   assert.deepEqual(parseExtraToColumnExtra("auto_increment", "mysql"), { autoIncrement: true });
   assert.deepEqual(parseExtraToColumnExtra("on update CURRENT_TIMESTAMP", "mysql"), {
@@ -128,6 +143,20 @@ test("parses SQL Server identity extra string to ColumnExtra", () => {
   });
 });
 
+test("parses Manticore Search text properties to ColumnExtra", () => {
+  assert.deepEqual(parseExtraToColumnExtra("stored indexed", "manticoresearch"), {
+    manticoreStored: true,
+    manticoreIndexed: true,
+  });
+  assert.deepEqual(parseExtraToColumnExtra("attribute indexed", "manticoresearch"), {
+    manticoreAttribute: true,
+    manticoreIndexed: true,
+  });
+  assert.deepEqual(parseExtraToColumnExtra("secondary_index='1'", "manticoresearch"), {
+    manticoreSecondaryIndex: true,
+  });
+});
+
 test("creates editable index drafts and splits pasted column lists", () => {
   const drafts = createIndexDrafts(indexes);
 
@@ -162,15 +191,20 @@ test("creates editable index drafts and splits pasted column lists", () => {
   assert.equal(toColumnNames(["id", "name"]), "id, name");
 });
 
+test("generates conventional index names from table and columns", () => {
+  assert.equal(generateIndexName("A", ["B"]), "A_B_IDX");
+  assert.equal(generateIndexName("order item", ["customer-id", "created_at"]), "ORDER_ITEM_CUSTOMER_ID_CREATED_AT_IDX");
+  assert.equal(generateIndexName("users", ["email"], 12), "USERS_EM_IDX");
+});
+
+test("generates unique index names when automatic name already exists", () => {
+  assert.equal(generateUniqueIndexName("users", ["email"], ["USERS_EMAIL_IDX"]), "USERS_EMAIL_IDX_2");
+  assert.equal(generateUniqueIndexName("users", ["email"], ["users_email_idx", "USERS_EMAIL_IDX_2"]), "USERS_EMAIL_IDX_3");
+});
+
 test("structure editor target label omits duplicate database and schema", () => {
-  assert.equal(
-    buildStructureTargetLabel("online-clickhouse", "testdb", "testdb", "users"),
-    "online-clickhouse / testdb / users",
-  );
-  assert.equal(
-    buildStructureTargetLabel("online-postgres", "app", "public", "users"),
-    "online-postgres / app / public / users",
-  );
+  assert.equal(buildStructureTargetLabel("online-clickhouse", "testdb", "testdb", "users"), "online-clickhouse / testdb / users");
+  assert.equal(buildStructureTargetLabel("online-postgres", "app", "public", "users"), "online-postgres / app / public / users");
 });
 
 test("normalizes temporal precision when combining data types", () => {
@@ -187,4 +221,32 @@ test("returns data type options for compatible table structure editors", () => {
   assert.deepEqual(getDataTypeOptions("doris"), getDataTypeOptions("mysql"));
   assert.equal(getDataTypeOptions("dameng").includes("varchar2"), true);
   assert.equal(getDataTypeOptions("sqlserver").includes("nvarchar"), true);
+});
+
+test("returns Manticore Search data type options", () => {
+  assert.deepEqual(getDataTypeOptions("manticoresearch"), ["text", "string", "int", "bit", "bigint", "bool", "timestamp", "float", "json", "float_vector", "multi", "mva"]);
+});
+
+test("returns Manticore Search column editor controls", () => {
+  assert.deepEqual(getColumnEditorControls("manticoresearch"), {
+    length: true,
+    nullable: false,
+    primaryKey: false,
+    defaultValue: false,
+    comment: false,
+  });
+  assert.equal(getColumnEditorControls("mysql").nullable, true);
+});
+
+test("protects Manticore Search id column from destructive structure edits", () => {
+  assert.equal(isProtectedManticoreIdColumn("manticoresearch", "id"), true);
+  assert.equal(isProtectedManticoreIdColumn("manticoresearch", "ID"), true);
+  assert.equal(isProtectedManticoreIdColumn("manticoresearch", "name"), false);
+  assert.equal(isProtectedManticoreIdColumn("mysql", "id"), false);
+});
+
+test("allows Manticore Search column properties only before the column exists", () => {
+  assert.equal(canEditManticoreColumnProperties("manticoresearch", false), true);
+  assert.equal(canEditManticoreColumnProperties("manticoresearch", true), false);
+  assert.equal(canEditManticoreColumnProperties("mysql", false), false);
 });

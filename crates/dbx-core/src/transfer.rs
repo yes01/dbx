@@ -5,10 +5,14 @@ use tokio::sync::RwLock;
 
 use crate::connection::{AppState, PoolKind};
 use crate::db;
+use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::DatabaseType;
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
-use crate::query::{agent_execute_query_params, QueryExecutionOptions};
+use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
+use crate::sql::split_sql_statements;
+#[cfg(feature = "duckdb-bundled")]
 use crate::sql::starts_with_executable_sql_keyword;
+use crate::sql_dialect::{qualified_transfer_table, quote_transfer_identifier};
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -26,6 +30,15 @@ pub enum TransferMode {
     Upsert,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferTableNameCase {
+    #[default]
+    Preserve,
+    Lower,
+    Upper,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferRequest {
@@ -40,7 +53,19 @@ pub struct TransferRequest {
     pub create_table: bool,
     #[serde(default)]
     pub mode: TransferMode,
+    #[serde(default)]
+    pub target_table_name_case: TransferTableNameCase,
     pub batch_size: usize,
+}
+
+impl TransferRequest {
+    pub fn target_table_name(&self, source_table: &str) -> String {
+        match self.target_table_name_case {
+            TransferTableNameCase::Preserve => source_table.to_string(),
+            TransferTableNameCase::Lower => source_table.to_lowercase(),
+            TransferTableNameCase::Upper => source_table.to_uppercase(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,22 +92,24 @@ pub enum TransferStatus {
 }
 
 pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
-    match db_type {
-        DatabaseType::Mysql | DatabaseType::ClickHouse | DatabaseType::Doris | DatabaseType::StarRocks => {
-            format!("`{}`", name.replace('`', "``"))
-        }
-        DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),
-        _ => format!("\"{}\"", name.replace('"', "\"\"")),
-    }
+    quote_transfer_identifier(name, db_type)
 }
 
 pub fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType) -> String {
-    let qt = quote_identifier(table, db_type);
-    if schema.is_empty() {
-        qt
-    } else {
-        format!("{}.{}", quote_identifier(schema, db_type), qt)
+    qualified_transfer_table(table, schema, db_type)
+}
+
+pub fn validate_transfer_target_table_names(request: &TransferRequest) -> Result<(), String> {
+    let mut targets: HashMap<String, String> = HashMap::new();
+    for source_table in &request.tables {
+        let target_table = request.target_table_name(source_table);
+        if let Some(first_source) = targets.insert(target_table.clone(), source_table.clone()) {
+            return Err(format!(
+                "Target table name collision after case conversion: '{first_source}' and '{source_table}' both map to '{target_table}'"
+            ));
+        }
     }
+    Ok(())
 }
 
 fn quote_string_literal(value: &str) -> String {
@@ -114,6 +141,17 @@ fn is_postgres_integer_like_type(data_type: &str) -> bool {
 
 fn is_postgres_sequence_default(default_value: Option<&str>) -> bool {
     default_value.is_some_and(|value| value.to_ascii_lowercase().contains("nextval("))
+}
+
+fn is_postgres_generated_extra(extra: Option<&str>) -> bool {
+    extra.is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("generated "))
+}
+
+fn is_postgres_identity_extra(extra: Option<&str>) -> bool {
+    extra.is_some_and(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        normalized.starts_with("generated ") && normalized.contains(" identity")
+    })
 }
 
 fn rewrite_postgres_schema_qualified_references(input: &str, source_schema: &str, target_schema: &str) -> String {
@@ -157,6 +195,11 @@ fn postgres_default_clause(
     if !is_postgres_compat_transfer(source_db, target_db) {
         return None;
     }
+    if is_postgres_generated_extra(column.extra.as_deref()) {
+        if let Some(extra) = column.extra.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            return Some(extra.to_string());
+        }
+    }
     let default_value = column.column_default.as_deref()?.trim();
     if default_value.is_empty() {
         return None;
@@ -170,11 +213,164 @@ fn postgres_default_clause(
     ))
 }
 
+fn is_mysql_family_target(target_db: &DatabaseType) -> bool {
+    matches!(
+        target_db,
+        DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::Goldendb
+            | DatabaseType::Sundb
+    )
+}
+
+/// QuestDB is not included. It only uses the PGWire protocol. SQL DDL syntax is not compatible.
+fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
+    matches!(
+        target_db,
+        DatabaseType::Postgres
+            | DatabaseType::Gaussdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Redshift
+            | DatabaseType::Kingbase
+            | DatabaseType::Highgo
+            | DatabaseType::Kwdb
+            | DatabaseType::Vastbase
+    )
+}
+
+fn is_mysql_numeric_base_type(data_type: &str) -> bool {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    let base = normalized.split(['(', ' ']).next().unwrap_or("");
+    matches!(
+        base,
+        "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "int"
+            | "integer"
+            | "bigint"
+            | "decimal"
+            | "numeric"
+            | "float"
+            | "double"
+            | "real"
+            | "bit"
+            | "year"
+    )
+}
+
+fn is_mysql_function_default(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("NULL") {
+        return true;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if upper == "CURRENT_TIMESTAMP" || upper.starts_with("CURRENT_TIMESTAMP(") {
+        return true;
+    }
+    if upper == "LOCALTIME" || upper.starts_with("LOCALTIME(") {
+        return true;
+    }
+    if upper == "LOCALTIMESTAMP" || upper.starts_with("LOCALTIMESTAMP(") {
+        return true;
+    }
+    matches!(upper.as_str(), "CURRENT_DATE" | "CURRENT_TIME" | "NOW()" | "UTC_TIMESTAMP()" | "UUID()")
+}
+
+fn looks_like_numeric_literal(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.parse::<i64>().is_ok() || trimmed.parse::<u64>().is_ok() || trimmed.parse::<f64>().is_ok()
+}
+
+fn format_mysql_default_literal(raw: &str, data_type: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("NULL") {
+        return "NULL".to_string();
+    }
+    if is_mysql_function_default(trimmed) {
+        return trimmed.to_string();
+    }
+    if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        return trimmed.to_string();
+    }
+    if is_mysql_numeric_base_type(data_type) && looks_like_numeric_literal(trimmed) {
+        return trimmed.to_string();
+    }
+    format!("'{}'", trimmed.replace('\'', "''"))
+}
+
+fn column_default_clause(
+    column: &db::ColumnInfo,
+    source_schema: &str,
+    target_schema: &str,
+    source_db: &DatabaseType,
+    target_db: &DatabaseType,
+) -> Option<String> {
+    if is_postgres_compat_transfer(source_db, target_db) {
+        return postgres_default_clause(column, source_schema, target_schema, source_db, target_db);
+    }
+    if is_mysql_family_target(target_db) {
+        let default_value = column.column_default.as_deref()?.trim();
+        if default_value.is_empty() {
+            return None;
+        }
+        return Some(format!("DEFAULT {}", format_mysql_default_literal(default_value, &column.data_type)));
+    }
+    None
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MysqlExtraClauses {
+    auto_increment: bool,
+    on_update: Option<String>,
+}
+
+fn parse_mysql_extra_clauses(extra: Option<&str>) -> MysqlExtraClauses {
+    let mut result = MysqlExtraClauses::default();
+    let Some(raw) = extra else {
+        return result;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return result;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.contains("auto_increment") {
+        result.auto_increment = true;
+    }
+
+    let pattern = Regex::new(r"(?i)\bon\s+update\s+(.+)$").expect("valid mysql on-update regex");
+    if let Some(captures) = pattern.captures(trimmed) {
+        let raw_expr = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let cleaned = raw_expr.trim().trim_end_matches([',', ';', ' ']).trim();
+        if !cleaned.is_empty() {
+            result.on_update = Some(cleaned.to_string());
+        }
+    }
+
+    result
+}
+
 fn postgres_order_by_expression(columns: &[String], db_type: &DatabaseType) -> Option<String> {
     if columns.is_empty() {
         return None;
     }
     Some(columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", "))
+}
+
+fn oracle_rownum_page_sql(col_list: &str, base_sql: String, offset: u64, limit: usize) -> String {
+    if offset == 0 {
+        return format!("SELECT {col_list} FROM ({base_sql}) WHERE ROWNUM <= {limit}");
+    }
+    let end = offset + limit as u64;
+    format!(
+        "SELECT {col_list} FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM ({base_sql}) dbx_inner WHERE ROWNUM <= {end}) WHERE \"__dbx_row_num\" > {offset}"
+    )
 }
 
 fn postgres_index_column_sql(column: &str) -> String {
@@ -244,8 +440,13 @@ fn generate_postgres_index_ddl(indexes: &[db::IndexInfo], table: &str, schema: &
     statements
 }
 
-fn generate_postgres_foreign_key_ddl(foreign_keys: &[db::ForeignKeyInfo], table: &str, schema: &str) -> Vec<String> {
-    let full_table = qualified_table(table, schema, &DatabaseType::Postgres);
+fn generate_postgres_foreign_key_ddl(
+    foreign_keys: &[db::ForeignKeyInfo],
+    table: &str,
+    source_schema: &str,
+    target_schema: &str,
+) -> Vec<String> {
+    let full_table = qualified_table(table, target_schema, &DatabaseType::Postgres);
     let mut grouped: HashMap<&str, Vec<&db::ForeignKeyInfo>> = HashMap::new();
     let mut order = Vec::new();
 
@@ -271,7 +472,11 @@ fn generate_postgres_foreign_key_ddl(foreign_keys: &[db::ForeignKeyInfo], table:
             .map(|foreign_key| quote_identifier(&foreign_key.ref_column, &DatabaseType::Postgres))
             .collect::<Vec<_>>()
             .join(", ");
-        let referenced_schema = group[0].ref_schema.as_deref().unwrap_or(schema);
+        let referenced_schema = match group[0].ref_schema.as_deref() {
+            Some(ref_schema) if ref_schema == source_schema => target_schema,
+            Some(ref_schema) => ref_schema,
+            None => target_schema,
+        };
         let referenced_table = qualified_table(&group[0].ref_table, referenced_schema, &DatabaseType::Postgres);
         statements.push(format!(
             "ALTER TABLE {full_table} ADD CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {referenced_table} ({ref_columns})",
@@ -286,7 +491,10 @@ fn generate_postgres_sequence_sync_sql(columns: &[db::ColumnInfo], table: &str, 
     let full_table = qualified_table(table, schema, &DatabaseType::Postgres);
     columns
         .iter()
-        .filter(|column| is_postgres_sequence_default(column.column_default.as_deref()))
+        .filter(|column| {
+            is_postgres_sequence_default(column.column_default.as_deref())
+                || is_postgres_identity_extra(column.extra.as_deref())
+        })
         .map(|column| {
             let quoted_column = quote_identifier(&column.name, &DatabaseType::Postgres);
             format!(
@@ -403,7 +611,7 @@ fn generate_postgres_materialized_view_ddls(view: &PostgresMaterializedViewSourc
     ]
 }
 
-fn rewrite_postgres_routine_schema(source: &str, target_schema: &str) -> Option<String> {
+fn rewrite_postgres_routine_schema(source: &str, source_schema: &str, target_schema: &str) -> Option<String> {
     let re = Regex::new(
         r#"(?is)^(\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?(?:FUNCTION|PROCEDURE)\s+)((?:"(?:""|[^"])+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"(?:""|[^"])+"|[A-Za-z_][\w$]*))?)"#,
     )
@@ -423,7 +631,8 @@ fn rewrite_postgres_routine_schema(source: &str, target_schema: &str) -> Option<
         quote_identifier(target_schema, &DatabaseType::Postgres),
         quote_identifier(name, &DatabaseType::Postgres)
     );
-    Some(format!("{}{}{}{}", &source[..full.start()], prefix, replacement, &source[full.end()..]))
+    let rewritten = format!("{}{}{}{}", &source[..full.start()], prefix, replacement, &source[full.end()..]);
+    Some(rewrite_postgres_schema_qualified_references(&rewritten, source_schema, target_schema))
 }
 
 fn rewrite_postgres_trigger_table_schema(
@@ -445,10 +654,11 @@ fn rewrite_postgres_trigger_table_schema(
     ];
     for pattern in candidate_patterns {
         if source.contains(&pattern) {
-            return source.replacen(&pattern, &format!(" ON {qualified_target_table} "), 1);
+            let rewritten = source.replacen(&pattern, &format!(" ON {qualified_target_table} "), 1);
+            return rewrite_postgres_schema_qualified_references(&rewritten, source_schema, target_schema);
         }
     }
-    source.to_string()
+    rewrite_postgres_schema_qualified_references(source, source_schema, target_schema)
 }
 
 pub fn escape_value(val: &serde_json::Value, db_type: &DatabaseType) -> String {
@@ -465,6 +675,21 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             | DatabaseType::Doris
             | DatabaseType::StarRocks => {
                 if *b {
+                    if column_type.is_some_and(is_mysql_bit_type) {
+                        "b'1'".to_string()
+                    } else {
+                        "1".to_string()
+                    }
+                } else {
+                    if column_type.is_some_and(is_mysql_bit_type) {
+                        "b'0'".to_string()
+                    } else {
+                        "0".to_string()
+                    }
+                }
+            }
+            DatabaseType::SqlServer => {
+                if *b {
                     "1".to_string()
                 } else {
                     "0".to_string()
@@ -478,16 +703,75 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                 }
             }
         },
-        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Number(n) => match db_type {
+            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
+                if column_type.is_some_and(is_mysql_bit_type) {
+                    format!("b'{}'", n)
+                } else {
+                    n.to_string()
+                }
+            }
+            _ => n.to_string(),
+        },
         serde_json::Value::String(s) => {
-            format!("'{}'", format_literal_string(s, db_type, column_type).replace('\\', "\\\\").replace('\'', "''"))
+            if let Some(binary_literal) = format_postgres_binary_sql_literal(s, db_type, column_type) {
+                return binary_literal;
+            }
+
+            let literal = format_literal_string(s, db_type, column_type);
+            let escaped = if is_postgres_family_target(db_type) {
+                literal.replace('\'', "''")
+            } else {
+                literal.replace('\\', "\\\\").replace('\'', "''")
+            };
+            match db_type {
+                DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks
+                    if column_type.is_some_and(is_mysql_bit_type) =>
+                {
+                    format!("b'{escaped}'")
+                }
+                DatabaseType::SqlServer => format!("N'{escaped}'"),
+                _ => format!("'{escaped}'"),
+            }
         }
-        serde_json::Value::Array(arr) => format_pg_array_sql_literal(arr),
+        serde_json::Value::Array(arr) => match db_type {
+            DatabaseType::ClickHouse | DatabaseType::Databend => format_ch_array_sql_literal(arr),
+            _ => format_pg_array_sql_literal(arr),
+        },
         _ => {
             let s = val.to_string();
             format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
         }
     }
+}
+
+fn is_mysql_bit_type(column_type: &str) -> bool {
+    let trimmed = column_type.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    lower == "bit" || lower.starts_with("bit(") || lower.starts_with("bit ")
+}
+
+fn is_binary_transfer_column_type(column_type: &str) -> bool {
+    let lower = column_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ' ', '\t', '\n']).next().unwrap_or("");
+    matches!(base, "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob" | "bytea" | "image")
+}
+
+fn format_postgres_binary_sql_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if !matches!(db_type, DatabaseType::Postgres) || !column_type.is_some_and(is_binary_transfer_column_type) {
+        return None;
+    }
+
+    let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
+    if hex.len() % 2 != 0 || !hex.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    Some(format!("decode('{hex}', 'hex')"))
 }
 
 pub fn format_pg_array_sql_literal(arr: &[serde_json::Value]) -> String {
@@ -525,6 +809,43 @@ fn format_pg_array_element(val: &serde_json::Value) -> String {
             let json = serde_json::to_string(o).unwrap_or_default();
             let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
             format!("\"{}\"", escaped)
+        }
+    }
+}
+
+pub fn format_ch_array_sql_literal(arr: &[serde_json::Value]) -> String {
+    if arr.is_empty() {
+        return "[]".to_string();
+    }
+    let elements: Vec<String> = arr.iter().map(format_ch_array_element).collect();
+    format!("[{}]", elements.join(","))
+}
+
+fn format_ch_array_element(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                return "[]".to_string();
+            }
+            let elements: Vec<String> = arr.iter().map(format_ch_array_element).collect();
+            format!("[{}]", elements.join(","))
+        }
+        serde_json::Value::String(s) => {
+            let escaped = s.replace('\\', "\\\\").replace('\'', "''");
+            format!("'{}'", escaped)
+        }
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        serde_json::Value::Object(o) => {
+            let json = serde_json::to_string(o).unwrap_or_default();
+            format!("'{}'", json.replace('\\', "\\\\").replace('\'', "''"))
         }
     }
 }
@@ -651,8 +972,40 @@ fn is_timezone_suffix(value: &str) -> bool {
 }
 
 pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: &DatabaseType) -> String {
+    if _source_db == target_db {
+        return source_type.to_string();
+    }
     let t = source_type.to_lowercase();
-    let base = t.split('(').next().unwrap_or(&t).trim();
+    let mut base = t.split('(').next().unwrap_or(&t).trim();
+    // Extract basic type, `bigint unsigned` -> `bigint`
+    base = base.split(' ').next().unwrap_or(base).trim();
+
+    if matches!(target_db, DatabaseType::Hive) {
+        return match base {
+            "tinyint" => "TINYINT".into(),
+            "smallint" | "int2" => "SMALLINT".into(),
+            "int" | "integer" | "int4" | "mediumint" | "serial" | "smallserial" => "INT".into(),
+            "bigint" | "int8" | "bigserial" => "BIGINT".into(),
+            "float" | "float4" | "real" => "FLOAT".into(),
+            "double" | "double precision" | "float8" => "DOUBLE".into(),
+            "decimal" | "numeric" | "number" => {
+                if let Some(index) = t.find('(') {
+                    format!("DECIMAL{}", &t[index..])
+                } else {
+                    "DECIMAL".into()
+                }
+            }
+            "bool" | "boolean" | "bit" => "BOOLEAN".into(),
+            "date" => "DATE".into(),
+            "datetime" | "timestamp" | "timestamptz" | "timestamp with time zone" | "timestamp without time zone" => {
+                "TIMESTAMP".into()
+            }
+            "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob" | "bytea" | "image" => {
+                "BINARY".into()
+            }
+            _ => "STRING".into(),
+        };
+    }
 
     match base {
         "int" | "integer" | "int4" | "mediumint" => match target_db {
@@ -713,7 +1066,15 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
                 "CHAR(1)".into()
             }
         }
-        "text" | "longtext" | "mediumtext" | "tinytext" | "clob" | "ntext" => "TEXT".into(),
+        "longtext" => match target_db {
+            DatabaseType::Mysql => "LONGTEXT".into(),
+            _ => "TEXT".into(),
+        },
+        "mediumtext" => match target_db {
+            DatabaseType::Mysql => "MEDIUMTEXT".into(),
+            _ => "TEXT".into(),
+        },
+        "text" | "tinytext" | "clob" | "ntext" => "TEXT".into(),
         "bool" | "boolean" => match target_db {
             DatabaseType::Mysql => "TINYINT(1)".into(),
             DatabaseType::SqlServer => "BIT".into(),
@@ -730,7 +1091,19 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
             DatabaseType::SqlServer => "DATETIME2".into(),
             _ => "TIMESTAMP".into(),
         },
-        "blob" | "longblob" | "mediumblob" | "tinyblob" | "binary" | "varbinary" | "image" => match target_db {
+        "longblob" => match target_db {
+            DatabaseType::Mysql => "LONGBLOB".into(),
+            DatabaseType::Postgres => "BYTEA".into(),
+            DatabaseType::SqlServer => "VARBINARY(MAX)".into(),
+            _ => "BLOB".into(),
+        },
+        "mediumblob" => match target_db {
+            DatabaseType::Mysql => "MEDIUMBLOB".into(),
+            DatabaseType::Postgres => "BYTEA".into(),
+            DatabaseType::SqlServer => "VARBINARY(MAX)".into(),
+            _ => "BLOB".into(),
+        },
+        "blob" | "tinyblob" | "binary" | "varbinary" | "image" => match target_db {
             DatabaseType::Postgres => "BYTEA".into(),
             DatabaseType::Mysql => "BLOB".into(),
             DatabaseType::SqlServer => "VARBINARY(MAX)".into(),
@@ -766,6 +1139,12 @@ fn mysql_type_needs_key_prefix(mapped_type: &str) -> bool {
     )
 }
 
+fn parse_mysql_row_error(error: &str) -> Option<u64> {
+    let error = error.trim();
+    let at_row = error.rsplit("at row ").next()?;
+    at_row.trim().parse::<u64>().ok()
+}
+
 pub fn generate_create_table_ddl(
     columns: &[db::ColumnInfo],
     table: &str,
@@ -791,14 +1170,21 @@ pub fn generate_create_table_ddl(
         col_lines.push({
             let mapped_type = postgres_column_type_sql(c, source_schema, schema, source_db, target_db);
             let mut line = format!("  {} {}", quote_identifier(&c.name, target_db), mapped_type);
-            if let Some(default_clause) = postgres_default_clause(c, source_schema, schema, source_db, target_db) {
+            if let Some(default_clause) = column_default_clause(c, source_schema, schema, source_db, target_db) {
                 line.push(' ');
                 line.push_str(&default_clause);
             }
-            if !c.is_nullable {
+            if !c.is_nullable && !matches!(target_db, DatabaseType::Hive) {
                 line.push_str(" NOT NULL");
             }
             if is_mysql_family {
+                let extra_clauses = parse_mysql_extra_clauses(c.extra.as_deref());
+                if extra_clauses.auto_increment {
+                    line.push_str(" AUTO_INCREMENT");
+                }
+                if let Some(on_update_expr) = extra_clauses.on_update {
+                    line.push_str(&format!(" ON UPDATE {on_update_expr}"));
+                }
                 if let Some(ref comment) = c.comment {
                     let trimmed = comment.trim();
                     if !trimmed.is_empty() {
@@ -811,17 +1197,19 @@ pub fn generate_create_table_ddl(
     }
 
     let mut pks = Vec::with_capacity(columns.iter().filter(|c| c.is_primary_key).count());
-    for c in columns {
-        if c.is_primary_key {
-            let qname = quote_identifier(&c.name, target_db);
-            if is_mysql_family {
-                let mapped = map_column_type(&c.data_type, source_db, target_db);
-                if mysql_type_needs_key_prefix(&mapped) {
-                    pks.push(format!("{qname}(255)"));
-                    continue;
+    if !matches!(target_db, DatabaseType::Hive) {
+        for c in columns {
+            if c.is_primary_key {
+                let qname = quote_identifier(&c.name, target_db);
+                if is_mysql_family {
+                    let mapped = map_column_type(&c.data_type, source_db, target_db);
+                    if mysql_type_needs_key_prefix(&mapped) {
+                        pks.push(format!("{qname}(255)"));
+                        continue;
+                    }
                 }
+                pks.push(qname);
             }
-            pks.push(qname);
         }
     }
 
@@ -840,7 +1228,9 @@ pub fn generate_create_table_ddl(
     ddl.push_str(&format!("{create_prefix} {full_table} (\n"));
     ddl.push_str(&col_lines.join(",\n"));
 
-    if !pks.is_empty() {
+    // ClickHouse: PRIMARY KEY must be a prefix of ORDER BY; skip inline PK
+    // and encode it in the ENGINE clause below instead.
+    if !pks.is_empty() && !matches!(target_db, DatabaseType::ClickHouse) {
         ddl.push_str(&format!(",\n  PRIMARY KEY ({})", pks.join(", ")));
     }
 
@@ -856,7 +1246,11 @@ pub fn generate_create_table_ddl(
     }
 
     if matches!(target_db, DatabaseType::ClickHouse) {
-        ddl.push_str(" ENGINE = MergeTree() ORDER BY tuple()");
+        if pks.is_empty() {
+            ddl.push_str(" ENGINE = MergeTree() ORDER BY tuple()");
+        } else {
+            ddl.push_str(&format!(" ENGINE = MergeTree() ORDER BY ({})", pks.join(", ")));
+        }
     }
 
     ddl
@@ -1119,11 +1513,39 @@ pub fn generate_upsert_typed(
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
+        (DatabaseType::Hive, _) => 500,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
 }
 
+fn can_reuse_source_table_ddl(
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    preserves_target_table_name: bool,
+) -> bool {
+    preserves_target_table_name
+        && !matches!(target_db_type, DatabaseType::ClickHouse)
+        && (source_db_type == target_db_type
+            || (is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type))
+            || (is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type)))
+}
+
+fn rewrite_transfer_source_table_ddl(
+    sql: &str,
+    source_schema: &str,
+    target_schema: &str,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> String {
+    if is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type) {
+        rewrite_postgres_schema_qualified_references(sql, source_schema, target_schema)
+    } else {
+        sql.to_string()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn generate_transfer_write_sql(
     mode: &TransferMode,
     columns: &[String],
@@ -1140,6 +1562,7 @@ fn generate_transfer_write_sql(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_transfer_write_sql_batches(
     mode: &TransferMode,
     columns: &[String],
@@ -1210,10 +1633,18 @@ pub fn pagination_sql(
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
     match db_type {
-        DatabaseType::SqlServer | DatabaseType::Oracle => {
+        DatabaseType::Oracle => {
+            let base_sql = format!("SELECT {col_list} FROM {full_table}");
+            oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
+        }
+        DatabaseType::SqlServer | DatabaseType::Dameng => {
             format!(
                 "SELECT {col_list} FROM {full_table} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
             )
+        }
+        DatabaseType::Questdb => {
+            let upper_bound = offset + limit as u64;
+            format!("SELECT {col_list} FROM {full_table} LIMIT {offset}, {upper_bound}")
         }
         _ => {
             format!("SELECT {col_list} FROM {full_table} LIMIT {limit} OFFSET {offset}")
@@ -1235,11 +1666,21 @@ pub fn pagination_sql_with_order(
     let order_expression = postgres_order_by_expression(order_by_columns, db_type);
 
     match db_type {
-        DatabaseType::SqlServer | DatabaseType::Oracle => {
+        DatabaseType::Oracle => {
+            let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+            let base_sql = format!("SELECT {col_list} FROM {full_table}{order_by}");
+            oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
+        }
+        DatabaseType::SqlServer | DatabaseType::Dameng => {
             let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
             format!(
                 "SELECT {col_list} FROM {full_table} ORDER BY {order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
             )
+        }
+        DatabaseType::Questdb => {
+            let upper_bound = offset + limit as u64;
+            let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+            format!("SELECT {col_list} FROM {full_table}{order_by} LIMIT {offset}, {upper_bound}")
         }
         _ => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
@@ -1248,6 +1689,7 @@ pub fn pagination_sql_with_order(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn pagination_sql_with_filter_order(
     columns: &[String],
     table: &str,
@@ -1270,11 +1712,21 @@ pub fn pagination_sql_with_filter_order(
         .or_else(|| postgres_order_by_expression(default_order_columns, db_type));
 
     match db_type {
-        DatabaseType::SqlServer | DatabaseType::Oracle => {
+        DatabaseType::Oracle => {
+            let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+            let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by}");
+            oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
+        }
+        DatabaseType::SqlServer | DatabaseType::Dameng => {
             let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
             format!(
                 "SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
             )
+        }
+        DatabaseType::Questdb => {
+            let upper_bound = offset + limit as u64;
+            let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+            format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by} LIMIT {offset}, {upper_bound}")
         }
         _ => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
@@ -1311,7 +1763,11 @@ pub fn keyset_pagination_sql(
     let where_clause = keyset_where_clause(primary_keys, last_pk_values, db_type);
 
     match db_type {
-        DatabaseType::SqlServer | DatabaseType::Oracle => {
+        DatabaseType::Oracle => {
+            let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order}");
+            oracle_rownum_page_sql(&col_list, base_sql, 0, limit)
+        }
+        DatabaseType::SqlServer | DatabaseType::Dameng => {
             format!(
                 "SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order} OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
             )
@@ -1375,8 +1831,202 @@ fn value_to_sql_literal(value: &serde_json::Value, _db_type: &DatabaseType) -> S
     }
 }
 
+fn is_mongodb_transfer_type(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::MongoDb)
+}
+
+fn mongo_transfer_document_fields(documents: &[serde_json::Value]) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut seen = HashSet::new();
+    for document in documents {
+        let Some(object) = document.as_object() else {
+            continue;
+        };
+        for key in object.keys() {
+            if seen.insert(key.clone()) {
+                fields.push(key.clone());
+            }
+        }
+    }
+    fields
+}
+
+fn mongo_documents_to_rows(documents: &[serde_json::Value], columns: &[String]) -> Vec<Vec<serde_json::Value>> {
+    documents
+        .iter()
+        .map(|document| {
+            let object = document.as_object();
+            columns
+                .iter()
+                .map(|column| object.and_then(|values| values.get(column)).cloned().unwrap_or(serde_json::Value::Null))
+                .collect()
+        })
+        .collect()
+}
+
+fn sql_rows_to_mongo_documents(columns: &[String], rows: &[Vec<serde_json::Value>]) -> Vec<serde_json::Value> {
+    rows.iter()
+        .map(|row| {
+            let mut document = serde_json::Map::new();
+            for (index, column) in columns.iter().enumerate() {
+                document.insert(column.clone(), row.get(index).cloned().unwrap_or(serde_json::Value::Null));
+            }
+            serde_json::Value::Object(document)
+        })
+        .collect()
+}
+
+async fn find_mongo_documents_for_transfer(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    offset: u64,
+    batch_size: usize,
+) -> Result<MongoDocumentResult, String> {
+    crate::mongo_ops::mongo_find_documents_core(
+        state,
+        connection_id,
+        database,
+        collection,
+        offset,
+        batch_size as i64,
+        None,
+        Some(r#"{"_id":1}"#),
+    )
+    .await
+}
+
+async fn insert_mongo_documents_for_transfer(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    documents: &[serde_json::Value],
+) -> Result<u64, String> {
+    if documents.is_empty() {
+        return Ok(0);
+    }
+    let docs_json = serde_json::to_string(documents).map_err(|e| format!("Failed to encode MongoDB documents: {e}"))?;
+    match crate::mongo_ops::mongo_insert_documents_core(state, connection_id, database, collection, &docs_json).await {
+        Ok(count) => Ok(count),
+        Err(error) if error.to_ascii_lowercase().contains("legacy agent") => {
+            let mut inserted = 0;
+            for document in documents {
+                let doc_json =
+                    serde_json::to_string(document).map_err(|e| format!("Failed to encode MongoDB document: {e}"))?;
+                crate::mongo_ops::mongo_insert_document_core(state, connection_id, database, collection, &doc_json)
+                    .await?;
+                inserted += 1;
+            }
+            Ok(inserted)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn overwrite_mongo_collection_for_transfer(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+) -> Result<(), String> {
+    crate::mongo_ops::mongo_delete_documents_core(state, connection_id, database, collection, "{}", true)
+        .await
+        .map(|_| ())
+}
+
+fn mongo_value_column_type(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::Bool(_)) => "boolean".to_string(),
+        Some(serde_json::Value::Number(number)) if number.is_i64() || number.is_u64() => "bigint".to_string(),
+        Some(serde_json::Value::Number(_)) => "double".to_string(),
+        Some(serde_json::Value::Array(_) | serde_json::Value::Object(_)) => "json".to_string(),
+        _ => "text".to_string(),
+    }
+}
+
+fn mongo_columns_from_documents(documents: &[serde_json::Value]) -> Vec<db::ColumnInfo> {
+    mongo_transfer_document_fields(documents)
+        .into_iter()
+        .map(|name| {
+            let sample =
+                documents.iter().filter_map(|document| document.as_object()?.get(&name)).find(|value| !value.is_null());
+            db::ColumnInfo {
+                name,
+                data_type: mongo_value_column_type(sample),
+                is_nullable: true,
+                column_default: None,
+                is_primary_key: false,
+                extra: None,
+                comment: None,
+                numeric_precision: None,
+                numeric_scale: None,
+                character_maximum_length: None,
+            }
+        })
+        .collect()
+}
+
 pub async fn execute_on_pool(state: &AppState, pool_key: &str, sql: &str) -> Result<db::QueryResult, String> {
     execute_on_pool_with_max_rows(state, pool_key, sql, None).await
+}
+
+async fn execute_transfer_ddl_on_pool(
+    state: &AppState,
+    pool_key: &str,
+    sql: &str,
+    db_type: &DatabaseType,
+) -> Result<(), String> {
+    for statement in transfer_ddl_statements(sql, db_type) {
+        execute_on_pool(state, pool_key, &statement).await?;
+    }
+    Ok(())
+}
+
+fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
+    if matches!(db_type, DatabaseType::Postgres) {
+        let statements = split_sql_statements(sql);
+        if statements.is_empty() {
+            vec![sql.trim().to_string()]
+        } else {
+            statements
+                .into_iter()
+                .map(|statement| sanitize_postgres_transfer_ddl_statement(&statement))
+                .filter(|statement| !is_postgres_post_table_index_statement(statement))
+                .collect()
+        }
+    } else {
+        vec![sql.to_string()]
+    }
+}
+
+fn sanitize_postgres_transfer_ddl_statement(statement: &str) -> String {
+    if !statement.trim_start().to_ascii_uppercase().starts_with("CREATE TABLE ") {
+        return statement.to_string();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for line in statement.lines() {
+        if line.to_ascii_uppercase().contains(" FOREIGN KEY ") {
+            if let Some(previous) = lines.last_mut() {
+                let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
+                if previous[..trimmed_len].ends_with(',') {
+                    previous.truncate(trimmed_len - 1);
+                }
+            }
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+    lines.join("\n")
+}
+
+fn is_postgres_post_table_index_statement(statement: &str) -> bool {
+    let normalized = statement.trim_start().to_ascii_uppercase();
+    normalized.starts_with("CREATE INDEX ")
+        || normalized.starts_with("CREATE UNIQUE INDEX ")
+        || normalized.starts_with("COMMENT ON INDEX ")
 }
 
 pub async fn execute_on_pool_with_max_rows(
@@ -1385,6 +2035,8 @@ pub async fn execute_on_pool_with_max_rows(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<db::QueryResult, String> {
+    // Read-only check: block transfer operations in readonly mode
+    crate::query::check_read_only_for_connection(state, pool_key, sql).await?;
     let connections = state.connections.read().await;
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
 
@@ -1415,7 +2067,13 @@ pub async fn execute_on_pool_with_max_rows(
             let client = client.clone();
             drop(connections);
             let mut client = client.lock().await;
-            db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await
+            let result = db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await;
+            drop(client);
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(Some(DatabaseType::SqlServer), err))
+            {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
         }
         PoolKind::Agent(client) => {
             let client = client.clone();
@@ -1431,6 +2089,7 @@ pub async fn execute_on_pool_with_max_rows(
             );
             client.execute_query(params).await
         }
+        #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => {
             let con = con.clone();
             let sql = sql.to_string();
@@ -1473,6 +2132,8 @@ pub async fn execute_on_pool_with_max_rows(
                     }
                     Ok(db::QueryResult {
                         columns,
+                        column_types: Vec::new(),
+                        column_sortables: vec![],
                         rows: result_rows,
                         affected_rows: 0,
                         execution_time_ms: start.elapsed().as_millis(),
@@ -1484,6 +2145,8 @@ pub async fn execute_on_pool_with_max_rows(
                     let affected = con.execute(&sql, []).map_err(|e| e.to_string())?;
                     Ok(db::QueryResult {
                         columns: vec![],
+                        column_types: Vec::new(),
+                        column_sortables: vec![],
                         rows: vec![],
                         affected_rows: affected as u64,
                         execution_time_ms: start.elapsed().as_millis(),
@@ -1496,6 +2159,7 @@ pub async fn execute_on_pool_with_max_rows(
             .await
             .map_err(|e| e.to_string())?
         }
+        #[cfg(feature = "duckdb-bundled")]
         PoolKind::ExternalTabular(ext_pool) => {
             let con = ext_pool.cache.clone();
             let sql = sql.to_string();
@@ -1536,6 +2200,7 @@ pub async fn get_columns_for_transfer(
 ) -> Result<Vec<db::ColumnInfo>, String> {
     let connections = state.connections.read().await;
 
+    #[cfg(feature = "duckdb-bundled")]
     if let Some(PoolKind::DuckDb(con)) = connections.get(pool_key) {
         let con = con.clone();
         drop(connections);
@@ -1549,6 +2214,7 @@ pub async fn get_columns_for_transfer(
         .map_err(|e| e.to_string())?;
     }
 
+    #[cfg(feature = "duckdb-bundled")]
     if let Some(PoolKind::ExternalTabular(ext_pool)) = connections.get(pool_key) {
         let con = ext_pool.cache.clone();
         drop(connections);
@@ -1577,6 +2243,13 @@ pub async fn get_columns_for_transfer(
         let mut client = client.lock().await;
         return db::sqlserver::get_columns(&mut client, &schema, &table).await;
     }
+    if let Some(PoolKind::InfluxDb(client)) = connections.get(pool_key) {
+        let client = client.clone();
+        let database = database.to_string();
+        let table = table.to_string();
+        drop(connections);
+        return db::influxdb_driver::get_columns(&client, &database, &table).await;
+    }
     if let Some(PoolKind::Agent(client)) = connections.get(pool_key) {
         let client = client.clone();
         let database = database.to_string();
@@ -1584,7 +2257,7 @@ pub async fn get_columns_for_transfer(
         let table = table.to_string();
         drop(connections);
         let mut client = client.lock().await;
-        return client.get_columns(&database, &schema, &table).await;
+        return client.get_columns(&database, &schema, &table, None).await;
     }
     let pool = connections.get(pool_key).ok_or("Pool not found")?;
     let schema = schema.to_string();
@@ -1968,11 +2641,11 @@ async fn get_postgres_grant_statements_for_transfer(
          relation_grants AS ( \
              SELECT format( \
                  'GRANT %s ON %s %I.%I TO %s%s', \
-                 string_agg(a.privilege_type, ', ' ORDER BY a.privilege_type), \
+                 string_agg(privilege_type, ', ' ORDER BY privilege_type), \
                  CASE WHEN relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END, \
                  {target_schema}, relname, \
-                 CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(grantee.rolname) END, \
-                 CASE WHEN bool_or(a.is_grantable) THEN ' WITH GRANT OPTION' ELSE '' END \
+                 CASE WHEN grantee = 0 THEN 'PUBLIC' ELSE quote_ident(rolname) END, \
+                 CASE WHEN bool_or(is_grantable) THEN ' WITH GRANT OPTION' ELSE '' END \
              ) AS stmt \
              FROM ( \
                  SELECT c.relname, c.relkind, a.grantee, a.privilege_type, a.is_grantable, grantee.rolname \
@@ -1987,11 +2660,11 @@ async fn get_postgres_grant_statements_for_transfer(
          routine_grants AS ( \
              SELECT format( \
                  'GRANT %s ON %s %I.%I(%s) TO %s%s', \
-                 string_agg(a.privilege_type, ', ' ORDER BY a.privilege_type), \
+                 string_agg(privilege_type, ', ' ORDER BY privilege_type), \
                  CASE WHEN prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
                  {target_schema}, proname, identity_args, \
-                 CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(grantee.rolname) END, \
-                 CASE WHEN bool_or(a.is_grantable) THEN ' WITH GRANT OPTION' ELSE '' END \
+                 CASE WHEN grantee = 0 THEN 'PUBLIC' ELSE quote_ident(rolname) END, \
+                 CASE WHEN bool_or(is_grantable) THEN ' WITH GRANT OPTION' ELSE '' END \
              ) AS stmt \
              FROM ( \
                  SELECT p.proname, p.prokind, pg_get_function_identity_arguments(p.oid) AS identity_args, a.grantee, a.privilege_type, a.is_grantable, grantee.rolname \
@@ -2028,6 +2701,326 @@ pub async fn clear_cancelled(transfer_id: &str) {
     CANCELLED.write().await.remove(transfer_id);
 }
 
+/// Sort table names by foreign key dependency.
+///
+/// When `parents_first` is true (data transfer / SQL export), referenced (parent)
+/// tables come before referencing (child) tables so inserts don't violate FK
+/// constraints.
+///
+/// When `parents_first` is false (batch drop), referencing (child) tables come
+/// first so they are dropped before the tables they reference.
+///
+/// Uses Kahn's algorithm for topological sort; tables involved in cycles keep
+/// their original relative order after all cycle-free tables.
+pub async fn sort_tables_by_fk_dependency(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    tables: &[String],
+    parents_first: bool,
+) -> Result<Vec<String>, String> {
+    if tables.len() <= 1 {
+        return Ok(tables.to_vec());
+    }
+
+    let table_set: HashSet<&str> = tables.iter().map(|t| t.as_str()).collect();
+
+    // Gather FK relationships for every table.
+    let mut dependency_map: HashMap<String, Vec<String>> = HashMap::new();
+    for table in tables {
+        let fks = crate::schema::list_foreign_keys_core(state, connection_id, database, schema, table).await?;
+        let deps: Vec<String> = fks
+            .iter()
+            .map(|fk| fk.ref_table.clone())
+            .filter(|ref_table| table_set.contains(ref_table.as_str()))
+            .collect();
+        dependency_map.insert(table.clone(), deps);
+    }
+
+    // Build in-degree and dependents graph.
+    // parents_first=true:  edge ref_table -> table     (parent before child)
+    // parents_first=false: edge table -> ref_table      (child before parent)
+    let mut in_degree: HashMap<&str, usize> = HashMap::new();
+    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+
+    for table in tables {
+        in_degree.entry(table.as_str()).or_insert(0);
+    }
+    for table in tables {
+        if let Some(deps) = dependency_map.get(table) {
+            for ref_table in deps {
+                if parents_first {
+                    // FK-bearing table depends on ref_table - parent comes first.
+                    *in_degree.entry(table.as_str()).or_insert(0) += 1;
+                    dependents.entry(ref_table.as_str()).or_default().push(table.as_str());
+                } else {
+                    // ref_table depends on FK-bearing table - child comes first.
+                    *in_degree.entry(ref_table.as_str()).or_insert(0) += 1;
+                    dependents.entry(table.as_str()).or_default().push(ref_table.as_str());
+                }
+            }
+        }
+    }
+
+    // Kahn's algorithm.
+    let mut queue: std::collections::VecDeque<&str> =
+        in_degree.iter().filter(|(_, &deg)| deg == 0).map(|(&table, _)| table).collect();
+
+    let mut sorted: Vec<String> = Vec::new();
+    while let Some(table) = queue.pop_front() {
+        sorted.push(table.to_string());
+        if let Some(deps) = dependents.get(table) {
+            for &dependent in deps {
+                let deg = in_degree.get_mut(dependent).unwrap();
+                *deg -= 1;
+                if *deg == 0 {
+                    queue.push_back(dependent);
+                }
+            }
+        }
+    }
+
+    // Append any tables left behind by cycles in their original order.
+    if sorted.len() < tables.len() {
+        let sorted_set: HashSet<&str> = sorted.iter().map(|s| s.as_str()).collect();
+        let mut remaining: Vec<String> = Vec::new();
+        for table in tables {
+            if !sorted_set.contains(table.as_str()) {
+                remaining.push(table.clone());
+            }
+        }
+        sorted.extend(remaining);
+    }
+
+    Ok(sorted)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn transfer_mongodb_table<F>(
+    state: &AppState,
+    request: &TransferRequest,
+    table: &str,
+    table_index: usize,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    mut progress_callback: F,
+) -> Result<u64, String>
+where
+    F: FnMut(TransferProgress),
+{
+    let total_tables = request.tables.len();
+    let target_table = request.target_table_name(table);
+    let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
+    let mut offset: u64 = 0;
+    let mut total_transferred: u64 = 0;
+    let mut total_rows = None;
+
+    if request.mode == TransferMode::Upsert {
+        log::warn!("[transfer] MongoDB upsert is not supported yet, falling back to append");
+    }
+
+    if is_mongodb_transfer_type(target_db_type) && request.mode == TransferMode::Overwrite {
+        overwrite_mongo_collection_for_transfer(
+            state,
+            &request.target_connection_id,
+            &request.target_database,
+            &target_table,
+        )
+        .await
+        .map_err(|e| format!("Failed to clear MongoDB collection '{target_table}': {e}"))?;
+    }
+
+    let mut sql_target_column_names: Vec<String> = Vec::new();
+    let mut sql_target_column_types: Vec<Option<String>> = Vec::new();
+    let mut sql_target_prepared = false;
+
+    loop {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
+
+        let documents = if is_mongodb_transfer_type(source_db_type) {
+            let result = find_mongo_documents_for_transfer(
+                state,
+                &request.source_connection_id,
+                &request.source_database,
+                table,
+                offset,
+                batch_size,
+            )
+            .await?;
+            total_rows = Some(result.total);
+            result.documents
+        } else {
+            let columns = get_columns_for_transfer(
+                state,
+                source_pool_key,
+                &request.source_connection_id,
+                &request.source_database,
+                &request.source_schema,
+                table,
+            )
+            .await?;
+            let col_names = columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>();
+            let primary_key_columns = columns
+                .iter()
+                .filter(|column| column.is_primary_key)
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            let sql = pagination_sql_with_order(
+                &col_names,
+                table,
+                &request.source_schema,
+                source_db_type,
+                offset,
+                batch_size,
+                &primary_key_columns,
+            );
+            let result = execute_on_pool(state, source_pool_key, &sql).await?;
+            sql_rows_to_mongo_documents(&col_names, &result.rows)
+        };
+
+        let row_count = documents.len();
+        if row_count == 0 {
+            break;
+        }
+
+        if is_mongodb_transfer_type(target_db_type) {
+            insert_mongo_documents_for_transfer(
+                state,
+                &request.target_connection_id,
+                &request.target_database,
+                &target_table,
+                &documents,
+            )
+            .await
+            .map_err(|e| format!("Insert failed for MongoDB collection '{target_table}' at offset {offset}: {e}"))?;
+        } else {
+            if !sql_target_prepared {
+                let mut sql_target_columns = mongo_columns_from_documents(&documents);
+                if sql_target_columns.is_empty() {
+                    sql_target_columns.push(db::ColumnInfo {
+                        name: "document".to_string(),
+                        data_type: "json".to_string(),
+                        is_nullable: true,
+                        column_default: None,
+                        is_primary_key: false,
+                        extra: None,
+                        comment: None,
+                        numeric_precision: None,
+                        numeric_scale: None,
+                        character_maximum_length: None,
+                    });
+                }
+                sql_target_column_names = sql_target_columns.iter().map(|column| column.name.clone()).collect();
+                sql_target_column_types =
+                    sql_target_columns.iter().map(|column| Some(column.data_type.clone())).collect();
+
+                if request.create_table {
+                    let ddl = generate_create_table_ddl(
+                        &sql_target_columns,
+                        &target_table,
+                        &request.source_schema,
+                        &request.target_schema,
+                        target_db_type,
+                        source_db_type,
+                        None,
+                    );
+                    let table_exists = match execute_on_pool(state, target_pool_key, &ddl).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            let err_lower = e.to_lowercase();
+                            if err_lower.contains("already exists") || err_lower.contains("there is already") {
+                                true
+                            } else {
+                                return Err(format!("Failed to create table from MongoDB collection '{table}': {e}"));
+                            }
+                        }
+                    };
+                    if table_exists {
+                        for stmt in generate_comment_ddl(
+                            &sql_target_columns,
+                            &target_table,
+                            &request.target_schema,
+                            target_db_type,
+                            None,
+                        ) {
+                            if let Err(e) = execute_on_pool(state, target_pool_key, &stmt).await {
+                                log::warn!(
+                                    "[transfer] failed to set MongoDB transfer column comment for {}: {}",
+                                    target_table,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if request.mode == TransferMode::Overwrite {
+                    let full_table = qualified_table(&target_table, &request.target_schema, target_db_type);
+                    let truncate_sql = match target_db_type {
+                        DatabaseType::Sqlite | DatabaseType::DuckDb => format!("DELETE FROM {full_table}"),
+                        _ => format!("TRUNCATE TABLE {full_table}"),
+                    };
+                    execute_on_pool(state, target_pool_key, &truncate_sql)
+                        .await
+                        .map_err(|e| format!("Failed to truncate MongoDB transfer target table: {e}"))?;
+                }
+
+                sql_target_prepared = true;
+            }
+
+            let rows = if sql_target_column_names.len() == 1 && sql_target_column_names[0] == "document" {
+                documents.iter().map(|document| vec![document.clone()]).collect::<Vec<_>>()
+            } else {
+                mongo_documents_to_rows(&documents, &sql_target_column_names)
+            };
+            let write_statements = generate_transfer_write_sql_batches(
+                &TransferMode::Append,
+                &sql_target_column_names,
+                &sql_target_column_types,
+                &rows,
+                &target_table,
+                &request.target_schema,
+                target_db_type,
+                &[],
+            );
+            for (statement_index, batch_sql) in write_statements.iter().enumerate() {
+                execute_on_pool(state, target_pool_key, batch_sql).await.map_err(|e| {
+                    format!(
+                        "Insert failed for MongoDB collection '{target_table}' at offset {offset}, chunk {} of {}: {e}",
+                        statement_index + 1,
+                        write_statements.len()
+                    )
+                })?;
+            }
+        }
+
+        total_transferred += row_count as u64;
+        offset += row_count as u64;
+
+        progress_callback(TransferProgress {
+            transfer_id: request.transfer_id.clone(),
+            table: table.to_string(),
+            table_index,
+            total_tables,
+            rows_transferred: total_transferred,
+            total_rows,
+            status: TransferStatus::Running,
+            error: None,
+        });
+
+        if row_count < batch_size {
+            break;
+        }
+    }
+
+    Ok(total_transferred)
+}
+
 /// Transfer a single table. Returns rows transferred.
 /// `progress_callback` is invoked for progress updates.
 #[allow(clippy::too_many_arguments)]
@@ -2045,8 +3038,25 @@ pub async fn transfer_table<F>(
 where
     F: FnMut(TransferProgress),
 {
+    if is_mongodb_transfer_type(source_db_type) || is_mongodb_transfer_type(target_db_type) {
+        return transfer_mongodb_table(
+            state,
+            request,
+            table,
+            table_index,
+            source_db_type,
+            target_db_type,
+            source_pool_key,
+            target_pool_key,
+            progress_callback,
+        )
+        .await;
+    }
+
     let total_tables = request.tables.len();
     let pg_compat_transfer = is_postgres_compat_transfer(source_db_type, target_db_type);
+    let target_table = request.target_table_name(table);
+    let preserves_target_table_name = target_table == table;
 
     // Get source columns (deduplicate by name)
     let columns = {
@@ -2081,6 +3091,8 @@ where
         &request.source_schema,
         Some(table),
         Some(1),
+        None,
+        None,
     )
     .await
     .unwrap_or_default()
@@ -2093,23 +3105,27 @@ where
         &request.target_connection_id,
         &request.target_database,
         &request.target_schema,
-        Some(table),
+        Some(&target_table),
         Some(1),
+        None,
+        None,
     )
     .await
     .map(|tables| !tables.is_empty())
     .unwrap_or(false);
 
-    let source_indexes = if request.create_table && pg_compat_transfer && !target_table_preexisting {
-        get_postgres_indexes_for_transfer(state, source_pool_key, &request.source_schema, table).await?
-    } else {
-        Vec::new()
-    };
-    let source_foreign_keys = if request.create_table && pg_compat_transfer && !target_table_preexisting {
-        get_postgres_foreign_keys_for_transfer(state, source_pool_key, &request.source_schema, table).await?
-    } else {
-        Vec::new()
-    };
+    let source_indexes =
+        if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
+            get_postgres_indexes_for_transfer(state, source_pool_key, &request.source_schema, table).await?
+        } else {
+            Vec::new()
+        };
+    let source_foreign_keys =
+        if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
+            get_postgres_foreign_keys_for_transfer(state, source_pool_key, &request.source_schema, table).await?
+        } else {
+            Vec::new()
+        };
 
     // Count source rows
     let total_rows = {
@@ -2137,17 +3153,49 @@ where
                 .await
                 .map_err(|e| format!("Failed to ensure schema exists: {e}"))?;
         }
-        let ddl = generate_create_table_ddl(
-            &columns,
-            table,
-            &request.source_schema,
-            &request.target_schema,
-            target_db_type,
-            source_db_type,
-            table_comment.as_deref(),
-        );
-        log::info!("[transfer] creating target table: {}", &ddl[..ddl.len().min(200)]);
-        let table_exists = match execute_on_pool(state, target_pool_key, &ddl).await {
+        let can_reuse_source_ddl =
+            can_reuse_source_table_ddl(source_db_type, target_db_type, preserves_target_table_name);
+        let ddl = if can_reuse_source_ddl {
+            let source_ddl = crate::schema::get_table_ddl_core(
+                &state,
+                &request.source_connection_id,
+                &request.source_database,
+                &request.source_schema,
+                table,
+                None,
+            )
+            .await
+            .unwrap_or_else(|_| {
+                generate_create_table_ddl(
+                    &columns,
+                    &target_table,
+                    &request.source_schema,
+                    &request.target_schema,
+                    target_db_type,
+                    source_db_type,
+                    table_comment.as_deref(),
+                )
+            });
+            rewrite_transfer_source_table_ddl(
+                &source_ddl,
+                &request.source_schema,
+                &request.target_schema,
+                source_db_type,
+                target_db_type,
+            )
+        } else {
+            generate_create_table_ddl(
+                &columns,
+                &target_table,
+                &request.source_schema,
+                &request.target_schema,
+                target_db_type,
+                source_db_type,
+                table_comment.as_deref(),
+            )
+        };
+        log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
+        let table_exists = match execute_transfer_ddl_on_pool(state, target_pool_key, &ddl, target_db_type).await {
             Ok(_) => true,
             Err(e) => {
                 let err_lower = e.to_lowercase();
@@ -2159,11 +3207,16 @@ where
             }
         };
         if table_exists {
-            let comment_stmts =
-                generate_comment_ddl(&columns, table, &request.target_schema, target_db_type, table_comment.as_deref());
+            let comment_stmts = generate_comment_ddl(
+                &columns,
+                &target_table,
+                &request.target_schema,
+                target_db_type,
+                table_comment.as_deref(),
+            );
             for stmt in &comment_stmts {
                 if let Err(e) = execute_on_pool(state, target_pool_key, stmt).await {
-                    log::warn!("[transfer] failed to set column comment for {}: {}", table, e);
+                    log::warn!("[transfer] failed to set column comment for {}: {}", target_table, e);
                 }
             }
         }
@@ -2171,7 +3224,7 @@ where
 
     // Truncate target if overwrite mode
     if request.mode == TransferMode::Overwrite {
-        let full_table = qualified_table(table, &request.target_schema, target_db_type);
+        let full_table = qualified_table(&target_table, &request.target_schema, target_db_type);
         let truncate_sql = match target_db_type {
             DatabaseType::Sqlite | DatabaseType::DuckDb => format!("DELETE FROM {full_table}"),
             _ => format!("TRUNCATE TABLE {full_table}"),
@@ -2181,8 +3234,8 @@ where
 
     // Determine effective mode and PK columns for upsert
     let (effective_mode, pk_columns) = if request.mode == TransferMode::Upsert {
-        if matches!(target_db_type, DatabaseType::ClickHouse) {
-            log::warn!("[transfer] upsert not supported for ClickHouse, falling back to append");
+        if matches!(target_db_type, DatabaseType::ClickHouse | DatabaseType::Hive) {
+            log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
         } else {
             let target_columns = get_columns_for_transfer(
@@ -2191,7 +3244,7 @@ where
                 &request.target_connection_id,
                 &request.target_database,
                 &request.target_schema,
-                table,
+                &target_table,
             )
             .await
             .unwrap_or_default();
@@ -2238,18 +3291,26 @@ where
             &col_names,
             &col_types,
             &result.rows,
-            table,
+            &target_table,
             &request.target_schema,
             target_db_type,
             &pk_columns,
         );
         for (statement_index, batch_sql) in write_statements.iter().enumerate() {
             execute_on_pool(state, target_pool_key, batch_sql).await.map_err(|e| {
-                format!(
-                    "Insert failed at offset {offset}, chunk {} of {}: {e}",
-                    statement_index + 1,
-                    write_statements.len()
-                )
+                let absolute_row = parse_mysql_row_error(&e).map(|row| offset + row);
+                match absolute_row {
+                    Some(row) => format!(
+                        "Insert failed for table '{target_table}' at row {row} (chunk {} of {}): {e}",
+                        statement_index + 1,
+                        write_statements.len()
+                    ),
+                    None => format!(
+                        "Insert failed for table '{target_table}' at offset {offset}, chunk {} of {}: {e}",
+                        statement_index + 1,
+                        write_statements.len()
+                    ),
+                }
             })?;
         }
 
@@ -2274,23 +3335,28 @@ where
     }
 
     if pg_compat_transfer {
-        for statement in generate_postgres_sequence_sync_sql(&columns, table, &request.target_schema) {
+        for statement in generate_postgres_sequence_sync_sql(&columns, &target_table, &request.target_schema) {
             execute_on_pool(state, target_pool_key, &statement)
                 .await
-                .map_err(|e| format!("Failed to sync PostgreSQL sequence for {table}: {e}"))?;
+                .map_err(|e| format!("Failed to sync PostgreSQL sequence for {target_table}: {e}"))?;
         }
     }
 
-    if request.create_table && pg_compat_transfer && !target_table_preexisting {
-        for statement in generate_postgres_index_ddl(&source_indexes, table, &request.target_schema) {
+    if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
+        for statement in generate_postgres_index_ddl(&source_indexes, &target_table, &request.target_schema) {
             execute_on_pool(state, target_pool_key, &statement)
                 .await
-                .map_err(|e| format!("Failed to create PostgreSQL index for {table}: {e}"))?;
+                .map_err(|e| format!("Failed to create PostgreSQL index for {target_table}: {e}"))?;
         }
-        for statement in generate_postgres_foreign_key_ddl(&source_foreign_keys, table, &request.target_schema) {
+        for statement in generate_postgres_foreign_key_ddl(
+            &source_foreign_keys,
+            &target_table,
+            &request.source_schema,
+            &request.target_schema,
+        ) {
             execute_on_pool(state, target_pool_key, &statement)
                 .await
-                .map_err(|e| format!("Failed to create PostgreSQL foreign key for {table}: {e}"))?;
+                .map_err(|e| format!("Failed to create PostgreSQL foreign key for {target_table}: {e}"))?;
         }
     }
 
@@ -2472,12 +3538,14 @@ where
         });
 
         let rewritten_source = match object.object_type {
-            db::ObjectSourceKind::View => object.source.clone(),
+            db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView => object.source.clone(),
             db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function => {
-                rewrite_postgres_routine_schema(&object.source, &request.target_schema)
+                rewrite_postgres_routine_schema(&object.source, &request.source_schema, &request.target_schema)
                     .unwrap_or_else(|| object.source.clone())
             }
-            db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => object.source.clone(),
+            db::ObjectSourceKind::Sequence | db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => {
+                object.source.clone()
+            }
         };
         let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Postgres,
@@ -2626,11 +3694,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "duckdb-bundled")]
     use crate::connection::{AppState, PoolKind};
+    #[cfg(feature = "duckdb-bundled")]
+    use crate::models::connection::default_redis_key_separator;
+    #[cfg(feature = "duckdb-bundled")]
     use crate::storage::Storage;
     use serde_json::json;
+    #[cfg(feature = "duckdb-bundled")]
     use std::sync::Arc;
 
+    #[cfg(feature = "duckdb-bundled")]
     fn duckdb_test_config(id: &str) -> crate::models::connection::ConnectionConfig {
         crate::models::connection::ConnectionConfig {
             id: id.to_string(),
@@ -2645,28 +3719,18 @@ mod tests {
             password: String::new(),
             database: None,
             visible_databases: None,
+            visible_schemas: None,
             attached_databases: Vec::new(),
             color: None,
-            ssh_enabled: false,
-            ssh_host: String::new(),
-            ssh_port: 22,
-            ssh_user: String::new(),
-            ssh_password: String::new(),
-            ssh_key_path: String::new(),
-            ssh_key_passphrase: String::new(),
-            ssh_expose_lan: false,
-            ssh_connect_timeout_secs: 5,
-            ssh_tunnels: Vec::new(),
+            transport_layers: Vec::new(),
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
-            proxy_enabled: false,
-            proxy_type: crate::models::connection::ProxyType::Socks5,
-            proxy_host: String::new(),
-            proxy_port: 1080,
-            proxy_username: String::new(),
-            proxy_password: String::new(),
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: 0,
             ssl: false,
             ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
             sysdba: false,
             oracle_connection_type: None,
             connection_string: None,
@@ -2677,10 +3741,15 @@ mod tests {
             redis_sentinel_password: String::new(),
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
+            redis_key_separator: default_redis_key_separator(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            read_only: false,
         }
     }
 
@@ -2699,6 +3768,63 @@ mod tests {
         }
     }
 
+    fn test_transfer_request(tables: Vec<&str>) -> TransferRequest {
+        TransferRequest {
+            transfer_id: "transfer-1".to_string(),
+            source_connection_id: "source".to_string(),
+            source_database: "source_db".to_string(),
+            source_schema: "source_schema".to_string(),
+            target_connection_id: "target".to_string(),
+            target_database: "target_db".to_string(),
+            target_schema: "target_schema".to_string(),
+            tables: tables.into_iter().map(str::to_string).collect(),
+            create_table: true,
+            mode: TransferMode::Append,
+            target_table_name_case: TransferTableNameCase::Preserve,
+            batch_size: 1000,
+        }
+    }
+
+    #[test]
+    fn transfer_request_defaults_preserve_table_name_case() {
+        let request: TransferRequest = serde_json::from_value(json!({
+            "transferId": "transfer-1",
+            "sourceConnectionId": "source",
+            "sourceDatabase": "source_db",
+            "sourceSchema": "source_schema",
+            "targetConnectionId": "target",
+            "targetDatabase": "target_db",
+            "targetSchema": "target_schema",
+            "tables": ["ORDERS"],
+            "createTable": true,
+            "mode": "append",
+            "batchSize": 1000
+        }))
+        .unwrap();
+
+        assert_eq!(request.target_table_name_case, TransferTableNameCase::Preserve);
+        assert_eq!(request.target_table_name("ORDERS"), "ORDERS");
+    }
+
+    #[test]
+    fn transfer_table_name_case_transforms_target_names() {
+        let mut request = test_transfer_request(vec!["ORDERS"]);
+        request.target_table_name_case = TransferTableNameCase::Lower;
+        assert_eq!(request.target_table_name("ORDERS"), "orders");
+
+        request.target_table_name_case = TransferTableNameCase::Upper;
+        assert_eq!(request.target_table_name("orders"), "ORDERS");
+    }
+
+    #[test]
+    fn transfer_table_name_case_detects_target_collisions() {
+        let mut request = test_transfer_request(vec!["ORDERS", "orders"]);
+        request.target_table_name_case = TransferTableNameCase::Lower;
+
+        let error = validate_transfer_target_table_names(&request).unwrap_err();
+        assert!(error.contains("both map to 'orders'"));
+    }
+
     #[test]
     fn mysql_create_table_includes_column_comments() {
         let cols = vec![
@@ -2706,7 +3832,7 @@ mod tests {
             db::ColumnInfo {
                 comment: Some("用户姓名".to_string()),
                 is_nullable: false,
-                ..test_column("name", "varchar(100)")
+                ..test_column("name", "VARCHAR(100)")
             },
             db::ColumnInfo { comment: None, ..test_column("age", "int") },
         ];
@@ -2794,12 +3920,11 @@ mod tests {
             "",
             &DatabaseType::Mysql,
             &DatabaseType::Mysql,
-            Some("用户表"),
+            Some("user table"),
         );
 
-        assert!(ddl.contains(") COMMENT='用户表'"));
+        assert!(ddl.contains(") COMMENT='user table'"));
     }
-
     #[test]
     fn mysql_text_pk_gets_key_prefix() {
         let cols =
@@ -2824,16 +3949,61 @@ mod tests {
     #[test]
     fn postgres_comment_ddl_generates_column_and_table_comments() {
         let cols = vec![
-            db::ColumnInfo { comment: Some("主键".to_string()), ..test_column("id", "int") },
-            db::ColumnInfo { comment: Some("名称".to_string()), ..test_column("name", "varchar(100)") },
+            db::ColumnInfo { comment: Some("primary key".to_string()), ..test_column("id", "int") },
+            db::ColumnInfo { comment: Some("name".to_string()), ..test_column("name", "varchar(100)") },
         ];
 
-        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Postgres, Some("项目表"));
+        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Postgres, Some("items table"));
 
         assert_eq!(stmts.len(), 3);
-        assert!(stmts[0].contains("COMMENT ON TABLE \"public\".\"items\" IS '项目表'"));
-        assert!(stmts[1].contains("COMMENT ON COLUMN \"public\".\"items\".\"id\" IS '主键'"));
-        assert!(stmts[2].contains("COMMENT ON COLUMN \"public\".\"items\".\"name\" IS '名称'"));
+        assert!(stmts[0].contains("COMMENT ON TABLE \"public\".\"items\" IS 'items table'"));
+        assert!(stmts[1].contains("COMMENT ON COLUMN \"public\".\"items\".\"id\" IS 'primary key'"));
+        assert!(stmts[2].contains("COMMENT ON COLUMN \"public\".\"items\".\"name\" IS 'name'"));
+    }
+    #[test]
+    fn postgres_transfer_ddl_splits_reused_multi_statement_table_ddl() {
+        let ddl =
+            "CREATE TABLE \"public\".\"items\" (\"id\" integer);\nCOMMENT ON TABLE \"public\".\"items\" IS 'items';";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
+
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE TABLE \"public\".\"items\" (\"id\" integer)".to_string(),
+                "COMMENT ON TABLE \"public\".\"items\" IS 'items'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_transfer_ddl_skips_reused_index_statements() {
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer);\n\
+                   CREATE INDEX \"items_lower_idx\" ON \"public\".\"items\" USING btree (\"lower(name)\");\n\
+                   COMMENT ON INDEX \"public\".\"items_lower_idx\" IS 'lookup';";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
+
+        assert_eq!(statements, vec!["CREATE TABLE \"public\".\"items\" (\"id\" integer)".to_string()]);
+    }
+
+    #[test]
+    fn postgres_transfer_ddl_removes_inline_foreign_keys_from_reused_table_ddl() {
+        let ddl = "CREATE TABLE \"public\".\"audit_logs\" (\n  \"id\" integer,\n  \"user_id\" integer,\n  CONSTRAINT \"audit_logs_user_id_fkey\" FOREIGN KEY (\"user_id\") REFERENCES \"users\"(\"id\")\n);";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
+
+        assert_eq!(
+            statements,
+            vec!["CREATE TABLE \"public\".\"audit_logs\" (\n  \"id\" integer,\n  \"user_id\" integer\n)".to_string()]
+        );
+    }
+
+    #[test]
+    fn non_postgres_transfer_ddl_keeps_statement_text_intact() {
+        let ddl = "CREATE TABLE `items` (`id` int);\nALTER TABLE `items` COMMENT = 'items';";
+
+        assert_eq!(transfer_ddl_statements(ddl, &DatabaseType::Mysql), vec![ddl.to_string()]);
     }
 
     #[test]
@@ -2868,6 +4038,131 @@ mod tests {
     }
 
     #[test]
+    fn clickhouse_create_table_with_pk_uses_order_by_pk() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("id", "UInt64") },
+            db::ColumnInfo { ..test_column("name", "String") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "logs",
+            "",
+            "",
+            &DatabaseType::ClickHouse,
+            &DatabaseType::ClickHouse,
+            None,
+        );
+
+        // Must include ENGINE with ORDER BY using the PK columns
+        assert!(ddl.contains("ENGINE = MergeTree() ORDER BY (`id`)"));
+        // Must NOT have a separate PRIMARY KEY clause (ORDER BY serves that role)
+        assert!(!ddl.contains("PRIMARY KEY"));
+    }
+
+    #[test]
+    fn clickhouse_create_table_without_pk_uses_order_by_tuple() {
+        let cols = vec![db::ColumnInfo { ..test_column("message", "String") }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "logs",
+            "",
+            "",
+            &DatabaseType::ClickHouse,
+            &DatabaseType::ClickHouse,
+            None,
+        );
+
+        assert!(ddl.contains("ENGINE = MergeTree() ORDER BY tuple()"));
+        assert!(!ddl.contains("PRIMARY KEY"));
+    }
+
+    #[test]
+    fn transfer_reuses_source_table_ddl_only_when_target_shape_matches() {
+        assert!(!can_reuse_source_table_ddl(&DatabaseType::ClickHouse, &DatabaseType::ClickHouse, true));
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, true));
+        assert!(!can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, false));
+    }
+
+    #[test]
+    fn postgres_transfer_reused_table_ddl_rewrites_target_schema() {
+        let ddl =
+            "CREATE TABLE \"src\".\"items\" (\"id\" integer);\nCOMMENT ON COLUMN \"src\".\"items\".\"id\" IS 'id';";
+
+        let rewritten =
+            rewrite_transfer_source_table_ddl(ddl, "src", "dst", &DatabaseType::Postgres, &DatabaseType::Postgres);
+
+        assert!(rewritten.contains("CREATE TABLE \"dst\".\"items\""));
+        assert!(rewritten.contains("COMMENT ON COLUMN \"dst\".\"items\".\"id\""));
+        assert!(!rewritten.contains("\"src\".\"items\""));
+    }
+
+    #[test]
+    fn hive_create_table_uses_hive_friendly_columns() {
+        let cols = vec![
+            db::ColumnInfo { is_primary_key: true, is_nullable: false, ..test_column("id", "bigint") },
+            db::ColumnInfo { is_nullable: false, ..test_column("payload", "json") },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "events",
+            "public",
+            "warehouse",
+            &DatabaseType::Hive,
+            &DatabaseType::Postgres,
+            None,
+        );
+
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS `warehouse`.`events`"));
+        assert!(ddl.contains("`id` BIGINT"));
+        assert!(ddl.contains("`payload` STRING"));
+        assert!(!ddl.contains("PRIMARY KEY"));
+        assert!(!ddl.contains("NOT NULL"));
+    }
+
+    #[test]
+    fn hive_transfer_uses_backticks_and_hive_type_mapping() {
+        assert_eq!(quote_identifier("user`events", &DatabaseType::Hive), "`user``events`");
+        assert_eq!(map_column_type("jsonb", &DatabaseType::Postgres, &DatabaseType::Hive), "STRING");
+        assert_eq!(
+            map_column_type("timestamp with time zone", &DatabaseType::Postgres, &DatabaseType::Hive),
+            "TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn mongo_transfer_document_fields_preserve_first_seen_order() {
+        let documents = vec![json!({"b": 1}), json!({"a": 2, "c": 3}), json!({"b": 4, "d": 5})];
+
+        assert_eq!(mongo_transfer_document_fields(&documents), vec!["b", "a", "c", "d"]);
+    }
+
+    #[test]
+    fn mongo_transfer_rows_fill_missing_fields_with_null() {
+        let rows = mongo_documents_to_rows(
+            &[json!({"id": 1, "name": "Ada"}), json!({"id": 2})],
+            &[String::from("id"), String::from("name")],
+        );
+
+        assert_eq!(rows, vec![vec![json!(1), json!("Ada")], vec![json!(2), serde_json::Value::Null]]);
+    }
+
+    #[test]
+    fn sql_rows_to_mongo_documents_maps_columns_to_fields() {
+        let documents = sql_rows_to_mongo_documents(
+            &[String::from("id"), String::from("name"), String::from("active")],
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("Grace"), json!(true)]],
+        );
+
+        assert_eq!(
+            documents,
+            vec![json!({"id": 1, "name": "Ada", "active": null}), json!({"id": 2, "name": "Grace", "active": true})]
+        );
+    }
+
+    #[test]
     fn postgres_pagination_uses_stable_primary_key_order() {
         let sql = pagination_sql_with_order(
             &[String::from("id"), String::from("name")],
@@ -2880,6 +4175,58 @@ mod tests {
         );
 
         assert_eq!(sql, "SELECT \"id\", \"name\" FROM \"public\".\"users\" ORDER BY \"id\" LIMIT 100 OFFSET 200");
+    }
+
+    #[test]
+    fn questdb_pagination_uses_stable_primary_key_order() {
+        let sql = pagination_sql_with_order(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "public",
+            &DatabaseType::Questdb,
+            200,
+            100,
+            &[String::from("id")],
+        );
+
+        assert_eq!(sql, "SELECT `id`, `name` FROM `users` ORDER BY `id` LIMIT 200, 300");
+    }
+
+    #[test]
+    fn dameng_export_pagination_uses_offset_fetch() {
+        let sql = pagination_sql(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            500,
+            100,
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT \"id\", \"name\" FROM \"SYSDBA\".\"users\" ORDER BY (SELECT NULL) OFFSET 500 ROWS FETCH NEXT 100 ROWS ONLY"
+        );
+        assert!(!sql.contains(" LIMIT "));
+    }
+
+    #[test]
+    fn dameng_ordered_pagination_uses_offset_fetch() {
+        let sql = pagination_sql_with_order(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            200,
+            100,
+            &[String::from("id")],
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT \"id\", \"name\" FROM \"SYSDBA\".\"users\" ORDER BY \"id\" OFFSET 200 ROWS FETCH NEXT 100 ROWS ONLY"
+        );
+        assert!(!sql.contains(" LIMIT "));
     }
 
     #[test]
@@ -2900,6 +4247,49 @@ mod tests {
             sql,
             "SELECT \"id\", \"status\" FROM \"public\".\"users\" WHERE (status = 'active') ORDER BY \"id\" DESC LIMIT 2000 OFFSET 10000"
         );
+    }
+
+    #[test]
+    fn dameng_filtered_pagination_preserves_where_and_order() {
+        let sql = pagination_sql_with_filter_order(
+            &[String::from("id"), String::from("status")],
+            "users",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            10_000,
+            2_000,
+            Some("WHERE status = 'active'"),
+            Some("\"id\" DESC"),
+            &[String::from("id")],
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT \"id\", \"status\" FROM \"SYSDBA\".\"users\" WHERE (status = 'active') ORDER BY \"id\" DESC OFFSET 10000 ROWS FETCH NEXT 2000 ROWS ONLY"
+        );
+        assert!(!sql.contains(" LIMIT "));
+    }
+
+    #[test]
+    fn oracle_filtered_pagination_uses_rownum_for_legacy_compatibility() {
+        let sql = pagination_sql_with_filter_order(
+            &[String::from("id"), String::from("status")],
+            "users",
+            "APP",
+            &DatabaseType::Oracle,
+            10_000,
+            2_000,
+            Some("WHERE status = 'active'"),
+            Some("\"id\" DESC"),
+            &[String::from("id")],
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT \"id\", \"status\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"id\", \"status\" FROM \"APP\".\"users\" WHERE (status = 'active') ORDER BY \"id\" DESC) dbx_inner WHERE ROWNUM <= 12000) WHERE \"__dbx_row_num\" > 10000"
+        );
+        assert!(!sql.contains("OFFSET"));
+        assert!(!sql.contains("FETCH NEXT"));
     }
 
     #[test]
@@ -2925,6 +4315,45 @@ mod tests {
             sql,
             "SELECT [id], [name] FROM [dbo].[users] ORDER BY [id] ASC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY"
         );
+    }
+
+    #[test]
+    fn dameng_keyset_pagination_includes_offset_fetch() {
+        let sql = keyset_pagination_sql(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "SYSDBA",
+            &DatabaseType::Dameng,
+            &[String::from("id")],
+            &[json!(25)],
+            100,
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT \"id\", \"name\" FROM \"SYSDBA\".\"users\" WHERE \"id\" > 25 ORDER BY \"id\" ASC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY"
+        );
+        assert!(!sql.contains(" LIMIT "));
+    }
+
+    #[test]
+    fn oracle_keyset_pagination_uses_rownum_for_legacy_compatibility() {
+        let sql = keyset_pagination_sql(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "APP",
+            &DatabaseType::Oracle,
+            &[String::from("id")],
+            &[json!(25)],
+            100,
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT \"id\", \"name\" FROM (SELECT \"id\", \"name\" FROM \"APP\".\"users\" WHERE \"id\" > 25 ORDER BY \"id\" ASC) WHERE ROWNUM <= 100"
+        );
+        assert!(!sql.contains("OFFSET"));
+        assert!(!sql.contains("FETCH NEXT"));
     }
 
     #[test]
@@ -2964,6 +4393,8 @@ mod tests {
                 ref_schema: None,
                 ref_table: "users".to_string(),
                 ref_column: "id".to_string(),
+                on_update: None,
+                on_delete: None,
             },
             db::ForeignKeyInfo {
                 name: "orders_user_id_fkey".to_string(),
@@ -2971,11 +4402,13 @@ mod tests {
                 ref_schema: None,
                 ref_table: "users".to_string(),
                 ref_column: "tenant_id".to_string(),
+                on_update: None,
+                on_delete: None,
             },
         ];
 
         let index_sql = generate_postgres_index_ddl(&indexes, "users", "public");
-        let foreign_key_sql = generate_postgres_foreign_key_ddl(&foreign_keys, "orders", "public");
+        let foreign_key_sql = generate_postgres_foreign_key_ddl(&foreign_keys, "orders", "public", "archive");
 
         assert_eq!(
             index_sql,
@@ -2987,7 +4420,7 @@ mod tests {
         assert_eq!(
             foreign_key_sql,
             vec![
-                "ALTER TABLE \"public\".\"orders\" ADD CONSTRAINT \"orders_user_id_fkey\" FOREIGN KEY (\"user_id\", \"tenant_id\") REFERENCES \"public\".\"users\" (\"id\", \"tenant_id\")".to_string()
+                "ALTER TABLE \"archive\".\"orders\" ADD CONSTRAINT \"orders_user_id_fkey\" FOREIGN KEY (\"user_id\", \"tenant_id\") REFERENCES \"archive\".\"users\" (\"id\", \"tenant_id\")".to_string()
             ]
         );
     }
@@ -2995,18 +4428,44 @@ mod tests {
     #[test]
     fn postgres_sequence_sync_sql_uses_table_max_values() {
         let sql = generate_postgres_sequence_sync_sql(
-            &[db::ColumnInfo {
-                name: "id".to_string(),
-                data_type: "integer".to_string(),
-                is_nullable: false,
-                column_default: Some("nextval('public.users_id_seq'::regclass)".to_string()),
-                is_primary_key: true,
-                extra: None,
-                comment: None,
-                numeric_precision: None,
-                numeric_scale: None,
-                character_maximum_length: None,
-            }],
+            &[
+                db::ColumnInfo {
+                    name: "id".to_string(),
+                    data_type: "integer".to_string(),
+                    is_nullable: false,
+                    column_default: Some("nextval('public.users_id_seq'::regclass)".to_string()),
+                    is_primary_key: true,
+                    extra: None,
+                    comment: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
+                    character_maximum_length: None,
+                },
+                db::ColumnInfo {
+                    name: "identity_id".to_string(),
+                    data_type: "integer".to_string(),
+                    is_nullable: false,
+                    column_default: None,
+                    is_primary_key: false,
+                    extra: Some("generated by default as identity".to_string()),
+                    comment: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
+                    character_maximum_length: None,
+                },
+                db::ColumnInfo {
+                    name: "computed_id".to_string(),
+                    data_type: "integer".to_string(),
+                    is_nullable: false,
+                    column_default: None,
+                    is_primary_key: false,
+                    extra: Some("generated always as (identity_id + 1) stored".to_string()),
+                    comment: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
+                    character_maximum_length: None,
+                },
+            ],
             "users",
             "public",
         );
@@ -3014,7 +4473,8 @@ mod tests {
         assert_eq!(
             sql,
             vec![
-                "SELECT setval(pg_get_serial_sequence('\"public\".\"users\"', 'id'), GREATEST(COALESCE(MAX(\"id\"), 0), 1), MAX(\"id\") IS NOT NULL) FROM \"public\".\"users\"".to_string()
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"users\"', 'id'), GREATEST(COALESCE(MAX(\"id\"), 0), 1), MAX(\"id\") IS NOT NULL) FROM \"public\".\"users\"".to_string(),
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"users\"', 'identity_id'), GREATEST(COALESCE(MAX(\"identity_id\"), 0), 1), MAX(\"identity_id\") IS NOT NULL) FROM \"public\".\"users\"".to_string()
             ]
         );
     }
@@ -3022,12 +4482,14 @@ mod tests {
     #[test]
     fn postgres_routine_schema_rewrite_targets_destination_schema() {
         let rewritten = rewrite_postgres_routine_schema(
-            "CREATE OR REPLACE FUNCTION public.bump_counter(id integer)\nRETURNS integer\nLANGUAGE plpgsql\nAS $$ BEGIN RETURN id + 1; END; $$",
+            "CREATE OR REPLACE FUNCTION public.bump_counter(id integer)\nRETURNS integer\nLANGUAGE plpgsql\nAS $$ BEGIN INSERT INTO public.audit_logs(user_id) VALUES (id); RETURN id + 1; END; $$",
+            "public",
             "archive",
         )
         .unwrap();
 
         assert!(rewritten.starts_with("CREATE OR REPLACE FUNCTION \"archive\".\"bump_counter\"("));
+        assert!(rewritten.contains("INSERT INTO \"archive\".audit_logs"));
     }
 
     #[test]
@@ -3040,6 +4502,7 @@ mod tests {
         );
 
         assert!(rewritten.contains(" ON \"archive\".\"users\" "));
+        assert!(rewritten.contains("EXECUTE FUNCTION \"archive\".bump_counter()"));
     }
 
     #[test]
@@ -3105,6 +4568,20 @@ mod tests {
     }
 
     #[test]
+    fn mysql_insert_omits_database_qualified_table_name() {
+        let sql = generate_insert_typed(
+            &[String::from("id")],
+            &[Some(String::from("int"))],
+            &[vec![json!(1)]],
+            "users",
+            "app",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(sql, "INSERT INTO `users` (`id`) VALUES\n(1)");
+    }
+
+    #[test]
     fn mysql_insert_uses_column_types_for_temporal_literals() {
         let sql = generate_insert_typed(
             &[String::from("dt"), String::from("raw_text"), String::from("d"), String::from("t")],
@@ -3128,6 +4605,123 @@ mod tests {
         assert_eq!(
             sql,
             "INSERT INTO `policies` (`dt`, `raw_text`, `d`, `t`) VALUES\n('2026-05-12 00:00:00', '2026-05-12T00:00:00+00:00', '2026-05-12', '09:30:45')"
+        );
+    }
+
+    #[test]
+    fn sqlserver_insert_prefixes_string_literals_as_unicode() {
+        let sql = generate_insert_typed(
+            &[String::from("name"), String::from("note")],
+            &[Some(String::from("nvarchar(100)")), Some(String::from("varchar(100)"))],
+            &[vec![json!("Tiếng Việt"), json!("O'Brien")]],
+            "customers",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(sql, "INSERT INTO [dbo].[customers] ([name], [note]) VALUES\n(N'Tiếng Việt', N'O''Brien')");
+    }
+
+    #[test]
+    fn sqlserver_insert_formats_bit_booleans_as_numeric_literals() {
+        let sql = generate_insert_typed(
+            &[String::from("enabled"), String::from("deleted")],
+            &[Some(String::from("bit")), Some(String::from("BIT"))],
+            &[vec![json!(true), json!(false)]],
+            "flags",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(sql, "INSERT INTO [dbo].[flags] ([enabled], [deleted]) VALUES\n(1, 0)");
+    }
+
+    #[test]
+    fn sqlserver_upsert_formats_bit_booleans_as_numeric_literals() {
+        let sql = generate_upsert_typed(
+            &[String::from("id"), String::from("enabled")],
+            &[Some(String::from("int")), Some(String::from("bit"))],
+            &[vec![json!(1), json!(true)]],
+            "flags",
+            "dbo",
+            &DatabaseType::SqlServer,
+            &[String::from("id")],
+        );
+
+        assert!(sql.contains("USING (VALUES\n(1, 1)\n)"));
+        assert!(!sql.contains("TRUE"));
+        assert!(!sql.contains("FALSE"));
+    }
+
+    #[test]
+    fn postgres_insert_preserves_json_escape_sequences() {
+        let sql = generate_insert_typed(
+            &[String::from("payload")],
+            &[Some(String::from("jsonb"))],
+            &[vec![json!(r#"{"message":"hello\nworld"}"#)]],
+            "events",
+            "public",
+            &DatabaseType::Postgres,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "public"."events" ("payload") VALUES
+('{"message":"hello\nworld"}')"#
+        );
+    }
+
+    #[test]
+    fn postgres_insert_preserves_text_backslashes() {
+        let sql = generate_insert_typed(
+            &[String::from("path")],
+            &[Some(String::from("text"))],
+            &[vec![json!(r#"C:\tmp\file.txt"#)]],
+            "files",
+            "public",
+            &DatabaseType::Postgres,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "public"."files" ("path") VALUES
+('C:\tmp\file.txt')"#
+        );
+    }
+
+    #[test]
+    fn postgres_insert_formats_bytea_prefixed_hex_as_binary_literal() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("payload"), String::from("note")],
+            &[Some(String::from("integer")), Some(String::from("BYTEA")), Some(String::from("text"))],
+            &[vec![json!(1), json!("0x48656c6c6f"), json!("0x48656c6c6f")]],
+            "files",
+            "public",
+            &DatabaseType::Postgres,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "public"."files" ("id", "payload", "note") VALUES
+(1, decode('48656c6c6f', 'hex'), '0x48656c6c6f')"#
+        );
+    }
+
+    #[test]
+    fn mysql_insert_keeps_backslash_escape_style() {
+        let sql = generate_insert_typed(
+            &[String::from("path")],
+            &[Some(String::from("varchar(255)"))],
+            &[vec![json!(r#"C:\tmp\file.txt"#)]],
+            "files",
+            "",
+            &DatabaseType::Mysql,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO `files` (`path`) VALUES
+('C:\\tmp\\file.txt')"#
         );
     }
 
@@ -3166,6 +4760,7 @@ mod tests {
         assert!(statements[0].contains("ON DUPLICATE KEY UPDATE"));
     }
 
+    #[cfg(feature = "duckdb-bundled")]
     #[tokio::test]
     async fn duckdb_transfer_columns_use_requested_schema() {
         let dir = std::env::temp_dir().join(format!("dbx-transfer-test-{}", uuid::Uuid::new_v4()));
@@ -3190,5 +4785,217 @@ mod tests {
         assert_eq!(database_from_pool_key("conn:analytics"), Some("analytics"));
         assert_eq!(database_from_pool_key("conn:analytics:session:editor-1"), Some("analytics"));
         assert_eq!(database_from_pool_key("conn"), None);
+    }
+
+    #[test]
+    fn map_column_type_preserves_longtext_for_mysql_target() {
+        assert_eq!(map_column_type("longtext", &DatabaseType::Mysql, &DatabaseType::Mysql), "longtext");
+    }
+
+    #[test]
+    fn map_column_type_preserves_mediumtext_for_mysql_target() {
+        assert_eq!(map_column_type("mediumtext", &DatabaseType::Mysql, &DatabaseType::Mysql), "mediumtext");
+    }
+
+    #[test]
+    fn map_column_type_preserves_longblob_for_mysql_target() {
+        assert_eq!(map_column_type("longblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "longblob");
+    }
+
+    #[test]
+    fn map_column_type_preserves_mediumblob_for_mysql_target() {
+        assert_eq!(map_column_type("mediumblob", &DatabaseType::Mysql, &DatabaseType::Mysql), "mediumblob");
+    }
+
+    #[test]
+    fn map_column_type_preserves_same_database_type() {
+        assert_eq!(map_column_type("int unsigned", &DatabaseType::Mysql, &DatabaseType::Mysql), "int unsigned");
+        assert_eq!(
+            map_column_type("int unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Mysql),
+            "int unsigned zerofill"
+        );
+        assert_eq!(map_column_type("bigint unsigned", &DatabaseType::Mysql, &DatabaseType::Mysql), "bigint unsigned");
+        assert_eq!(
+            map_column_type("bigint unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Mysql),
+            "bigint unsigned zerofill"
+        );
+    }
+
+    #[test]
+    fn map_column_type_preserves_numeric_type_from_mysql_to_postgres() {
+        assert_eq!(map_column_type("int unsigned", &DatabaseType::Mysql, &DatabaseType::Postgres), "INTEGER");
+        assert_eq!(map_column_type("int unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Postgres), "INTEGER");
+        assert_eq!(map_column_type("bigint unsigned", &DatabaseType::Mysql, &DatabaseType::Postgres), "BIGINT");
+        assert_eq!(
+            map_column_type("bigint unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Postgres),
+            "BIGINT"
+        );
+    }
+
+    #[test]
+    fn map_column_type_longtext_falls_back_to_text_for_non_mysql_target() {
+        assert_eq!(map_column_type("longtext", &DatabaseType::Mysql, &DatabaseType::Postgres), "TEXT");
+    }
+
+    #[test]
+    fn map_column_type_longblob_falls_back_for_non_mysql_target() {
+        assert_eq!(map_column_type("longblob", &DatabaseType::Mysql, &DatabaseType::Postgres), "BYTEA");
+    }
+
+    #[test]
+    fn parse_mysql_row_error_extracts_row_number() {
+        let err = "ERROR 22001 (1406): Data too long column 'content' at row 8";
+        assert_eq!(parse_mysql_row_error(err), Some(8));
+    }
+
+    #[test]
+    fn parse_mysql_row_error_returns_none_for_non_mysql_error() {
+        assert_eq!(parse_mysql_row_error("some other error"), None);
+    }
+
+    #[test]
+    fn mysql_create_table_preserves_auto_increment_primary_key() {
+        let cols = vec![
+            db::ColumnInfo {
+                is_primary_key: true,
+                is_nullable: false,
+                extra: Some("auto_increment".to_string()),
+                ..test_column("id", "INT")
+            },
+            db::ColumnInfo { is_nullable: false, ..test_column("name", "varchar(64)") },
+        ];
+
+        let ddl = generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+
+        assert!(ddl.contains("`id` INT NOT NULL AUTO_INCREMENT"), "ddl: {ddl}");
+        assert!(ddl.contains("PRIMARY KEY (`id`)"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn mysql_create_table_preserves_numeric_default_zero() {
+        let cols = vec![db::ColumnInfo {
+            is_nullable: false,
+            column_default: Some("0".to_string()),
+            ..test_column("status", "tinyint")
+        }];
+
+        let ddl = generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+
+        assert!(ddl.contains("DEFAULT 0"), "ddl: {ddl}");
+        assert!(!ddl.contains("'0'"), "ddl should not quote numeric default: {ddl}");
+    }
+
+    #[test]
+    fn mysql_create_table_quotes_string_default_with_escape() {
+        let cols =
+            vec![db::ColumnInfo { column_default: Some("o'clock".to_string()), ..test_column("label", "varchar(32)") }];
+
+        let ddl = generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+
+        assert!(ddl.contains("DEFAULT 'o''clock'"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn mysql_create_table_keeps_current_timestamp_default_and_on_update() {
+        let cols = vec![db::ColumnInfo {
+            is_nullable: false,
+            column_default: Some("CURRENT_TIMESTAMP".to_string()),
+            extra: Some("DEFAULT_GENERATED on update CURRENT_TIMESTAMP".to_string()),
+            ..test_column("updated_at", "timestamp")
+        }];
+
+        let ddl = generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+
+        assert!(ddl.contains("DEFAULT CURRENT_TIMESTAMP"), "ddl: {ddl}");
+        assert!(ddl.contains("ON UPDATE CURRENT_TIMESTAMP"), "ddl: {ddl}");
+        assert!(ddl.contains("NOT NULL"), "ddl: {ddl}");
+        assert!(!ddl.contains("DEFAULT_GENERATED"), "ddl should not leak DEFAULT_GENERATED: {ddl}");
+    }
+
+    #[test]
+    fn mysql_create_table_keeps_current_timestamp_with_fsp() {
+        let cols = vec![db::ColumnInfo {
+            is_nullable: false,
+            column_default: Some("CURRENT_TIMESTAMP(6)".to_string()),
+            ..test_column("created_at", "timestamp(6)")
+        }];
+
+        let ddl = generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+
+        assert!(ddl.contains("DEFAULT CURRENT_TIMESTAMP(6)"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn mysql_create_table_emits_on_update_without_default() {
+        let cols = vec![db::ColumnInfo {
+            is_nullable: false,
+            extra: Some("on update CURRENT_TIMESTAMP(3)".to_string()),
+            ..test_column("touched_at", "timestamp(3)")
+        }];
+
+        let ddl = generate_create_table_ddl(&cols, "items", "", "", &DatabaseType::Mysql, &DatabaseType::Mysql, None);
+
+        assert!(ddl.contains("ON UPDATE CURRENT_TIMESTAMP(3)"), "ddl: {ddl}");
+        assert!(!ddl.contains("DEFAULT"), "ddl should not emit DEFAULT when none was set: {ddl}");
+    }
+
+    #[test]
+    fn non_mysql_target_does_not_emit_auto_increment() {
+        let cols = vec![db::ColumnInfo {
+            is_primary_key: true,
+            is_nullable: false,
+            extra: Some("auto_increment".to_string()),
+            ..test_column("id", "int")
+        }];
+
+        let ddl = generate_create_table_ddl(&cols, "users", "", "", &DatabaseType::Sqlite, &DatabaseType::Mysql, None);
+
+        assert!(!ddl.contains("AUTO_INCREMENT"), "non-mysql target should not emit AUTO_INCREMENT: {ddl}");
+    }
+
+    #[test]
+    fn postgres_create_table_default_clause_unchanged() {
+        let cols = vec![db::ColumnInfo {
+            data_type: "integer".to_string(),
+            column_default: Some("nextval('public.t_id_seq'::regclass)".to_string()),
+            is_primary_key: true,
+            is_nullable: false,
+            ..test_column("id", "integer")
+        }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "t",
+            "public",
+            "public",
+            &DatabaseType::Postgres,
+            &DatabaseType::Postgres,
+            None,
+        );
+
+        assert!(ddl.contains("GENERATED BY DEFAULT AS IDENTITY"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_create_table_preserves_identity_from_column_extra() {
+        let cols = vec![db::ColumnInfo {
+            data_type: "integer".to_string(),
+            extra: Some("generated by default as identity".to_string()),
+            is_primary_key: true,
+            is_nullable: false,
+            ..test_column("id", "integer")
+        }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "t",
+            "public",
+            "public",
+            &DatabaseType::Postgres,
+            &DatabaseType::Postgres,
+            None,
+        );
+
+        assert!(ddl.contains("\"id\" integer generated by default as identity NOT NULL"), "ddl: {ddl}");
     }
 }

@@ -1,33 +1,16 @@
 import { shallowRef, onBeforeUnmount, type ShallowRef, createApp, watch } from "vue";
 import { EditorState, Compartment } from "@codemirror/state";
-import {
-  EditorView,
-  keymap,
-  drawSelection,
-  dropCursor,
-  highlightSpecialChars,
-  highlightActiveLine,
-} from "@codemirror/view";
-import { vscodeSelectionLayer } from "@/lib/codemirrorVscodeSelectionLayer";
+import { EditorView, keymap, drawSelection, dropCursor, highlightSpecialChars, highlightActiveLine } from "@codemirror/view";
 import { json } from "@codemirror/lang-json";
 import { search as cmSearch } from "@codemirror/search";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { bracketMatching } from "@codemirror/language";
-import {
-  EDITOR_FONT_FAMILY_CSS_VAR,
-  EDITOR_FONT_SIZE_CSS_VAR,
-  loadEditorTheme,
-  editorFontTheme,
-} from "@/lib/editorThemes";
+import { trimmedSelectionLayer } from "@/lib/codemirrorTrimmedSelectionLayer";
+import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveLineColor, loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
 import { shortcutToCodeMirrorKey } from "@/lib/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/cellDetailPresentation";
-import {
-  clampEditorFontSize,
-  createEditorZoomCommitScheduler,
-  fontSizeFromGestureScale,
-  fontSizeFromWheelDelta,
-} from "@/lib/editorZoom";
+import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editorZoom";
 import i18n from "@/i18n";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
@@ -103,7 +86,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     const editor = view.value;
     if (!editor) return;
     editor.dispatch({
-      effects: fontThemeComp.reconfigure(editorFontTheme(EditorView, size, family, { scrollable: false })),
+      effects: fontThemeComp.reconfigure(editorFontTheme(EditorView, size, family, { fixedHeight: true, scrollable: true })),
     });
   }
 
@@ -146,25 +129,19 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     zoomCommitScheduler.flush(liveFontSize);
   }
 
-  watch(
-    [() => options.fontSize(), () => options.fontFamily(), () => options.editorTheme(), () => options.appAppearance()],
-    async ([fontSize, fontFamily, editorTheme, appearance]) => {
-      const editor = view.value;
-      if (!editor || destroyed) return;
-      if (!isGestureZooming && !zoomCommitScheduler.hasPendingCommit()) {
-        liveFontSize = clampEditorFontSize(fontSize);
-      }
-      syncEditorFontCssVars(liveFontSize, fontFamily);
-      const theme = await loadEditorTheme(editorTheme, appearance);
-      if (!view.value || destroyed) return;
-      view.value.dispatch({
-        effects: [
-          themeComp.reconfigure(theme),
-          fontThemeComp.reconfigure(editorFontTheme(EditorView, liveFontSize, fontFamily, { scrollable: false })),
-        ],
-      });
-    },
-  );
+  watch([() => options.fontSize(), () => options.fontFamily(), () => options.editorTheme(), () => options.appAppearance()], async ([fontSize, fontFamily, editorTheme, appearance]) => {
+    const editor = view.value;
+    if (!editor || destroyed) return;
+    if (!isGestureZooming && !zoomCommitScheduler.hasPendingCommit()) {
+      liveFontSize = clampEditorFontSize(fontSize);
+    }
+    syncEditorFontCssVars(liveFontSize, fontFamily);
+    const theme = await loadEditorTheme(editorTheme, appearance);
+    if (!view.value || destroyed) return;
+    view.value.dispatch({
+      effects: [themeComp.reconfigure(theme), fontThemeComp.reconfigure(editorFontTheme(EditorView, liveFontSize, fontFamily, { fixedHeight: true, scrollable: true }))],
+    });
+  });
 
   async function create(parent: HTMLElement, initialValue: string, columnType?: string): Promise<void> {
     if (destroyed) return;
@@ -174,7 +151,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
 
     const theme = await loadEditorTheme(options.editorTheme(), options.appAppearance());
     liveFontSize = clampEditorFontSize(options.fontSize());
-    const fontTheme = editorFontTheme(EditorView, liveFontSize, options.fontFamily(), { scrollable: false });
+    const fontTheme = editorFontTheme(EditorView, liveFontSize, options.fontFamily(), { fixedHeight: true, scrollable: true });
     const shortcuts = settingsStore.editorSettings.shortcuts;
 
     const state = EditorState.create({
@@ -191,12 +168,12 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         highlightSpecialChars(),
         history(),
         drawSelection(),
-        vscodeSelectionLayer(),
+        trimmedSelectionLayer(),
         dropCursor(),
         highlightActiveLine(),
         EditorView.theme({
           ".cm-activeLine": {
-            backgroundColor: "color-mix(in oklch, var(--foreground) 4%, transparent)",
+            backgroundColor: cellDetailActiveLineColor(),
           },
         }),
         EditorState.allowMultipleSelections.of(true),

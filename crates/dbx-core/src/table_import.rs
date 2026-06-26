@@ -178,6 +178,7 @@ pub fn parse_csv_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImpor
 }
 
 pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     let items = match value {
         serde_json::Value::Array(items) => items,
@@ -600,6 +601,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_json_with_utf8_bom() {
+        let parsed = parse_json_bytes(b"\xEF\xBB\xBF[{\"id\":1,\"name\":\"Ada\"}]", 10).unwrap();
+
+        assert_eq!(parsed.columns, vec!["id", "name"]);
+        assert_eq!(parsed.total_rows, 1);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
+    }
+
+    #[test]
     fn builds_import_insert_batches_from_mapped_columns() {
         let mappings = vec![
             TableImportColumnMapping { source_column: "id".to_string(), target_column: "user_id".to_string() },
@@ -666,5 +676,35 @@ mod tests {
             sql: "INSERT INTO `policies` (`insurance_start_time`, `raw_text`) VALUES\n('2026-05-12 00:00:00', '2026-05-12T00:00:00+00:00')".to_string(),
             row_count: 1,
         }]);
+    }
+
+    #[test]
+    fn import_insert_batches_preserve_sqlserver_unicode_text() {
+        let mappings =
+            vec![TableImportColumnMapping { source_column: "name".to_string(), target_column: "name".to_string() }];
+        let data = ParsedImportFile {
+            columns: vec!["name".to_string()],
+            rows: vec![vec![serde_json::json!("Tiếng Việt")]],
+            total_rows: 1,
+        };
+
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("name".to_string(), "nvarchar(100)".to_string())],
+            "customers",
+            "dbo",
+            &DatabaseType::SqlServer,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches,
+            vec![ImportSqlBatch {
+                sql: "INSERT INTO [dbo].[customers] ([name]) VALUES\n(N'Tiếng Việt')".to_string(),
+                row_count: 1,
+            }]
+        );
     }
 }

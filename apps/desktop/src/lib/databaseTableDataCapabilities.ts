@@ -47,8 +47,11 @@ const DEFAULT_CAPABILITY: DatabaseCapability = {
 
 const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "mysql",
+  "manticoresearch",
   "postgres",
   "sqlite",
+  "rqlite",
+  "turso",
   "duckdb",
   "sqlserver",
   "oracle",
@@ -57,6 +60,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "redshift",
   "dameng",
   "gaussdb",
+  "kwdb",
   "kingbase",
   "highgo",
   "vastbase",
@@ -69,6 +73,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "firebird",
   "exasol",
   "opengauss",
+  "questdb",
   "oceanbase-oracle",
   "gbase",
   "access",
@@ -78,6 +83,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "informix",
   "bigquery",
   "sundb",
+  "databend",
 ]);
 
 const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<DatabaseCapability>>> = {
@@ -100,6 +106,16 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       transaction: false,
     },
   },
+  manticoresearch: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: false,
+    },
+  },
   neo4j: {
     syntheticKey: "neo4j-element-id",
   },
@@ -115,14 +131,22 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       transaction: false,
     },
   },
-  clickhouse: {
+  prestosql: {
     tableData: {
-      insert: false,
+      insert: true,
       updateRequiresPrimaryKey: true,
       deleteRequiresPrimaryKey: true,
       requiresTransactionalTableForExistingRows: false,
       transaction: false,
-      readonly: true,
+    },
+  },
+  clickhouse: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: true,
+      deleteRequiresPrimaryKey: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: false,
     },
   },
   tdengine: {
@@ -132,6 +156,18 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       deleteRequiresPrimaryKey: true,
       requiresTransactionalTableForExistingRows: false,
       transaction: false,
+    },
+  },
+  influxdb: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: true,
+      keylessRowPredicate: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: true,
+      transaction: false,
+      readonly: true,
     },
   },
 };
