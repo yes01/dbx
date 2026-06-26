@@ -1,10 +1,6 @@
 import type { CellValue } from "@/lib/cellValue";
 import type { RowStatus } from "@/lib/gridRowStatus";
-import {
-  DATA_GRID_DARK_SEARCH_COLORS,
-  resolveDataGridPaintTheme,
-  type DataGridPaintTheme,
-} from "@/lib/dataGridPaintTheme";
+import { DATA_GRID_DARK_SEARCH_COLORS, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGridPaintTheme";
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
 
@@ -28,12 +24,8 @@ export interface CanvasEditingCell {
   col: number;
 }
 
-export interface CanvasSingleSelectedCell {
-  rowIndex: number;
-  visibleColIdx: number;
-}
-
 export interface CanvasSearchMatch {
+  kind: "cell" | "column";
   displayRow: number;
   col: number;
 }
@@ -43,6 +35,7 @@ export interface DrawCanvasDataGridOptions {
   scroller: HTMLElement;
   width: number;
   height: number;
+  pixelRatio?: number;
   isDark: boolean;
   styleKey?: string;
   rowCount: number;
@@ -54,15 +47,16 @@ export interface DrawCanvasDataGridOptions {
   hoverCell: CanvasHoverCell | null;
   isScrolling: boolean;
   editingCell: CanvasEditingCell | null;
-  singleSelectedCell: CanvasSingleSelectedCell | null;
   searchMatchKeys: ReadonlySet<string>;
   currentSearchMatch: CanvasSearchMatch | null;
   formatCell: (value: CellValue, columnIndex: number) => string;
   isRowActive: (rowIndex: number) => boolean;
-  isRowSelected: (rowId: number) => boolean;
   rowCellsUseSelectionVisual: (rowId: number) => boolean;
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
   cellCanHover: (row: CanvasDataGridRow, actualColIdx: number) => boolean;
+  infiniteScrollEnabled: boolean;
+  pageSize: number;
+  currentPage: number;
 }
 
 type NumericCanvasContext = CanvasRenderingContext2D & {
@@ -89,30 +83,43 @@ function setCanvasNumericVariant(ctx: CanvasRenderingContext2D, value: "normal" 
 }
 
 function canvasTabularFontFamily(fontFamily: string): string {
-  return `"Geist Variable Tabular", ${fontFamily}`;
+  return fontFamily.replace(/"Geist Variable"/g, '"Geist Variable Tabular"');
+}
+
+const FIT_CANVAS_TEXT_CACHE_MAX = 10000;
+const fitCanvasTextCache = new Map<string, string>();
+
+export function clearFitCanvasTextCache(): void {
+  fitCanvasTextCache.clear();
 }
 
 function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
-  if (maxWidth <= 0 || ctx.measureText(text).width <= maxWidth) return text;
+  if (maxWidth <= 0) return "";
+  const font = ctx.font;
+  const cacheKey = `${font}|${text}|${maxWidth}`;
+  const cached = fitCanvasTextCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  if (ctx.measureText(text).width <= maxWidth) {
+    if (fitCanvasTextCache.size >= FIT_CANVAS_TEXT_CACHE_MAX) fitCanvasTextCache.clear();
+    fitCanvasTextCache.set(cacheKey, text);
+    return text;
+  }
   const ellipsis = "...";
-  if (ctx.measureText(ellipsis).width > maxWidth) return "";
+  const ellipsisWidth = ctx.measureText(ellipsis).width;
   let low = 0;
   let high = text.length;
   while (low < high) {
     const mid = Math.ceil((low + high) / 2);
-    if (ctx.measureText(`${text.slice(0, mid)}${ellipsis}`).width <= maxWidth) low = mid;
+    if (ctx.measureText(text.slice(0, mid)).width + ellipsisWidth <= maxWidth) low = mid;
     else high = mid - 1;
   }
-  return `${text.slice(0, low)}${ellipsis}`;
+  const result = text.slice(0, low) + ellipsis;
+  if (fitCanvasTextCache.size >= FIT_CANVAS_TEXT_CACHE_MAX) fitCanvasTextCache.clear();
+  fitCanvasTextCache.set(cacheKey, result);
+  return result;
 }
 
-function canvasFont(style: {
-  family: string;
-  sizePx: number;
-  style?: string;
-  weight?: string | number;
-  lineHeight?: string;
-}): string {
+function canvasFont(style: { family: string; sizePx: number; style?: string; weight?: string | number; lineHeight?: string }): string {
   const fontStyle = style.style && style.style !== "normal" ? `${style.style} ` : "";
   const fontWeight = style.weight && style.weight !== "400" && style.weight !== "normal" ? `${style.weight} ` : "";
   const lineHeight = style.lineHeight && style.lineHeight !== "normal" ? `/${style.lineHeight}` : "";
@@ -139,15 +146,22 @@ function firstVisibleColumn(offsets: number[], contentStart: number): number {
   return low;
 }
 
+function alignCanvasPixel(value: number, dpr: number): number {
+  return Math.round(value * dpr) / dpr;
+}
+
+function crispCanvasLine(value: number, dpr: number): number {
+  return alignCanvasPixel(value, dpr) + 0.5 / dpr;
+}
+
 function resolveCanvasRenderState(canvas: HTMLCanvasElement, isDark: boolean, styleKey?: string): CanvasRenderState {
-  const cacheKey = `${styleKey ?? "default"}:${isDark ? "dark" : "light"}`;
+  const canvasStyle = getComputedStyle(canvas);
+  const cacheKey = `${styleKey ?? "default"}:${isDark ? "dark" : "light"}:${canvasStyle.fontFamily}:${canvasStyle.fontSize}`;
   const cached = canvasRenderStateCache.get(canvas);
   if (cached?.cacheKey === cacheKey) return cached;
 
-  const canvasStyle = getComputedStyle(canvas);
-  const fontFamily =
-    canvasStyle.fontFamily || `"Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
-  const fontSize = Number.parseFloat(canvasStyle.fontSize) || 12;
+  const fontFamily = canvasStyle.fontFamily || `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
+  const fontSize = Number.parseFloat(canvasStyle.fontSize) || 13;
   const lineHeight = canvasStyle.lineHeight;
   const normalFont = canvasFont({
     family: fontFamily,
@@ -205,19 +219,20 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     hoverCell,
     isScrolling,
     editingCell,
-    singleSelectedCell,
     searchMatchKeys,
     currentSearchMatch,
     formatCell,
     isRowActive,
-    isRowSelected,
     rowCellsUseSelectionVisual,
     cellIsSelected,
     cellCanHover,
+    infiniteScrollEnabled,
+    pageSize,
+    currentPage,
   } = options;
-  const dpr = window.devicePixelRatio || 1;
-  const pixelWidth = Math.floor(width * dpr);
-  const pixelHeight = Math.floor(height * dpr);
+  const dpr = Math.max(1, options.pixelRatio ?? window.devicePixelRatio ?? 1);
+  const pixelWidth = Math.max(1, Math.ceil(width * dpr));
+  const pixelHeight = Math.max(1, Math.ceil(height * dpr));
   if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
     canvas.width = pixelWidth;
     canvas.height = pixelHeight;
@@ -230,18 +245,10 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width, height);
 
-  const {
-    normalFont,
-    tabularFont,
-    semiboldFont,
-    italicFont,
-    theme,
-    searchFill,
-    currentSearchFill,
-    currentSearchBorder,
-  } = resolveCanvasRenderState(canvas, isDark, styleKey);
+  const { normalFont, tabularFont, semiboldFont, italicFont, theme, searchFill, currentSearchFill, currentSearchBorder } = resolveCanvasRenderState(canvas, isDark, styleKey);
 
   const scrollTop = scroller.scrollTop;
   const scrollLeft = scroller.scrollLeft;
@@ -258,68 +265,48 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
   const firstCol = firstVisibleColumn(offsets, contentStart);
   const columnOffset = offsets[firstCol] ?? 0;
   const paintSearchMatches = !isScrolling && searchMatchKeys.size > 0;
+  const rowNumberBorderX = crispCanvasLine(rowNumberWidth - 1, dpr);
+  const rowNumberTextX = alignCanvasPixel(Math.max(0, rowNumberWidth - 1) / 2, dpr);
+  const rowTextOffsetY = alignCanvasPixel(CANVAS_DATA_GRID_ROW_HEIGHT / 2, dpr);
 
   for (let rowIndex = firstRow; rowIndex <= lastRow; rowIndex++) {
     const item = rowAt(rowIndex);
     if (!item) continue;
     const y = rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - scrollTop;
     const rowIsActive = isRowActive(item.displayIndex);
-    const rowBase = item.isDeleted
-      ? theme.rowDeleted
-      : item.isNew && !rowIsActive
-        ? theme.rowNew
-        : item.displayIndex % 2 === 1 && !rowIsActive
-          ? theme.rowMuted
-          : theme.background;
+
+    const rowBase = item.isDeleted ? theme.rowDeleted : item.isNew && !rowIsActive ? theme.rowNew : item.displayIndex % 2 === 1 && !rowIsActive ? theme.rowMuted : theme.background;
+    const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
     ctx.globalAlpha = item.isDeleted ? 0.7 : 1;
-    ctx.fillStyle = rowBase;
+    ctx.fillStyle = rowIsActive && !item.isDeleted ? theme.cellSelectedSingle : rowBase;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
-    let rowNumberFill =
-      item.status === "new"
-        ? theme.rowNumberNew
-        : item.status === "edited"
-          ? theme.rowNumberEdited
-          : item.status === "deleted"
-            ? theme.rowNumberDeleted
-            : theme.rowNumberDefault;
-    if (rowIsActive && !item.isDeleted) rowNumberFill = theme.rowNumberActive;
-    if (isRowSelected(item.id) && item.status === "clean") rowNumberFill = theme.rowNumberSelected;
+    const rowNumberFill = item.status === "new" ? theme.rowNumberNew : item.status === "edited" ? theme.rowNumberEdited : item.status === "deleted" ? theme.rowNumberDeleted : theme.rowNumberDefault;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-    if (
-      hoverCell?.rowIndex === item.displayIndex &&
-      hoverCell.visibleColIdx < 0 &&
-      !isScrolling &&
-      item.status === "clean" &&
-      !rowIsActive &&
-      !isRowSelected(item.id)
-    ) {
-      ctx.fillStyle = theme.cellHover;
-      ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-    }
     ctx.strokeStyle = theme.border;
     ctx.beginPath();
-    ctx.moveTo(rowNumberWidth + 0.5, y);
-    ctx.lineTo(rowNumberWidth + 0.5, y + CANVAS_DATA_GRID_ROW_HEIGHT);
+    ctx.moveTo(rowNumberBorderX, y);
+    ctx.lineTo(rowNumberBorderX, y + CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.stroke();
 
-    const rowNumberText =
-      item.status === "new"
-        ? theme.rowNumberTextNew
-        : item.status === "edited"
-          ? theme.rowNumberTextEdited
-          : item.status === "deleted"
-            ? theme.rowNumberTextDeleted
-            : isRowSelected(item.id)
-              ? theme.primary
-              : theme.rowNumberTextClean;
+    const rowNumberText = item.status === "new" ? theme.rowNumberTextNew : item.status === "edited" ? theme.rowNumberTextEdited : item.status === "deleted" ? theme.rowNumberTextDeleted : theme.rowNumberTextClean;
     ctx.fillStyle = rowNumberText;
-    ctx.font = item.status === "new" || item.status === "edited" || isRowSelected(item.id) ? semiboldFont : normalFont;
+    ctx.font = item.status === "new" || item.status === "edited" ? semiboldFont : normalFont;
     ctx.textAlign = "center";
-    ctx.fillText(String(item.displayIndex + 1), rowNumberWidth / 2, y + CANVAS_DATA_GRID_ROW_HEIGHT / 2);
+    const textY = alignCanvasPixel(y + rowTextOffsetY, dpr);
+    if (infiniteScrollEnabled) {
+      ctx.fillText(String(item.displayIndex + 1), rowNumberTextX, textY);
+    } else {
+      ctx.fillText(String(item.displayIndex + 1 + pageSize * (currentPage - 1)), rowNumberTextX, textY);
+    }
     ctx.font = normalFont;
 
+    ctx.strokeStyle = theme.border;
+    ctx.beginPath();
+    ctx.moveTo(0, rowBorderY);
+    ctx.lineTo(width, rowBorderY);
+    ctx.stroke();
     let x = rowNumberWidth + columnOffset - scrollLeft;
     for (let visibleColIdx = firstCol; visibleColIdx < renderedColumnWidths.length && x < width; visibleColIdx++) {
       const colWidth = renderedColumnWidths[visibleColIdx] ?? 0;
@@ -331,41 +318,28 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       if (x + colWidth >= rowNumberWidth) {
         const selectedCell = cellIsSelected(item.displayIndex, visibleColIdx);
         const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
-        const isSingleSelectedCell =
-          singleSelectedCell?.rowIndex === item.displayIndex && singleSelectedCell.visibleColIdx === visibleColIdx;
         const isDirtyCell = item.isDirtyCol[actualColIdx];
-        const selectedFillVisual =
-          rowSelectionVisual || (selectedCell && !isSingleSelectedCell && (!rowIsActive || isDirtyCell));
+        const selectedFillVisual = rowSelectionVisual || selectedCell;
         const selectedBorderVisual = rowSelectionVisual || selectedCell;
-        const isSearchMatch = paintSearchMatches && searchMatchKeys.has(`${item.displayIndex}:${actualColIdx}`);
-        const isCurrentSearchMatch =
-          paintSearchMatches &&
-          currentSearchMatch?.displayRow === item.displayIndex &&
-          currentSearchMatch.col === actualColIdx;
+        const isSearchMatch = paintSearchMatches && searchMatchKeys.has(`cell:${item.displayIndex}:${actualColIdx}`);
+        const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
         const clippedX = Math.max(x, rowNumberWidth);
         const cellPaintWidth = colWidth - Math.max(0, clippedX - x);
 
-        if (isDirtyCell) {
+        if (isDirtyCell && !selectedFillVisual) {
           ctx.fillStyle = theme.cellDirty;
           ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
         }
-        if (
-          hoverCell?.rowIndex === item.displayIndex &&
-          hoverCell.visibleColIdx === visibleColIdx &&
-          !isScrolling &&
-          !isSearchMatch &&
-          !isCurrentSearchMatch &&
-          cellCanHover(item, actualColIdx)
-        ) {
+        if (hoverCell?.rowIndex === item.displayIndex && hoverCell.visibleColIdx === visibleColIdx && !isScrolling && !isSearchMatch && !isCurrentSearchMatch && !isDirtyCell && cellCanHover(item, actualColIdx)) {
           ctx.fillStyle = theme.cellHover;
           ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
         }
-        if (selectedFillVisual) {
-          ctx.fillStyle = isDirtyCell ? theme.cellSelectedDirty : theme.cellSelected;
+        if ((rowIsActive || selectedCell) && !item.isDeleted && !isDirtyCell) {
+          ctx.fillStyle = theme.cellSelectedSingle;
           ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
         }
-        if (rowIsActive && !item.isDeleted && !isDirtyCell) {
-          ctx.fillStyle = theme.cellActive;
+        if (selectedFillVisual && isDirtyCell) {
+          ctx.fillStyle = theme.cellSelectedDirty;
           ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
         }
         if (isSearchMatch) {
@@ -377,6 +351,12 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
           ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
         }
 
+        ctx.strokeStyle = theme.border;
+        ctx.beginPath();
+        ctx.moveTo(clippedX, rowBorderY);
+        ctx.lineTo(Math.min(width, clippedX + cellPaintWidth), rowBorderY);
+        ctx.stroke();
+
         ctx.save();
         ctx.beginPath();
         ctx.rect(clippedX, y, Math.min(cellPaintWidth, width - clippedX), CANVAS_DATA_GRID_ROW_HEIGHT);
@@ -384,20 +364,22 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         const value = item.data[actualColIdx];
         ctx.textAlign = "left";
         ctx.fillStyle = value === null ? theme.mutedForeground : theme.foreground;
-        ctx.font = value === null ? italicFont : typeof value === "number" ? tabularFont : normalFont;
-        setCanvasNumericVariant(ctx, typeof value === "number" ? "tabular-nums" : "normal");
-        const textLeft = x + 12;
-        const textMaxWidth = Math.max(0, x + colWidth - textLeft - 12);
+        ctx.font = value === null ? italicFont : tabularFont;
+        setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
+        const textLeft = alignCanvasPixel(x + 12, dpr);
+        const paddedMaxWidth = Math.max(0, x + colWidth - textLeft - 12);
         const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
         const displayText = isEditingThisCell ? "" : formatCell(value, actualColIdx);
-        const text = isEditingThisCell || isScrolling ? displayText : fitCanvasText(ctx, displayText, textMaxWidth);
-        ctx.fillText(text, textLeft, y + CANVAS_DATA_GRID_ROW_HEIGHT / 2);
+        const needsTruncation = ctx.measureText(displayText).width > paddedMaxWidth;
+        const textMaxWidth = needsTruncation ? Math.max(0, x + colWidth - textLeft) : paddedMaxWidth;
+        const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, textMaxWidth - 12);
+        ctx.fillText(text, textLeft, textY);
         if (item.isDeleted && text) {
           const textWidth = Math.min(ctx.measureText(text).width, textMaxWidth);
           ctx.strokeStyle = theme.foreground;
           ctx.beginPath();
-          ctx.moveTo(textLeft, y + CANVAS_DATA_GRID_ROW_HEIGHT / 2);
-          ctx.lineTo(textLeft + textWidth, y + CANVAS_DATA_GRID_ROW_HEIGHT / 2);
+          ctx.moveTo(textLeft, textY);
+          ctx.lineTo(alignCanvasPixel(textLeft + textWidth, dpr), textY);
           ctx.stroke();
         }
         ctx.restore();
@@ -406,25 +388,28 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
 
         ctx.strokeStyle = theme.border;
         ctx.beginPath();
-        ctx.moveTo(x + colWidth - 0.5, y);
-        ctx.lineTo(x + colWidth - 0.5, y + CANVAS_DATA_GRID_ROW_HEIGHT);
+        const columnBorderX = crispCanvasLine(x + colWidth - 1, dpr);
+        ctx.moveTo(columnBorderX, y);
+        ctx.lineTo(columnBorderX, y + CANVAS_DATA_GRID_ROW_HEIGHT);
         ctx.stroke();
 
         if (selectedBorderVisual && cellPaintWidth >= 2) {
           const selectedLeftX = clippedX + 0.5;
           const selectedRightX = clippedX + cellPaintWidth - 1.5;
-          const selectedTopY = y + 0.5;
-          const selectedBottomY = y + CANVAS_DATA_GRID_ROW_HEIGHT - 1.5;
-          ctx.strokeStyle = theme.cellSelectedBorder;
+          const selectedTopY = Math.max(y + 0.5, 1);
+          const drawSelectedLeftBorder = selectedLeftX >= rowNumberWidth + 0.5;
+          ctx.strokeStyle = selectedCell && !isDirtyCell ? theme.cellSelectedSingleBorder : theme.cellSelectedBorder;
           ctx.beginPath();
           ctx.moveTo(selectedLeftX, selectedTopY);
           ctx.lineTo(selectedRightX, selectedTopY);
-          ctx.moveTo(selectedLeftX, selectedBottomY);
-          ctx.lineTo(selectedRightX, selectedBottomY);
-          ctx.moveTo(selectedLeftX, selectedTopY);
-          ctx.lineTo(selectedLeftX, selectedBottomY);
+          ctx.moveTo(selectedLeftX, rowBorderY);
+          ctx.lineTo(selectedRightX, rowBorderY);
+          if (drawSelectedLeftBorder) {
+            ctx.moveTo(selectedLeftX, selectedTopY);
+            ctx.lineTo(selectedLeftX, rowBorderY);
+          }
           ctx.moveTo(selectedRightX, selectedTopY);
-          ctx.lineTo(selectedRightX, selectedBottomY);
+          ctx.lineTo(selectedRightX, rowBorderY);
           ctx.stroke();
         }
 
@@ -436,13 +421,6 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         }
       }
       x += colWidth;
-    }
-    if (!isRowSelected(item.id)) {
-      ctx.strokeStyle = theme.border;
-      ctx.beginPath();
-      ctx.moveTo(0, y + CANVAS_DATA_GRID_ROW_HEIGHT - 0.5);
-      ctx.lineTo(width, y + CANVAS_DATA_GRID_ROW_HEIGHT - 0.5);
-      ctx.stroke();
     }
     ctx.globalAlpha = 1;
   }

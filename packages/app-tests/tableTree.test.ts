@@ -1,10 +1,6 @@
-import test from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
-import {
-  buildGroupedObjectTreeNodes,
-  buildTableTreeNodes,
-  mergeTableInfosIntoObjects,
-} from "../../apps/desktop/src/lib/tableTree.ts";
+import { buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects, mergeTableTreePageChildren } from "../../apps/desktop/src/lib/tableTree.ts";
 import type { ObjectInfo, TableInfo, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function table(name: string, parent?: string): TableInfo {
@@ -76,6 +72,36 @@ test("buildTableTreeNodes keeps partitions visible when their parent is not load
   assert.deepEqual(
     nodes.map((node) => node.label),
     ["events_2026"],
+  );
+});
+
+test("mergeTableTreePageChildren attaches later page partitions to loaded parents", () => {
+  const firstPage = buildTableTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    tables: [table("events"), table("events_region_0", "events")],
+  });
+  const secondPage = buildTableTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    tables: [table("events_region_0_2026_01", "events_region_0")],
+  });
+
+  const merged = mergeTableTreePageChildren(firstPage, secondPage, "conn", "app");
+  assert.deepEqual(
+    merged.map((node) => node.label),
+    ["events"],
+  );
+
+  const regionPartition = partitionGroup(merged[0])?.children?.[0];
+  assert.equal(regionPartition?.label, "events_region_0");
+  assert.deepEqual(
+    partitionGroup(regionPartition!)?.children?.map((node) => node.label),
+    ["events_region_0_2026_01"],
   );
 });
 
@@ -165,6 +191,58 @@ test("buildGroupedObjectTreeNodes groups Oracle packages and package bodies", ()
     [
       { label: "PAYROLL", type: "package", id: "conn:app:HR:__packages:HR:PAYROLL:PACKAGE" },
       { label: "PAYROLL", type: "package-body", id: "conn:app:HR:__packages:HR:PAYROLL:PACKAGE_BODY" },
+    ],
+  );
+});
+
+test("buildObjectGroupPlaceholderNodes creates capability-driven lazy sidebar groups", () => {
+  const groups = buildObjectGroupPlaceholderNodes({
+    nodeId: "conn:app:HR",
+    connectionId: "conn",
+    database: "app",
+    schema: "HR",
+    objectTypes: ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"],
+  });
+
+  assert.deepEqual(
+    groups.map((node) => ({ label: node.label, type: node.type, count: node.objectCount, children: node.children })),
+    [
+      { label: "tree.tables", type: "group-tables", count: undefined, children: [] },
+      { label: "tree.views", type: "group-views", count: undefined, children: [] },
+      { label: "tree.procedures", type: "group-procedures", count: undefined, children: [] },
+      { label: "tree.functions", type: "group-functions", count: undefined, children: [] },
+      { label: "tree.sequences", type: "group-sequences", count: undefined, children: [] },
+    ],
+  );
+});
+
+test("buildSimpleObjectTreeNodes keeps routines, sequences, and packages visible in flat sidebar mode", () => {
+  const nodes = buildSimpleObjectTreeNodes({
+    nodeId: "conn:app:HR",
+    connectionId: "conn",
+    database: "app",
+    schema: "HR",
+    objects: [
+      { name: "ORDERS", object_type: "TABLE", schema: "HR" },
+      { name: "ACTIVE_ORDERS", object_type: "VIEW", schema: "HR" },
+      { name: "REFRESH_STATS", object_type: "PROCEDURE", schema: "HR" },
+      { name: "TOTAL_DUE", object_type: "FUNCTION", schema: "HR" },
+      { name: "ORDER_ID_SEQ", object_type: "SEQUENCE", schema: "HR" },
+      { name: "PAYROLL", object_type: "PACKAGE", schema: "HR" },
+      { name: "PAYROLL", object_type: "PACKAGE_BODY", schema: "HR" },
+    ],
+  });
+
+  assert.deepEqual(
+    nodes.map((node) => ({ label: node.label, type: node.type })),
+    [
+      { label: "ORDERS", type: "table" },
+      { label: "ACTIVE_ORDERS", type: "view" },
+      { label: "ORDER_ID_SEQ", type: "sequence" },
+      { label: "PAYROLL", type: "package" },
+      { label: "PAYROLL", type: "package-body" },
+      { label: "REFRESH_STATS", type: "procedure" },
+      { label: "TOTAL_DUE", type: "function" },
     ],
   );
 });

@@ -2,74 +2,65 @@
 import { useI18n } from "vue-i18n";
 import { FilePlus2, Plus, History, Download, Database, Search, ShieldCheck, Sparkles } from "@lucide/vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import {
-  connectionDriverLabel,
-  connectionIconType,
-  connectionRedactedNameLabel,
-  connectionRedactedOptionSubtitle,
-} from "@/lib/connectionPresentation";
+import { connectionDriverLabel, connectionIconType, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "@/lib/connectionPresentation";
 import type { ConnectionConfig } from "@/types/database";
+
+export interface WelcomeSavedSqlHistoryItem {
+  id: string;
+  name: string;
+  connectionName: string;
+  database?: string;
+  folderName?: string;
+  openCount?: number;
+}
 
 defineProps<{
   connectionStats: { total: number; connected: number; types: number };
   recentConnections: ConnectionConfig[];
+  savedSqlHistoryItems: WelcomeSavedSqlHistoryItem[];
   appVersion: string;
   hasConnections: boolean;
 }>();
 
 const emit = defineEmits<{
   "open-connection-query": [connectionId: string];
+  "open-saved-sql": [fileId: string];
   "new-connection": [];
   "new-query": [];
   "show-history": [];
   "import-config": [];
+  "open-github": [];
+  "open-mcp-guide": [];
 }>();
 
 const { t } = useI18n();
 </script>
 
 <template>
-  <div class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-[var(--surface-raised)]">
+  <div class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-background">
     <div class="mx-auto flex min-h-full w-full min-w-0 max-w-5xl flex-col justify-center gap-6 px-8 py-10">
       <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <div
-          class="rounded-md border border-border/70 bg-[var(--surface-panel)] px-4 py-3 shadow-[var(--shadow-panel)]"
-        >
-          <div class="flex items-center gap-2 text-xs text-muted-foreground">
-            <Database class="h-3.5 w-3.5 text-[var(--status-info)]" /> {{ t("welcome.connections") }}
-          </div>
+        <div class="rounded-lg border bg-muted/20 px-4 py-3">
+          <div class="flex items-center gap-2 text-xs text-muted-foreground"><Database class="h-3.5 w-3.5" /> {{ t("welcome.connections") }}</div>
           <div class="mt-2 text-2xl font-semibold">{{ connectionStats.total }}</div>
         </div>
-        <div
-          class="rounded-md border border-border/70 bg-[var(--surface-panel)] px-4 py-3 shadow-[var(--shadow-panel)]"
-        >
-          <div class="flex items-center gap-2 text-xs text-muted-foreground">
-            <ShieldCheck class="h-3.5 w-3.5 text-[var(--status-success)]" /> {{ t("welcome.connected") }}
-          </div>
+        <div class="rounded-lg border bg-muted/20 px-4 py-3">
+          <div class="flex items-center gap-2 text-xs text-muted-foreground"><ShieldCheck class="h-3.5 w-3.5" /> {{ t("welcome.connected") }}</div>
           <div class="mt-2 text-2xl font-semibold">{{ connectionStats.connected }}</div>
         </div>
-        <div
-          class="rounded-md border border-border/70 bg-[var(--surface-panel)] px-4 py-3 shadow-[var(--shadow-panel)]"
-        >
-          <div class="flex items-center gap-2 text-xs text-muted-foreground">
-            <Sparkles class="h-3.5 w-3.5 text-[var(--status-warning)]" /> {{ t("welcome.databaseTypes") }}
-          </div>
+        <div class="rounded-lg border bg-muted/20 px-4 py-3">
+          <div class="flex items-center gap-2 text-xs text-muted-foreground"><Sparkles class="h-3.5 w-3.5" /> {{ t("welcome.databaseTypes") }}</div>
           <div class="mt-2 text-2xl font-semibold">{{ connectionStats.types }}</div>
         </div>
       </div>
 
       <div class="grid grid-cols-1 gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-        <div class="rounded-md border border-border/70 bg-background shadow-[var(--shadow-panel)]">
-          <div class="flex items-center justify-between border-b border-border/70 bg-[var(--surface-panel)] px-4 py-3">
+        <div class="rounded-lg border">
+          <div class="flex items-center justify-between border-b px-4 py-3">
             <div class="text-sm font-medium">{{ t("welcome.quickConnections") }}</div>
           </div>
           <div class="divide-y">
-            <button
-              v-for="connection in recentConnections"
-              :key="connection.id"
-              class="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-accent"
-              @click="emit('open-connection-query', connection.id)"
-            >
+            <button v-for="connection in recentConnections" :key="connection.id" class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40" @click="emit('open-connection-query', connection.id)">
               <DatabaseIcon :db-type="connectionIconType(connection)" class="h-4 w-4" />
               <span class="h-5 w-1 rounded-full shrink-0" :style="{ backgroundColor: connection.color || '#9ca3af' }" />
               <div class="min-w-0 flex-1">
@@ -86,41 +77,59 @@ const { t } = useI18n();
           </div>
         </div>
 
-        <div class="rounded-md border border-border/70 bg-background shadow-[var(--shadow-panel)]">
-          <div class="border-b border-border/70 bg-[var(--surface-panel)] px-4 py-3">
+        <div class="rounded-lg border">
+          <div class="border-b px-4 py-3">
             <div class="text-sm font-medium">{{ t("welcome.shortcuts") }}</div>
           </div>
           <div class="grid gap-1 p-2">
-            <button
-              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
-              @click="emit('new-connection')"
-            >
-              <Plus class="h-4 w-4" /> {{ t("toolbar.newConnection") }}
-            </button>
-            <button
-              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="!hasConnections"
-              @click="emit('new-query')"
-            >
-              <FilePlus2 class="h-4 w-4" /> {{ t("toolbar.newQuery") }}
-            </button>
-            <button
-              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
-              @click="emit('show-history')"
-            >
-              <History class="h-4 w-4" /> {{ t("history.title") }}
-            </button>
-            <button
-              class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
-              @click="emit('import-config')"
-            >
-              <Download class="h-4 w-4" /> {{ t("sidebar.import") }}
-            </button>
-            <div
-              class="mt-2 rounded-md border border-border/60 bg-[var(--surface-panel)] px-3 py-2 text-xs leading-5 text-muted-foreground"
-            >
-              <Search class="mr-1 inline h-3.5 w-3.5 text-[var(--status-info)]" />
+            <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('new-connection')"><Plus class="h-4 w-4" /> {{ t("toolbar.newConnection") }}</button>
+            <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" :disabled="!hasConnections" @click="emit('new-query')"><FilePlus2 class="h-4 w-4" /> {{ t("toolbar.newQuery") }}</button>
+            <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('show-history')"><History class="h-4 w-4" /> {{ t("history.title") }}</button>
+            <button class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('import-config')"><Download class="h-4 w-4" /> {{ t("sidebar.import") }}</button>
+            <div class="mt-2 rounded-md bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
+              <Search class="mr-1 inline h-3.5 w-3.5" />
               {{ t("welcome.tip") }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="rounded-lg border">
+        <div class="flex items-center justify-between border-b px-4 py-3">
+          <div class="flex items-center gap-2 text-sm font-medium"><History class="h-4 w-4" /> {{ t("welcome.sqlHistory") }}</div>
+        </div>
+        <div class="divide-y">
+          <button v-for="item in savedSqlHistoryItems" :key="item.id" class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40" @click="emit('open-saved-sql', item.id)">
+            <History class="h-4 w-4 text-muted-foreground" />
+            <div class="min-w-0 flex-1">
+              <div class="truncate text-sm font-medium">{{ item.name }}</div>
+              <div class="truncate text-xs text-muted-foreground">
+                <span>{{ item.connectionName }}</span>
+                <span v-if="item.database"> · {{ item.database }}</span>
+                <span v-if="item.folderName"> · {{ item.folderName }}</span>
+                <span v-if="item.openCount"> · {{ t("welcome.sqlHistoryOpenCount", { count: item.openCount }) }}</span>
+              </div>
+            </div>
+            <FilePlus2 class="h-4 w-4 text-muted-foreground" />
+          </button>
+          <div v-if="savedSqlHistoryItems.length === 0" class="px-4 py-8 text-sm text-muted-foreground">
+            {{ t("welcome.sqlHistoryEmpty") }}
+          </div>
+        </div>
+      </div>
+
+      <!-- MCP Integration Hint -->
+      <div class="rounded-lg border bg-muted/10 px-5 py-4">
+        <div class="flex items-start gap-3">
+          <Sparkles class="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+          <div class="min-w-0">
+            <div class="text-sm font-medium">{{ t("welcome.mcpTitle") }}</div>
+            <p class="mt-1 text-xs leading-5 text-muted-foreground">
+              {{ t("welcome.mcpDescription") }}
+            </p>
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <code class="max-w-full break-all rounded bg-muted px-2 py-0.5 text-[11px] select-all">npx @dbx-app/mcp-server</code>
+              <a href="#" class="text-xs text-primary hover:underline" @click.prevent="emit('open-mcp-guide')">{{ t("welcome.mcpLearnMore") }}</a>
             </div>
           </div>
         </div>
@@ -128,7 +137,9 @@ const { t } = useI18n();
 
       <!-- Project Info -->
       <div class="mt-2 flex items-center justify-center gap-3 text-[11px] text-muted-foreground/60">
-        <span>TestTeam DBX {{ appVersion ? "v" + appVersion : "" }}</span>
+        <span>DBX {{ appVersion ? "v" + appVersion : "" }}</span>
+        <span>·</span>
+        <a href="#" class="hover:text-foreground transition-colors" @click.prevent="emit('open-github')">GitHub</a>
       </div>
     </div>
   </div>

@@ -3,7 +3,7 @@ use dbx_core::agent_manager::{
     JreInfo, DEFAULT_JRE_KEY,
 };
 use dbx_core::agent_service::{
-    asset_url_to_r2_path, build_agent_list, import_agent_jar, import_agents_from_zip, is_app_version_compatible,
+    build_agent_list, github_url_to_r2_path, import_agent_jar, import_agents_from_zip, is_app_version_compatible,
     jre_needs_install, local_agent_jar_candidates, replace_download, uninstall_agent_driver, AgentProgressEvent,
 };
 
@@ -21,7 +21,8 @@ fn registry_with_driver(db_type: &str, version: &str, jre: &str) -> AgentRegistr
             label: db_type.to_string(),
             min_app_version: "0.1.0".to_string(),
             jre: jre.to_string(),
-            jar: ArtifactInfo { url: format!("https://example.com/dbx-agent-{db_type}.jar"), size: 42 },
+            jar: Some(ArtifactInfo { url: format!("https://example.com/dbx-agent-{db_type}.jar"), size: 42 }),
+            native: std::collections::HashMap::new(),
         },
     );
     AgentRegistry { jre: None, jres: std::collections::HashMap::new(), drivers }
@@ -43,6 +44,7 @@ fn built_in_agent_list_includes_expected_driver_labels() {
     let agents = build_agent_list(&manager, None);
 
     assert!(agents.iter().any(|agent| agent.db_type == "tdengine" && agent.label == "TDengine"));
+    assert!(agents.iter().any(|agent| agent.db_type == "iotdb" && agent.label == "Apache IoTDB"));
     assert!(agents.iter().any(|agent| agent.db_type == "yashandb" && agent.label == "崖山 YashanDB"));
     assert!(agents.iter().any(|agent| agent.db_type == "access" && agent.label == "Microsoft Access"));
 }
@@ -147,6 +149,35 @@ fn agent_list_does_not_mark_jre_update_for_system_java_runtime() {
 }
 
 #[test]
+fn agent_list_does_not_require_jre_for_native_agent() {
+    let manager = test_manager("native-no-jre");
+    let native_path = manager.driver_native_path("dameng");
+    std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
+    std::fs::write(&native_path, b"agent").unwrap();
+    manager
+        .save_state(&dbx_core::agent_manager::AgentState {
+            installed_drivers: [(
+                "dameng".to_string(),
+                InstalledDriver {
+                    version: "0.2.0".to_string(),
+                    installed_at: "2026-05-18T00:00:00Z".to_string(),
+                    jre: DEFAULT_JRE_KEY.to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let agents = build_agent_list(&manager, None);
+    let dameng = agents.iter().find(|agent| agent.db_type == "dameng").unwrap();
+
+    assert!(dameng.installed);
+    assert!(dameng.jre_installed);
+}
+
+#[test]
 fn agent_list_uses_legacy_default_jre_version_when_checking_updates() {
     let manager = test_manager("legacy-jre-version");
     let jar_path = manager.driver_jar_path("dameng");
@@ -197,20 +228,25 @@ fn jre_needs_install_when_managed_runtime_version_differs() {
 }
 
 #[test]
-fn local_agent_jar_candidates_include_sibling_build_output() {
+fn local_agent_jar_candidates_include_monorepo_and_legacy_build_output() {
     let candidates = local_agent_jar_candidates("tdengine");
 
+    assert!(candidates.iter().any(|path| path.ends_with("agents/drivers/tdengine/build/libs/dbx-agent-tdengine.jar")));
     assert!(candidates.iter().any(|path| path.ends_with("dbx-agents/tdengine/build/libs/dbx-agent-tdengine.jar")));
 }
 
 #[test]
-fn agent_asset_urls_map_to_r2_paths_by_category() {
+fn github_agent_asset_urls_map_to_r2_paths_by_category() {
     assert_eq!(
-        asset_url_to_r2_path("https://downloads.testteam.local/agents/dbx-jre-21.tar.gz", "jre"),
+        github_url_to_r2_path("https://github.com/t8y2/dbx-agents/releases/download/v1/dbx-jre-21.tar.gz", "jre"),
         "agents/jre/dbx-jre-21.tar.gz"
     );
     assert_eq!(
-        asset_url_to_r2_path("https://downloads.testteam.local/agents/dbx-agent-h2.jar", "driver"),
+        github_url_to_r2_path("https://github.com/t8y2/dbx-agents/releases/download/v1/dbx-agent-h2.jar", "driver"),
+        "agents/drivers/dbx-agent-h2.jar"
+    );
+    assert_eq!(
+        github_url_to_r2_path("https://github.com/t8y2/dbx/releases/download/agents-v0.3.0/dbx-agent-h2.jar", "driver"),
         "agents/drivers/dbx-agent-h2.jar"
     );
 }
@@ -278,6 +314,14 @@ async fn uninstall_driver_removes_artifact_and_state() {
     let jar_path = manager.driver_jar_path("h2");
     std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
     std::fs::write(&jar_path, b"jar").unwrap();
+    let cache_dir = manager.download_cache_dir();
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let h2_cache = cache_dir.join("driver-h2-0.1.0-abc-agent.jar");
+    let dameng_cache = cache_dir.join("driver-dameng-0.1.0-abc-agent.jar");
+    let jre_cache = cache_dir.join("jre-21-21.0.11-abc-jre-download.tar.gz");
+    std::fs::write(&h2_cache, b"h2").unwrap();
+    std::fs::write(&dameng_cache, b"dameng").unwrap();
+    std::fs::write(&jre_cache, b"jre").unwrap();
     manager
         .save_state(&dbx_core::agent_manager::AgentState {
             installed_drivers: [(
@@ -297,6 +341,9 @@ async fn uninstall_driver_removes_artifact_and_state() {
     uninstall_agent_driver(&manager, "h2").await.unwrap();
 
     assert!(!jar_path.exists());
+    assert!(!h2_cache.exists());
+    assert!(dameng_cache.exists());
+    assert!(jre_cache.exists());
     assert!(!manager.load_state().installed_drivers.contains_key("h2"));
 }
 

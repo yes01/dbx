@@ -1,30 +1,20 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, type Component } from "vue";
+import { ref, computed, nextTick, watch, provide, onMounted, onUnmounted, type Component, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import { Search, X, ListFilter, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { QueryTab, TreeNode, TreeNodeType } from "@/types/database";
+import type { TreeNode, TreeNodeType } from "@/types/database";
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree } from "@/lib/sidebarSearchTree";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
+import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebarTypeSearch";
 import { usesTreeSchemaMode } from "@/lib/databaseFeatureSupport";
-import {
-  findSidebarNodeForActiveTab,
-  findNodePathForActiveTab,
-  scrollTopForSidebarNode,
-  shouldScrollActiveSidebarSelection,
-} from "@/lib/sidebarActiveTabTarget";
-import {
-  SIDEBAR_TREE_ROW_HEIGHT,
-  SIDEBAR_TREE_PRERENDER_COUNT,
-  SIDEBAR_TREE_SCROLL_BUFFER,
-  flattenTree,
-  scrollTopForExpandedTreeNode,
-  shouldAutoScrollExpandedTreeNode,
-  shouldVirtualizeFlatTree,
-  type FlatTreeNode,
-} from "@/composables/useFlatTree";
+import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget } from "@/lib/sidebarActiveTabTarget";
+import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/queryCursorTableTarget";
+import { SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
+import { sidebarTreeContextKey } from "@/lib/sidebarTreeContext";
 import TreeItem from "./TreeItem.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
@@ -37,11 +27,14 @@ const settingsStore = useSettingsStore();
 const searchQuery = ref("");
 const deferredSearchQuery = ref("");
 const searchInputRef = ref<HTMLInputElement>();
+const pointerInsideTree = ref(false);
 const treeScrollerRef = ref<InstanceType<typeof RecycleScroller> | null>(null);
 const plainTreeScrollerRef = ref<HTMLElement | null>(null);
+const sidebarScrollbarTrackRef = ref<HTMLElement | null>(null);
 type SearchScope = "connection" | "database" | "schema" | "table" | "view";
 const selectedSearchScopes = ref<SearchScope[]>([]);
 const searchCollapsedIds = ref<Set<string>>(new Set());
+const searchRefreshedNodeIds = new Set<string>();
 let searchTimer: number | undefined;
 
 watch(
@@ -57,21 +50,74 @@ watch(
 
     searchTimer = window.setTimeout(() => {
       deferredSearchQuery.value = normalized;
-    }, 120);
+    }, 300);
   },
   { flush: "sync" },
 );
+
+watch(deferredSearchQuery, (newQuery, oldQuery) => {
+  store.sidebarSearchQuery = newQuery;
+  const tasks: Promise<void>[] = [];
+  for (const root of store.treeNodes) {
+    collectExpandedObjectSearchTargets(root, tasks, newQuery ? searchRefreshedNodeIds : undefined);
+  }
+  if (!newQuery && oldQuery) {
+    searchRefreshedNodeIds.clear();
+  }
+  Promise.all(tasks).catch(() => {});
+});
+
+const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views"]);
+const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
+const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "sequence", "package", "package-body", "load-more"]);
+
+function isSimpleObjectSearchParent(node: TreeNode): boolean {
+  return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.isExpanded === true && !!node.children?.some((child) => simpleObjectChildTypes.has(child.type));
+}
+
+function collectExpandedObjectSearchTargets(node: TreeNode, tasks: Promise<void>[], refreshedNodeIds?: Set<string>) {
+  if (refreshedNodeIds && isSimpleObjectSearchParent(node)) {
+    refreshedNodeIds.add(node.id);
+    tasks.push(store.refreshTreeNode(node));
+    return;
+  }
+  if (refreshedNodeIds && node.isExpanded && node.children) {
+    for (const child of node.children) {
+      if (child.connectionId && searchableObjectGroupTypes.has(child.type)) {
+        refreshedNodeIds.add(child.id);
+        tasks.push(store.loadObjectGroupChildren(child, { force: true }));
+      }
+    }
+  } else if (!refreshedNodeIds && searchRefreshedNodeIds.has(node.id)) {
+    if (searchableObjectGroupTypes.has(node.type)) {
+      tasks.push(store.loadObjectGroupChildren(node, { force: true }));
+    } else if (simpleObjectParentTypes.has(node.type)) {
+      tasks.push(store.refreshTreeNode(node));
+    }
+  }
+  if (node.children) {
+    for (const child of node.children) {
+      collectExpandedObjectSearchTargets(child, tasks, refreshedNodeIds);
+    }
+  }
+}
 
 const isSearching = computed(() => !!deferredSearchQuery.value);
 const isFiltering = computed(() => !!searchQuery.value.trim() || hasSearchScopeFilter.value);
 
 const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
-  database: ["database", "redis-db", "mongo-db"],
+  database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "mongo-db"],
   schema: ["schema"],
-  table: ["table", "mongo-collection"],
+  table: ["table", "mongo-collection", "vector-collection", "elasticsearch-index"],
   view: ["view"],
 };
+
+// Database-level container types. When browsing a large number of children
+// under one of these (e.g. hundreds of tables) and scrolling down, the row is
+// kept pinned at the top of the tree so the active database stays visible and
+// can be collapsed with one click. Mirrors the `database` search scope above.
+const DATABASE_LEVEL_TYPES = new Set<TreeNodeType>(SEARCH_SCOPE_TO_NODE_TYPES.database);
 
 const searchScopeOptions = computed(() => {
   return [
@@ -147,13 +193,208 @@ const filteredNodes = computed(() => {
 
 const flatNodes = computed<FlatTreeNode[]>(() => flattenTree(filteredNodes.value));
 const visibleNodes = computed<TreeNode[]>(() => flatNodes.value.map((item) => item.node));
+const visibleNodeIndexById = computed(() => {
+  const next = new Map<string, number>();
+  visibleNodes.value.forEach((node, index) => next.set(node.id, index));
+  return next;
+});
 const useVirtualTree = computed(() => shouldVirtualizeFlatTree(flatNodes.value.length));
 const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
-const sidebarTreeOverflowClass = computed(() =>
-  settingsStore.editorSettings.sidebarAllowHorizontalScroll
-    ? "overflow-x-auto sidebar-tree-horizontal-scroll"
-    : "overflow-x-hidden",
+
+// --- Sticky database header ---
+// RecycleScroller positions each row absolutely, so CSS `position: sticky` on
+// a database row can't work. Instead we overlay a pinned row from this parent
+// component, tracking scroll offset to find the topmost visible database-level
+// ancestor. The overlay reuses <TreeItem>, so collapse/expand comes for free.
+const stickyScrollTop = ref(0);
+const sidebarScrollMetrics = ref({ scrollTop: 0, clientHeight: 0, scrollHeight: 0 });
+const isDraggingSidebarScrollbar = ref(false);
+let sidebarScrollbarResizeObserver: ResizeObserver | null = null;
+let sidebarScrollbarAnimationFrame = 0;
+let sidebarScrollbarDragOffset = 0;
+
+function updateSidebarScrollMetrics() {
+  const scroller = currentTreeScroller();
+  if (!scroller) {
+    sidebarScrollMetrics.value = { scrollTop: 0, clientHeight: 0, scrollHeight: 0 };
+    return;
+  }
+
+  if (useVirtualTree.value) stickyScrollTop.value = scroller.scrollTop;
+  sidebarScrollMetrics.value = {
+    scrollTop: scroller.scrollTop,
+    clientHeight: scroller.clientHeight,
+    scrollHeight: scroller.scrollHeight,
+  };
+}
+
+function scheduleSidebarScrollMetricsUpdate() {
+  window.cancelAnimationFrame(sidebarScrollbarAnimationFrame);
+  sidebarScrollbarAnimationFrame = window.requestAnimationFrame(updateSidebarScrollMetrics);
+}
+
+function onTreeScroll() {
+  scheduleSidebarScrollMetricsUpdate();
+}
+
+// RecycleScroller only emits scrollStart/scrollEnd, not continuous scroll, so
+// attach a native passive listener on its root element once it mounts.
+watch(
+  treeScrollerRef,
+  (scroller, _old, onCleanup) => {
+    const el = (scroller?.$el as HTMLElement | undefined) ?? null;
+    if (!el) return;
+    el.addEventListener("scroll", onTreeScroll, { passive: true });
+    onCleanup(() => el.removeEventListener("scroll", onTreeScroll));
+  },
+  { flush: "post" },
 );
+
+watch(
+  [treeScrollerRef, plainTreeScrollerRef, useVirtualTree],
+  (_value, _oldValue, onCleanup) => {
+    sidebarScrollbarResizeObserver?.disconnect();
+    sidebarScrollbarResizeObserver = null;
+
+    const scroller = currentTreeScroller();
+    if (!scroller) return;
+
+    sidebarScrollbarResizeObserver = new ResizeObserver(scheduleSidebarScrollMetricsUpdate);
+    sidebarScrollbarResizeObserver.observe(scroller);
+    scheduleSidebarScrollMetricsUpdate();
+
+    onCleanup(() => {
+      sidebarScrollbarResizeObserver?.disconnect();
+      sidebarScrollbarResizeObserver = null;
+    });
+  },
+  { flush: "post" },
+);
+
+const stickyNode = computed<FlatTreeNode | null>(() => {
+  if (!useVirtualTree.value || isFiltering.value) return null;
+  const nodes = flatNodes.value;
+  const len = nodes.length;
+  if (len === 0) return null;
+
+  const topIndex = Math.min(Math.floor(stickyScrollTop.value / SIDEBAR_TREE_ROW_HEIGHT), len - 1);
+  // Walk UP from the topmost visible row to the nearest database-level ancestor.
+  // Show the overlay as soon as that database row starts crossing the top edge,
+  // instead of waiting for it to fully scroll out by one row.
+  for (let i = topIndex; i >= 0; i--) {
+    const item = nodes[i];
+    if (!DATABASE_LEVEL_TYPES.has(item.type)) continue;
+    const rowTop = i * SIDEBAR_TREE_ROW_HEIGHT;
+    return stickyScrollTop.value > rowTop ? item : null;
+  }
+  return null;
+});
+
+const stickyHeaderStyle = computed<CSSProperties>(() => {
+  const node = stickyNode.value;
+  if (!node) return {};
+  const nodes = flatNodes.value;
+  const currentIndex = nodes.findIndex((item) => item.id === node.id);
+  if (currentIndex < 0) return {};
+  const nextDatabaseIndex = nodes.findIndex((item, index) => index > currentIndex && DATABASE_LEVEL_TYPES.has(item.type));
+  if (nextDatabaseIndex < 0) return {};
+  const distanceToNext = nextDatabaseIndex * SIDEBAR_TREE_ROW_HEIGHT - stickyScrollTop.value;
+  if (distanceToNext >= SIDEBAR_TREE_ROW_HEIGHT) return {};
+  return {
+    transform: `translateY(${Math.min(0, distanceToNext - SIDEBAR_TREE_ROW_HEIGHT)}px)`,
+  };
+});
+
+// Reset tracking when the tree rebuilds (connect/disconnect/collapse) so a
+// stale scrollTop doesn't keep the overlay mounted after a structural change.
+watch(flatNodes, () => {
+  stickyScrollTop.value = 0;
+  void nextTick(scheduleSidebarScrollMetricsUpdate);
+});
+
+const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));
+
+const hasSidebarVerticalOverflow = computed(() => sidebarScrollMetrics.value.scrollHeight > sidebarScrollMetrics.value.clientHeight + 1);
+
+function sidebarScrollbarGeometry() {
+  const { scrollTop, clientHeight, scrollHeight } = sidebarScrollMetrics.value;
+  const trackHeight = sidebarScrollbarTrackRef.value?.clientHeight ?? Math.max(0, clientHeight - 8);
+  if (trackHeight <= 0 || scrollHeight <= clientHeight) {
+    return { thumbTop: 0, thumbHeight: 0, maxThumbTop: 0, maxScrollTop: 0 };
+  }
+
+  const thumbHeight = Math.max(24, Math.min(trackHeight, (clientHeight / scrollHeight) * trackHeight));
+  const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
+  const maxScrollTop = Math.max(1, scrollHeight - clientHeight);
+  const thumbTop = Math.min(maxThumbTop, Math.max(0, (scrollTop / maxScrollTop) * maxThumbTop));
+  return { thumbTop, thumbHeight, maxThumbTop, maxScrollTop };
+}
+
+const sidebarScrollbarThumbStyle = computed<CSSProperties>(() => {
+  const { thumbTop, thumbHeight } = sidebarScrollbarGeometry();
+  return {
+    height: `${thumbHeight}px`,
+    transform: `translateY(${thumbTop}px)`,
+  };
+});
+
+function setSidebarScrollFromPointer(clientY: number, offset: number) {
+  const scroller = currentTreeScroller();
+  const track = sidebarScrollbarTrackRef.value;
+  if (!scroller || !track) return;
+
+  const rect = track.getBoundingClientRect();
+  const { maxThumbTop, maxScrollTop } = sidebarScrollbarGeometry();
+  if (maxThumbTop <= 0) return;
+
+  const thumbTop = Math.min(maxThumbTop, Math.max(0, clientY - rect.top - offset));
+  scroller.scrollTop = (thumbTop / maxThumbTop) * maxScrollTop;
+  updateSidebarScrollMetrics();
+}
+
+function stopSidebarScrollbarDrag() {
+  isDraggingSidebarScrollbar.value = false;
+  window.removeEventListener("pointermove", onSidebarScrollbarPointerMove);
+  window.removeEventListener("pointerup", stopSidebarScrollbarDrag);
+  window.removeEventListener("pointercancel", stopSidebarScrollbarDrag);
+}
+
+function onSidebarScrollbarPointerMove(event: PointerEvent) {
+  event.preventDefault();
+  setSidebarScrollFromPointer(event.clientY, sidebarScrollbarDragOffset);
+}
+
+function onSidebarScrollbarTrackPointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const { thumbHeight } = sidebarScrollbarGeometry();
+  sidebarScrollbarDragOffset = thumbHeight / 2;
+  setSidebarScrollFromPointer(event.clientY, sidebarScrollbarDragOffset);
+  isDraggingSidebarScrollbar.value = true;
+  window.addEventListener("pointermove", onSidebarScrollbarPointerMove);
+  window.addEventListener("pointerup", stopSidebarScrollbarDrag);
+  window.addEventListener("pointercancel", stopSidebarScrollbarDrag);
+}
+
+function onSidebarScrollbarThumbPointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const track = sidebarScrollbarTrackRef.value;
+  if (!track) return;
+
+  const rect = track.getBoundingClientRect();
+  const { thumbTop } = sidebarScrollbarGeometry();
+  sidebarScrollbarDragOffset = event.clientY - rect.top - thumbTop;
+  isDraggingSidebarScrollbar.value = true;
+  window.addEventListener("pointermove", onSidebarScrollbarPointerMove);
+  window.addEventListener("pointerup", stopSidebarScrollbarDrag);
+  window.addEventListener("pointercancel", stopSidebarScrollbarDrag);
+}
+
+provide(sidebarTreeContextKey, {
+  getVisibleNodes: () => visibleNodes.value,
+  getVisibleNodeIndex: (id: string) => visibleNodeIndexById.value.get(id) ?? -1,
+});
 
 const pendingRenameGroupId = ref<string | null>(null);
 const highlightedNodeId = ref<string | null>(null);
@@ -174,6 +415,15 @@ async function scrollToSidebarNode(nodeId: string) {
   if (nextScrollTop !== scroller.scrollTop) {
     scroller.scrollTop = nextScrollTop;
   }
+}
+
+function clearSidebarSelection() {
+  // Clicking the blank area of the tree clears the current selection. Row
+  // clicks call event.stopPropagation(), so this only fires for blank clicks
+  // (issue #681 — selection wasn't cleared in double-click activation mode).
+  store.selectedTreeNodeId = null;
+  store.selectedTreeNodeIds = [];
+  store.treeSelectionAnchorId = null;
 }
 
 async function createNewGroup() {
@@ -208,8 +458,14 @@ async function locateActiveTabInSidebar() {
     }
   }
 
-  // Ensure the tree is loaded deep enough to contain the target node
-  await ensureTreeLoadedForTab(tab);
+  const config = connId ? store.getConfig(connId) : undefined;
+  const cursorCandidate = queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
+  const fallbackTarget = queryContextTargetFromCandidate(tab, cursorCandidate) ?? activeTabSidebarTarget(tab);
+  const initialTarget = cursorCandidate ? tableTargetFromCandidate(cursorCandidate) : fallbackTarget;
+  if (!initialTarget) return;
+
+  // Ensure the tree is loaded deep enough to contain the preferred target.
+  await ensureTreeLoadedForTarget(initialTarget);
 
   // Clear any active search filter so the node is visible
   if (isFiltering.value) {
@@ -218,7 +474,24 @@ async function locateActiveTabInSidebar() {
     clearSearchScopeFilter();
   }
 
-  const nodePath = findNodePathForActiveTab(tab, store.treeNodes);
+  let target = resolveLoadedLocateTarget(initialTarget, cursorCandidate);
+  let nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
+  if (!nodePath) {
+    // The first load may have served a stale schema cache whose async refresh
+    // replaced the database node before its tables finished loading, so the
+    // table isn't in the tree yet. Force a synchronous reload and retry once so
+    // locate reaches the table, not just the database (issue #715).
+    await ensureTreeLoadedForTarget(initialTarget, { force: true });
+    target = resolveLoadedLocateTarget(initialTarget, cursorCandidate);
+    nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
+  }
+
+  if (!nodePath && cursorCandidate && fallbackTarget) {
+    await ensureTreeLoadedForTarget(fallbackTarget);
+    target = fallbackTarget;
+    nodePath = findNodePathForTarget(fallbackTarget, store.treeNodes);
+  }
+
   if (!nodePath) return;
 
   for (const ancestor of nodePath) {
@@ -229,7 +502,7 @@ async function locateActiveTabInSidebar() {
 
   await nextTick();
 
-  const match = findSidebarNodeForActiveTab(tab, flatNodes.value);
+  const match = target ? findSidebarNodeForTarget(target, flatNodes.value) : null;
   if (!match) return;
 
   store.selectedTreeNodeId = match.id;
@@ -244,59 +517,130 @@ async function locateActiveTabInSidebar() {
   await scrollToSidebarNode(match.id);
 }
 
-async function ensureTreeLoadedForTab(tab: QueryTab) {
-  const connId = tab.connectionId;
+function tableTargetFromCandidate(candidate: QueryCursorTableCandidate): ActiveTabSidebarTarget {
+  return {
+    type: "table",
+    connectionId: candidate.connectionId,
+    database: candidate.database,
+    schema: candidate.schema,
+    tableName: candidate.tableName,
+  };
+}
+
+function resolveLoadedLocateTarget(target: ActiveTabSidebarTarget, candidate: QueryCursorTableCandidate | null): ActiveTabSidebarTarget | null {
+  if (!candidate) return target;
+  return findLoadedTableTargetForCandidate(store.treeNodes, candidate);
+}
+
+async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: { force?: boolean }) {
+  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "zookeeper-root") return;
+  const connId = target.connectionId;
   if (!connId) return;
 
   const config = store.getConfig(connId);
   if (!config) return;
 
+  // When forcing, bypass the cached children check so we reload from the
+  // source. A stale schema cache otherwise serves children and triggers an
+  // async background refresh that can replace nodes mid-flight, leaving the
+  // tree without the target table by the time we search for it (issue #715).
+  const force = opts?.force ?? false;
+  const loadOptions = force ? { force: true } : undefined;
+
   // Ensure databases are loaded under the connection
   const connNode = store.treeNodes.find((n) => n.id === connId);
-  if (connNode && (!connNode.children || connNode.children.length === 0)) {
+  if (connNode && (force || !connNode.children || connNode.children.length === 0)) {
     try {
       if (config.db_type === "redis") {
         await store.loadRedisDatabases(connId);
-      } else if (config.db_type === "mongodb" || config.db_type === "elasticsearch") {
+      } else if (config.db_type === "mongodb") {
         await store.loadMongoDatabases(connId);
+      } else if (config.db_type === "elasticsearch") {
+        await store.loadElasticsearchIndices(connId);
+      } else if (config.db_type === "qdrant" || config.db_type === "milvus" || config.db_type === "weaviate" || config.db_type === "chromadb") {
+        await store.loadVectorCollections(connId);
+      } else if (config.db_type === "mq") {
+        await store.loadMqTenants(connId, loadOptions);
+      } else if (config.db_type === "nacos") {
+        await store.loadNacosNamespaces(connId, loadOptions);
       } else {
-        await store.loadDatabases(connId);
+        await store.loadDatabases(connId, loadOptions);
       }
     } catch {
       return;
     }
   }
 
-  if (!tab.database) return;
+  if (config.db_type === "mq" || config.db_type === "nacos") return;
+  if (!("database" in target) || !target.database) return;
 
   // Find the database node
-  const dbNode = findDatabaseNode(store.treeNodes, connId, tab.database);
-  if (!dbNode || (dbNode.children && dbNode.children.length > 0)) return;
+  const dbNode = findDatabaseNode(store.treeNodes, connId, target.database);
+  if (!dbNode) return;
+  const targetSchema = "schema" in target ? target.schema : undefined;
+  const databaseChildrenLoaded = !!dbNode.children && dbNode.children.length > 0;
+  const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+  const usesSchemaTree = usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config);
+  const shouldLoadSchemaTables = target.type === "table" && !!targetSchema && usesSchemaTree;
+  if (!force && databaseChildrenLoaded && !shouldLoadSchemaTables) return;
 
   // Load database contents
   try {
     if (config.db_type === "sqlserver") {
-      await store.loadSqlServerDatabaseObjects(connId, tab.database);
-    } else if (usesTreeSchemaMode(config.db_type)) {
-      await store.loadSchemas(connId, tab.database);
+      if (force || !databaseChildrenLoaded) {
+        await store.loadSqlServerDatabaseObjects(connId, target.database, loadOptions);
+      }
+    } else if (usesSchemaTree) {
+      if (force || !databaseChildrenLoaded) {
+        await store.loadSchemas(connId, target.database, loadOptions);
+      }
       // If we have a schema, also load tables under that schema
-      if (tab.schema) {
-        const schemaNode = findSchemaNode(store.treeNodes, connId, tab.database, tab.schema);
-        if (schemaNode && (!schemaNode.children || schemaNode.children.length === 0)) {
-          await store.loadTables(connId, tab.database, tab.schema);
+      if (targetSchema) {
+        const schemaNode = findSchemaNode(store.treeNodes, connId, target.database, targetSchema);
+        if (schemaNode && (force || !schemaNode.children || schemaNode.children.length === 0)) {
+          await store.loadTables(connId, target.database, targetSchema, loadOptions);
         }
       }
     } else {
-      await store.loadTables(connId, tab.database);
+      await store.loadTables(connId, target.database, undefined, loadOptions);
+    }
+
+    if (target.type === "table") {
+      await ensureTableObjectGroupsLoaded(target, loadOptions);
     }
   } catch {
     // Node just won't have children loaded
   }
 }
 
+async function ensureTableObjectGroupsLoaded(target: Extract<ActiveTabSidebarTarget, { type: "table" }>, options?: { force?: boolean }) {
+  const groups = findTableObjectGroupNodes(store.treeNodes, target);
+  for (const group of groups) {
+    if (!options?.force && group.children && group.children.length > 0) continue;
+    await store.loadObjectGroupChildren(group, options);
+  }
+}
+
+function findTableObjectGroupNodes(nodes: TreeNode[], target: Extract<ActiveTabSidebarTarget, { type: "table" }>): TreeNode[] {
+  const matches: TreeNode[] = [];
+  for (const node of nodes) {
+    if ((node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views") && node.connectionId === target.connectionId && sameTreeName(node.database, target.database) && (!target.schema || sameTreeName(node.schema, target.schema))) {
+      matches.push(node);
+    }
+    if (node.children) {
+      matches.push(...findTableObjectGroupNodes(node.children, target));
+    }
+  }
+  return matches;
+}
+
+function sameTreeName(left: string | undefined, right: string | undefined): boolean {
+  return (left || "").toLowerCase() === (right || "").toLowerCase();
+}
+
 function findDatabaseNode(nodes: TreeNode[], connId: string, database: string): TreeNode | null {
   for (const node of nodes) {
-    if (node.type === "database" && node.connectionId === connId && node.database === database) {
+    if (node.type === "database" && node.connectionId === connId && sameTreeName(node.database, database)) {
       return node;
     }
     if (node.children) {
@@ -309,7 +653,7 @@ function findDatabaseNode(nodes: TreeNode[], connId: string, database: string): 
 
 function findSchemaNode(nodes: TreeNode[], connId: string, database: string, schema: string): TreeNode | null {
   for (const node of nodes) {
-    if (node.type === "schema" && node.connectionId === connId && node.database === database && node.label === schema) {
+    if (node.type === "schema" && node.connectionId === connId && sameTreeName(node.database, database) && sameTreeName(node.label, schema)) {
       return node;
     }
     if (node.children) {
@@ -328,34 +672,8 @@ function onSearchToggle(node: TreeNode) {
   searchCollapsedIds.value = next;
 }
 
-async function onNodeToggled(node: TreeNode, wasExpanded: boolean) {
-  if (wasExpanded || !node.isExpanded) return;
-  if (!shouldAutoScrollExpandedTreeNode(node.type)) return;
-
-  await nextTick();
-
-  const expandedIndex = flatNodes.value.findIndex((item) => item.id === node.id);
-  const insertedRowCount = flattenTree([node]).length - 1;
-  const scroller = treeScrollerRef.value?.$el as HTMLElement | undefined;
-  if (!scroller || expandedIndex < 0 || insertedRowCount <= 0) return;
-
-  const nextScrollTop = scrollTopForExpandedTreeNode({
-    expandedIndex,
-    insertedRowCount,
-    currentScrollTop: scroller.scrollTop,
-    viewportHeight: scroller.clientHeight,
-  });
-
-  if (nextScrollTop !== scroller.scrollTop) {
-    scroller.scrollTop = nextScrollTop;
-  }
-}
-
 function currentTreeScroller(): HTMLElement | null {
-  return (
-    ((useVirtualTree.value ? treeScrollerRef.value?.$el : plainTreeScrollerRef.value) as HTMLElement | undefined) ??
-    null
-  );
+  return ((useVirtualTree.value ? treeScrollerRef.value?.$el : plainTreeScrollerRef.value) as HTMLElement | undefined) ?? null;
 }
 
 async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
@@ -411,11 +729,48 @@ function onSearchKeydown(event: KeyboardEvent) {
   searchQuery.value = "";
 }
 
+function focusSearchAtEnd() {
+  nextTick(() => {
+    const input = searchInputRef.value;
+    if (!input) return;
+    input.focus();
+    const end = input.value.length;
+    input.setSelectionRange(end, end);
+  });
+}
+
+function onWindowKeydown(event: KeyboardEvent) {
+  if (!pointerInsideTree.value || event.defaultPrevented || isEditableSidebarTypeSearchTarget(event.target)) return;
+  if (isCancelSearchShortcut(event)) {
+    if (!searchQuery.value) return;
+    event.preventDefault();
+    searchQuery.value = "";
+    focusSearchAtEnd();
+    return;
+  }
+  const nextQuery = sidebarTypeSearchNextQuery(searchQuery.value, event);
+  if (nextQuery == null) return;
+  event.preventDefault();
+  searchQuery.value = nextQuery;
+  focusSearchAtEnd();
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", onWindowKeydown);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("keydown", onWindowKeydown);
+  stopSidebarScrollbarDrag();
+  sidebarScrollbarResizeObserver?.disconnect();
+  window.cancelAnimationFrame(sidebarScrollbarAnimationFrame);
+});
+
 defineExpose({ focusSearch, createNewGroup });
 </script>
 
 <template>
-  <div class="h-full min-h-0 flex flex-col text-sm select-none">
+  <div class="h-full min-h-0 flex flex-col text-sm select-none" @pointerenter="pointerInsideTree = true" @pointerleave="pointerInsideTree = false">
     <div class="sticky top-0 z-10 bg-background px-2 py-1">
       <div class="relative flex items-center gap-1">
         <div class="relative flex-1">
@@ -430,19 +785,11 @@ defineExpose({ focusSearch, createNewGroup });
             :placeholder="t('grid.search')"
             @keydown="onSearchKeydown"
           />
-          <button
-            v-if="searchQuery"
-            class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-            @click="searchQuery = ''"
-          >
+          <button v-if="searchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchQuery = ''">
             <X class="h-3 w-3" />
           </button>
         </div>
-        <button
-          class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground"
-          :title="t('sidebar.locateActiveTab')"
-          @click="locateActiveTabInSidebar"
-        >
+        <button class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">
           <Crosshair class="h-3.5 w-3.5" />
         </button>
         <LightDropdown
@@ -454,12 +801,7 @@ defineExpose({ focusSearch, createNewGroup });
           :label="t('sidebar.filterByType')"
           :trigger-title="t('sidebar.filterByType')"
           :trigger-icon="ListFilter"
-          :trigger-class="
-            [
-              'shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent',
-              hasSearchScopeFilter ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground',
-            ].join(' ')
-          "
+          :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', hasSearchScopeFilter ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
           trigger-icon-class="h-3.5 w-3.5"
           item-icon-class="h-3.5 w-3.5"
           content-class="w-max min-w-0"
@@ -473,53 +815,49 @@ defineExpose({ focusSearch, createNewGroup });
         />
       </div>
     </div>
-    <RecycleScroller
-      v-if="flatNodes.length > 0 && useVirtualTree"
-      ref="treeScrollerRef"
-      class="sidebar-tree connection-tree-scroller min-h-0 flex-1 overflow-y-auto"
-      :class="sidebarTreeOverflowClass"
-      :items="flatNodes"
-      :item-size="SIDEBAR_TREE_ROW_HEIGHT"
-      :buffer="SIDEBAR_TREE_SCROLL_BUFFER"
-      :prerender="SIDEBAR_TREE_PRERENDER_COUNT"
-      :skip-hover="true"
-      key-field="id"
-      type-field="type"
-      flow-mode
-    >
-      <template #default="{ item }">
+    <div v-if="flatNodes.length > 0 && useVirtualTree" class="connection-tree-scroll-shell relative min-h-0 flex-1">
+      <RecycleScroller
+        ref="treeScrollerRef"
+        class="sidebar-tree connection-tree-scroller h-full overflow-y-auto"
+        :class="sidebarTreeOverflowClass"
+        @click="clearSidebarSelection"
+        :items="flatNodes"
+        :item-size="SIDEBAR_TREE_ROW_HEIGHT"
+        :buffer="SIDEBAR_TREE_SCROLL_BUFFER"
+        :prerender="SIDEBAR_TREE_PRERENDER_COUNT"
+        :skip-hover="true"
+        key-field="id"
+        type-field="type"
+        flow-mode
+      >
+        <template #default="{ item }">
+          <TreeItem :node="item.node" :depth="item.depth" :drag-disabled="isFiltering" :pending-rename="pendingRenameGroupId === item.node.id" :highlighted="highlightedNodeId === item.node.id" @search-toggle="onSearchToggle" @rename-started="pendingRenameGroupId = null" />
+        </template>
+      </RecycleScroller>
+      <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5] border-b border-border/60" :style="stickyHeaderStyle">
+        <TreeItem :node="stickyNode.node" :depth="stickyNode.depth" :drag-disabled="true" @search-toggle="onSearchToggle" />
+      </div>
+      <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
+        <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
+      </div>
+    </div>
+    <div v-else-if="flatNodes.length > 0" class="connection-tree-scroll-shell relative min-h-0 flex-1">
+      <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" @click="clearSidebarSelection" @scroll.passive="onTreeScroll">
         <TreeItem
+          v-for="item in flatNodes"
+          :key="item.id"
           :node="item.node"
           :depth="item.depth"
           :drag-disabled="isFiltering"
           :pending-rename="pendingRenameGroupId === item.node.id"
-          :highlighted="highlightedNodeId === item.node.id"
-          :visible-nodes="visibleNodes"
-          @node-toggled="onNodeToggled"
+          :highlighted="highlightedNodeId === item.id"
           @search-toggle="onSearchToggle"
           @rename-started="pendingRenameGroupId = null"
         />
-      </template>
-    </RecycleScroller>
-    <div
-      v-else-if="flatNodes.length > 0"
-      ref="plainTreeScrollerRef"
-      class="sidebar-tree min-h-0 flex-1 overflow-y-auto"
-      :class="sidebarTreeOverflowClass"
-    >
-      <TreeItem
-        v-for="item in flatNodes"
-        :key="item.id"
-        :node="item.node"
-        :depth="item.depth"
-        :drag-disabled="isFiltering"
-        :pending-rename="pendingRenameGroupId === item.node.id"
-        :highlighted="highlightedNodeId === item.id"
-        :visible-nodes="visibleNodes"
-        @node-toggled="onNodeToggled"
-        @search-toggle="onSearchToggle"
-        @rename-started="pendingRenameGroupId = null"
-      />
+      </div>
+      <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
+        <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
+      </div>
     </div>
     <div v-if="store.treeNodes.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
       {{ t("sidebar.noConnections") }}
@@ -528,9 +866,17 @@ defineExpose({ focusSearch, createNewGroup });
 </template>
 
 <style scoped>
+.sticky-database-header {
+  background-color: var(--background);
+}
+
 .connection-tree-scroller {
   will-change: scroll-position;
   contain: content;
+}
+
+.connection-tree-scroller::-webkit-scrollbar:vertical {
+  width: 0;
 }
 
 .connection-tree-scroller :deep(.vue-recycle-scroller__item-view) {
@@ -540,5 +886,42 @@ defineExpose({ focusSearch, createNewGroup });
 
 .connection-tree-scroller.sidebar-tree-horizontal-scroll :deep(.vue-recycle-scroller__item-view) {
   width: max-content;
+}
+
+.sidebar-tree-scrollbar {
+  position: absolute;
+  top: 4px;
+  right: 0;
+  bottom: 4px;
+  z-index: 10;
+  width: 12px;
+  cursor: default;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.sidebar-tree-scrollbar:hover,
+.sidebar-tree-scrollbar--dragging {
+  opacity: 1;
+}
+
+.sidebar-tree-scrollbar__thumb {
+  position: absolute;
+  right: 2px;
+  width: 6px;
+  min-height: 24px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 30%, transparent);
+  transition:
+    background-color 120ms ease,
+    width 120ms ease,
+    right 120ms ease;
+}
+
+.sidebar-tree-scrollbar:hover .sidebar-tree-scrollbar__thumb,
+.sidebar-tree-scrollbar--dragging .sidebar-tree-scrollbar__thumb {
+  right: 1px;
+  width: 8px;
+  background: color-mix(in oklch, var(--foreground) 48%, transparent);
 }
 </style>

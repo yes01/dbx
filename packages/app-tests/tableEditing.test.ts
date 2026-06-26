@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import test from "node:test";
+import { test } from "vitest";
 import {
   DBX_NEO4J_ELEMENT_ID_COLUMN,
   DBX_ROWID_COLUMN,
@@ -39,10 +39,7 @@ test("does not synthesize ROWID for non-Oracle keyless tables", () => {
 });
 
 test("uses tbname and timestamp as TDengine editable keys", () => {
-  assert.deepEqual(editablePrimaryKeys("tdengine", [column("ts", true), column("current")]), [
-    DBX_TDENGINE_TBNAME_COLUMN,
-    "ts",
-  ]);
+  assert.deepEqual(editablePrimaryKeys("tdengine", [column("ts", true), column("current")]), [DBX_TDENGINE_TBNAME_COLUMN, "ts"]);
 });
 
 test("allows updateable SQL table data editing even without declared primary keys", () => {
@@ -55,12 +52,15 @@ test("allows updateable SQL table data editing even without declared primary key
   assert.equal(isTableDataEditable("informix", []), true);
   assert.equal(isTableDataEditable("tdengine", []), true);
   assert.equal(isTableDataEditable("mysql", []), true);
+  assert.equal(isTableDataEditable("manticoresearch", []), true);
+  assert.equal(isTableDataEditable("databend", []), true);
   assert.equal(isTableDataEditable("postgres", []), true);
   assert.equal(isTableDataEditable("postgres", ["id"]), true);
 });
 
 test("does not use transactional grid saves for non-transactional engines", () => {
   assert.equal(supportsDataGridTransaction("hive"), false);
+  assert.equal(supportsDataGridTransaction("manticoresearch"), false);
   assert.equal(supportsDataGridTransaction("trino"), false);
   assert.equal(supportsDataGridTransaction("jdbc"), false);
   assert.equal(supportsDataGridTransaction("yashandb"), true);
@@ -78,6 +78,8 @@ test("allows existing row edits according to database-specific key requirements"
   assert.equal(canEditExistingTableRows("trino", undefined, []), false);
   assert.equal(canEditExistingTableRows("trino", undefined, ["id"]), true);
   assert.equal(canEditExistingTableRows("mysql", undefined, []), true);
+  assert.equal(canEditExistingTableRows("manticoresearch", undefined, []), true);
+  assert.equal(canEditExistingTableRows("databend", undefined, []), true);
   assert.equal(canEditExistingTableRows("postgres", undefined, []), true);
   assert.equal(canEditExistingTableRows("sqlite", undefined, []), true);
   assert.equal(canEditExistingTableRows("sqlite", undefined, ["id"]), true);
@@ -116,12 +118,7 @@ test("keeps TDengine existing row identity and tag columns read-only", () => {
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "ts", [column("ts", true)]), true);
   assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "location", [column("location")]), false);
   assert.equal(isTdengineExistingRowReadonlyColumn("mysql", "ts", [column("ts", true)]), false);
-  assert.equal(
-    isTdengineExistingRowReadonlyColumn("tdengine", "location", [
-      { ...column("location"), extra: "TAG", comment: "TAG" },
-    ]),
-    true,
-  );
+  assert.equal(isTdengineExistingRowReadonlyColumn("tdengine", "location", [{ ...column("location"), extra: "TAG", comment: "TAG" }]), true);
 });
 
 test("detects the synthetic Oracle ROWID key case", () => {

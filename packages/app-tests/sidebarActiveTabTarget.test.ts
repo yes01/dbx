@@ -1,11 +1,6 @@
 import { strict as assert } from "node:assert";
-import test from "node:test";
-import {
-  activeTabSidebarTarget,
-  findSidebarNodeForActiveTab,
-  scrollTopForSidebarNode,
-  shouldScrollActiveSidebarSelection,
-} from "../../apps/desktop/src/lib/sidebarActiveTabTarget.ts";
+import { test } from "vitest";
+import { activeTabSidebarTarget, findSidebarNodeForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebarActiveTabTarget.ts";
 import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
@@ -62,6 +57,85 @@ test("mongo tabs target the matching visible collection node", () => {
   };
 
   assert.equal(findSidebarNodeForActiveTab(tab, [flat(collection)])?.id, "events-node");
+});
+
+test("MQ tabs with a selected tenant target the matching tenant node", () => {
+  const tab: QueryTab = {
+    id: "tab-1",
+    title: "Apache Pulsar Admin",
+    connectionId: "conn-1",
+    database: "",
+    sql: "",
+    isExecuting: false,
+    mode: "mq",
+    mqTenant: "public",
+  };
+  const tenant: TreeNode = {
+    id: "tenant-node",
+    label: "public",
+    type: "mq-tenant",
+    connectionId: "conn-1",
+    mqTenant: "public",
+  };
+
+  assert.deepEqual(activeTabSidebarTarget(tab), {
+    type: "mq-tenant",
+    connectionId: "conn-1",
+    tenant: "public",
+  });
+  assert.equal(findSidebarNodeForActiveTab(tab, [flat(tenant)])?.id, "tenant-node");
+});
+
+test("ZooKeeper tabs target the matching visible zookeeper root node", () => {
+  const tab: QueryTab = {
+    id: "tab-1",
+    title: "ZooKeeper Keys",
+    connectionId: "conn-1",
+    database: "",
+    sql: "",
+    isExecuting: false,
+    mode: "zookeeper",
+  };
+  const root: TreeNode = {
+    id: "zookeeper-root",
+    label: "Keys",
+    type: "zookeeper-root",
+    connectionId: "conn-1",
+  };
+
+  assert.deepEqual(activeTabSidebarTarget(tab), {
+    type: "zookeeper-root",
+    connectionId: "conn-1",
+  });
+  assert.equal(findSidebarNodeForActiveTab(tab, [flat(root)])?.id, "zookeeper-root");
+});
+
+test("Nacos tabs target the matching namespace node", () => {
+  const tab: QueryTab = {
+    id: "tab-1",
+    title: "Nacos:dev",
+    connectionId: "conn-1",
+    database: "",
+    sql: "",
+    isExecuting: false,
+    mode: "nacos",
+    nacosNamespace: "dev",
+    nacosNamespaceName: "Development",
+  };
+  const namespace: TreeNode = {
+    id: "namespace-node",
+    label: "Development",
+    type: "nacos-namespace",
+    connectionId: "conn-1",
+    nacosNamespace: "dev",
+  };
+
+  assert.deepEqual(activeTabSidebarTarget(tab), {
+    type: "nacos-namespace",
+    connectionId: "conn-1",
+    namespace: "dev",
+  });
+  assert.equal(findSidebarNodeForActiveTab(tab, [flat(namespace)])?.id, "namespace-node");
 });
 
 test("saved SQL tabs target the matching visible saved SQL file node", () => {

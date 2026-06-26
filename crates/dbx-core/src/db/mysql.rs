@@ -7,13 +7,16 @@ use rust_decimal::Decimal;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use std::time::Instant;
 
 use crate::models::connection::DatabaseType;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
-    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectInfo, QueryResult, TableInfo, TriggerInfo,
+    ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
+    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
+    ForeignKeyInfo, IndexInfo, ObjectInfo, ObjectStatistics, QueryResult, TableInfo, TriggerInfo,
 };
 
 use super::file_validator::validate_file_path;
@@ -29,8 +32,12 @@ impl MySqlQueryDialect {
     pub fn for_connection(db_type: DatabaseType, driver_profile: Option<&str>) -> Self {
         let profile = driver_profile.map(str::to_ascii_lowercase);
         Self {
-            supports_admin_show_results: matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks)
-                || profile.as_deref().is_some_and(|profile| matches!(profile, "doris" | "selectdb" | "starrocks")),
+            supports_admin_show_results: matches!(
+                db_type,
+                DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch
+            ) || profile
+                .as_deref()
+                .is_some_and(|profile| matches!(profile, "doris" | "selectdb" | "starrocks" | "manticoresearch")),
         }
     }
 }
@@ -96,6 +103,17 @@ fn get_opt_i32(row: &mysql_async::Row, name: &str) -> Option<i32> {
             row_get::<Vec<u8>, _>(row, name)
                 .and_then(|b| String::from_utf8(b).ok())
                 .and_then(|v| numeric_metadata_str_to_i32(Some(v)))
+        })
+}
+
+fn get_opt_i64(row: &mysql_async::Row, name: &str) -> Option<i64> {
+    row_get::<i64, _>(row, name)
+        .or_else(|| row_get::<u64, _>(row, name).and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| row_get::<String, _>(row, name).and_then(|value| value.parse::<i64>().ok()))
+        .or_else(|| {
+            row_get::<Vec<u8>, _>(row, name)
+                .and_then(|b| String::from_utf8(b).ok())
+                .and_then(|value| value.parse::<i64>().ok())
         })
 }
 
@@ -187,6 +205,42 @@ fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_js
     serde_json::Value::String(String::from_utf8_lossy(&bytes).to_string())
 }
 
+/// Map a MySQL column to a user-facing type name for the result-grid header.
+/// Returns the bare lowercase type name (no length/precision/signedness), which
+/// is enough for display; unknown variants fall back to a lowercased debug name.
+fn mysql_column_type_name(ty: ColumnType) -> String {
+    use mysql_async::consts::ColumnType::*;
+    match ty {
+        MYSQL_TYPE_TINY => "tinyint",
+        MYSQL_TYPE_SHORT => "smallint",
+        MYSQL_TYPE_INT24 => "mediumint",
+        MYSQL_TYPE_LONG => "int",
+        MYSQL_TYPE_LONGLONG => "bigint",
+        MYSQL_TYPE_FLOAT => "float",
+        MYSQL_TYPE_DOUBLE => "double",
+        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => "decimal",
+        MYSQL_TYPE_BIT => "bit",
+        MYSQL_TYPE_YEAR => "year",
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => "date",
+        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => "time",
+        MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => "datetime",
+        MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => "timestamp",
+        MYSQL_TYPE_JSON => "json",
+        MYSQL_TYPE_ENUM => "enum",
+        MYSQL_TYPE_SET => "set",
+        MYSQL_TYPE_TINY_BLOB => "tinyblob",
+        MYSQL_TYPE_MEDIUM_BLOB => "mediumblob",
+        MYSQL_TYPE_LONG_BLOB => "longblob",
+        MYSQL_TYPE_BLOB => "blob",
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => "varchar",
+        MYSQL_TYPE_STRING => "char",
+        MYSQL_TYPE_GEOMETRY => "geometry",
+        MYSQL_TYPE_NULL => "null",
+        other => return format!("{:?}", other).to_lowercase(),
+    }
+    .to_string()
+}
+
 fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value {
     let Some(column) = row.columns_ref().get(idx) else {
         return serde_json::Value::Null;
@@ -244,7 +298,12 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
             return row_get::<Vec<u8>, _>(row, idx)
                 .map(|bytes| {
                     if matches!(column.column_type(), ColumnType::MYSQL_TYPE_GEOMETRY) {
-                        mysql_blob_preview(&bytes, "GEOMETRY")
+                        // MySQL prefixes geometry WKB with a 4-byte SRID.
+                        // Strip it before passing to the WKB parser.
+                        let wkb = if bytes.len() >= 4 { &bytes[4..] } else { &bytes };
+                        super::wkb::wkb_to_wkt(wkb)
+                            .map(serde_json::Value::String)
+                            .unwrap_or_else(|| super::binary_value_to_json(&bytes))
                     } else {
                         mysql_bytes_to_json(bytes, column)
                     }
@@ -259,21 +318,20 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
         | ColumnType::MYSQL_TYPE_TIME
         | ColumnType::MYSQL_TYPE_TIME2
         | ColumnType::MYSQL_TYPE_NEWDATE => {
-            if let Some(v) = row_get::<NaiveDateTime, _>(row, idx) {
-                return serde_json::Value::String(v.to_string());
-            }
-            if let Some(v) = row_get::<NaiveDate, _>(row, idx) {
-                return serde_json::Value::String(v.to_string());
-            }
-            if let Some(v) = row_get::<NaiveTime, _>(row, idx) {
-                return serde_json::Value::String(v.to_string());
+            if let Some(value) = mysql_temporal_value_to_json(
+                column.column_type(),
+                row_get::<NaiveDateTime, _>(row, idx),
+                row_get::<NaiveDate, _>(row, idx),
+                row_get::<NaiveTime, _>(row, idx),
+            ) {
+                return value;
             }
         }
         _ => {}
     }
 
     row_get::<String, _>(row, idx)
-        .map(serde_json::Value::String)
+        .map(|s| serde_json::Value::String(fix_potential_double_encoding(&s)))
         .or_else(|| row_get::<i64, _>(row, idx).map(super::safe_i64_to_json))
         .or_else(|| row_get::<u64, _>(row, idx).map(super::safe_u64_to_json))
         .or_else(|| row_get::<i32, _>(row, idx).map(|v| serde_json::Value::Number(v.into())))
@@ -288,6 +346,29 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
         .unwrap_or(serde_json::Value::Null)
 }
 
+fn mysql_temporal_value_to_json(
+    column_type: ColumnType,
+    datetime: Option<NaiveDateTime>,
+    date: Option<NaiveDate>,
+    time: Option<NaiveTime>,
+) -> Option<serde_json::Value> {
+    let value = match column_type {
+        ColumnType::MYSQL_TYPE_DATE | ColumnType::MYSQL_TYPE_NEWDATE => {
+            date.map(|value| value.to_string()).or_else(|| datetime.map(|value| value.date().to_string()))?
+        }
+        ColumnType::MYSQL_TYPE_TIME | ColumnType::MYSQL_TYPE_TIME2 => time.map(|value| value.to_string())?,
+        ColumnType::MYSQL_TYPE_TIMESTAMP
+        | ColumnType::MYSQL_TYPE_TIMESTAMP2
+        | ColumnType::MYSQL_TYPE_DATETIME
+        | ColumnType::MYSQL_TYPE_DATETIME2 => datetime
+            .map(|value| value.to_string())
+            .or_else(|| date.map(|value| value.to_string()))
+            .or_else(|| time.map(|value| value.to_string()))?,
+        _ => return None,
+    };
+    Some(serde_json::Value::String(value))
+}
+
 pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<MySqlPool, String> {
     connect_with_ca_cert(url, None, fallback_timeout).await
 }
@@ -297,15 +378,24 @@ pub async fn connect_with_ca_cert(
     ca_cert_path: Option<&str>,
     fallback_timeout: Duration,
 ) -> Result<MySqlPool, String> {
+    connect_with_ca_cert_and_pool_limit(url, ca_cert_path, fallback_timeout, 10).await
+}
+
+pub async fn connect_with_ca_cert_and_pool_limit(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    fallback_timeout: Duration,
+    max_connections: usize,
+) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool = create_pool(url, ca_cert_path)?;
+    let pool = create_pool(url, ca_cert_path, max_connections)?;
     let result = verify_pool_connection(&pool, timeout).await;
 
     if let Err(ref e) = result {
         if mysql_error_should_retry_without_ssl(e) {
             if let Some(fallback_url) = ssl_fallback_url(url) {
                 log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
-                let fallback_pool = create_pool(&fallback_url, None)?;
+                let fallback_pool = create_pool(&fallback_url, None, max_connections)?;
                 return match verify_pool_connection(&fallback_pool, timeout).await {
                     Ok(()) => Ok(fallback_pool),
                     Err(e) => Err(e),
@@ -323,14 +413,19 @@ struct MySqlTlsFiles {
     sslkey: Option<String>,
 }
 
-fn create_pool(url: &str, ca_cert_path: Option<&str>) -> Result<MySqlPool, String> {
+fn create_pool(url: &str, ca_cert_path: Option<&str>, max_connections: usize) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let opts =
         mysql_async::Opts::from_url(&mysql_async_url(&tls_url.url)).map_err(|e| format!("Invalid MySQL URL: {e}"))?;
     let base_ssl_opts = opts.ssl_opts().cloned();
+    let max_connections = max_connections.max(1);
+    // Single-connection pools (max_connections == 1) are client session pools that
+    // must preserve session state (e.g. TEMPORARY TABLEs) across queries.
+    // Disable COM_RESET_CONNECTION for these pools to avoid clearing that state.
     let pool_opts = mysql_async::PoolOpts::new()
-        .with_constraints(mysql_async::PoolConstraints::new(1, 3).unwrap())
-        .with_inactive_connection_ttl(Duration::from_secs(300));
+        .with_constraints(mysql_async::PoolConstraints::new(1, max_connections).unwrap())
+        .with_inactive_connection_ttl(Duration::from_secs(300))
+        .with_reset_connection(max_connections > 1);
     let mut builder = mysql_async::OptsBuilder::from_opts(opts)
         .stmt_cache_size(0)
         .prefer_socket(false)
@@ -441,11 +536,28 @@ fn mysql_ssl_opts(
 
 fn mysql_setup_queries(url: &str) -> Vec<String> {
     let charset = mysql_connection_charset(url).unwrap_or("utf8mb4");
+    let catalog = mysql_connection_catalog(url);
+    let database = mysql_connection_database(url);
     let mut queries = Vec::new();
-    if let Some(database) = mysql_connection_database(url) {
-        queries.push(format!("USE {}", quote_identifier(&database)));
+    if let Some(database) = database.as_deref() {
+        queries.push(format!("USE {}", quote_identifier(database)));
+    }
+    if let Some(time_zone) = mysql_connection_time_zone(url) {
+        queries.push(format!("SET time_zone = {}", quote_value(&time_zone)));
     }
     queries.push(format!("SET NAMES {charset}"));
+    // StarRocks/Doris expose external storage (Paimon, Hive, ...) through a
+    // catalog. `SET catalog` must run *before* `USE <database>` (the database
+    // lives in the external catalog and is unknown to the default one).
+    // mysql_async drains the setup list back-to-front (Vec::pop), so push it
+    // last to make it execute first. The handshake does not send the database
+    // as schema (see `mysql_async_url`, which strips the path when a catalog is
+    // configured), so the connection establishes in the default catalog and
+    // this setup query is what switches it. The pool re-runs these queries
+    // after every connection reset, so the catalog stays current.
+    if let Some(catalog) = catalog.as_deref() {
+        queries.push(format!("SET catalog = {}", quote_identifier(catalog)));
+    }
     queries
 }
 
@@ -525,8 +637,126 @@ fn mysql_connection_database(url: &str) -> Option<String> {
     percent_decode_str(database).decode_utf8().ok().map(|value| value.into_owned())
 }
 
+/// Extracts an opt-in `catalog=<name>` URL parameter. dbx strips it from the
+/// URL before handing it to mysql_async (see `is_dbx_handled_mysql_url_param`)
+/// and instead emits `SET catalog = <name>` during connection setup. This is
+/// how StarRocks/Doris connections reach an external catalog such as Paimon.
+fn mysql_connection_catalog(url: &str) -> Option<String> {
+    let (_, query) = url.split_once('?')?;
+    let query = query.split('#').next().unwrap_or(query);
+    query.split('&').find_map(|segment| {
+        let (key, value) = segment.split_once('=')?;
+        if !key.eq_ignore_ascii_case("catalog") {
+            return None;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        percent_decode_str(value).decode_utf8().ok().map(|value| value.into_owned())
+    })
+}
+
 fn is_safe_mysql_charset_name(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn mysql_connection_time_zone(url: &str) -> Option<String> {
+    let (_, query) = url.split_once('?')?;
+    let mut jdbc_time_zone: Option<String> = None;
+    let mut go_location: Option<String> = None;
+
+    for segment in query.split('&') {
+        let Some((raw_key, raw_value)) = segment.split_once('=') else {
+            continue;
+        };
+        let key = percent_decode_str(raw_key).decode_utf8_lossy();
+        let value = percent_decode_str(raw_value).decode_utf8_lossy().trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+
+        if key.eq_ignore_ascii_case("time_zone")
+            || key.eq_ignore_ascii_case("time-zone")
+            || key.eq_ignore_ascii_case("timezone")
+        {
+            if let Some(value) = normalize_mysql_time_zone_value(&value) {
+                return Some(value);
+            }
+        } else if key.eq_ignore_ascii_case("connectionTimeZone") || key.eq_ignore_ascii_case("serverTimezone") {
+            if jdbc_time_zone.is_none() {
+                jdbc_time_zone = normalize_mysql_time_zone_value(&value);
+            }
+        } else if key.eq_ignore_ascii_case("loc") && go_location.is_none() {
+            go_location = normalize_mysql_time_zone_value(&value);
+        }
+    }
+
+    jdbc_time_zone.or(go_location)
+}
+
+fn normalize_mysql_time_zone_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("local") {
+        return Some(local_mysql_time_zone_offset());
+    }
+    if value.eq_ignore_ascii_case("utc") || value.eq_ignore_ascii_case("z") {
+        return Some("+00:00".to_string());
+    }
+    if value.eq_ignore_ascii_case("system") {
+        return Some("SYSTEM".to_string());
+    }
+    if let Some(offset) = normalize_mysql_time_zone_offset(value) {
+        return Some(offset);
+    }
+    if let Some(offset_part) = value
+        .strip_prefix("GMT")
+        .or_else(|| value.strip_prefix("gmt"))
+        .or_else(|| value.strip_prefix("UTC"))
+        .or_else(|| value.strip_prefix("utc"))
+    {
+        if let Some(offset) = normalize_mysql_time_zone_offset(offset_part) {
+            return Some(offset);
+        }
+    }
+    is_safe_mysql_time_zone_name(value).then(|| value.to_string())
+}
+
+fn normalize_mysql_time_zone_offset(value: &str) -> Option<String> {
+    let value = value.trim();
+    let (sign, rest) = match value.as_bytes().first().copied()? {
+        b'+' => ('+', &value[1..]),
+        b'-' => ('-', &value[1..]),
+        _ => return None,
+    };
+    let (hours, minutes) =
+        if let Some((hours, minutes)) = rest.split_once(':') { (hours, minutes) } else { (rest, "0") };
+    if hours.is_empty() || hours.len() > 2 || minutes.is_empty() || minutes.len() > 2 {
+        return None;
+    }
+    let hours = hours.parse::<u8>().ok()?;
+    let minutes = minutes.parse::<u8>().ok()?;
+    if hours > 14 || minutes > 59 || (hours == 14 && minutes != 0) {
+        return None;
+    }
+    Some(format!("{sign}{hours:02}:{minutes:02}"))
+}
+
+fn local_mysql_time_zone_offset() -> String {
+    let seconds = chrono::Local::now().offset().local_minus_utc();
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let seconds = seconds.abs();
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    format!("{sign}{hours:02}:{minutes:02}")
+}
+
+fn is_safe_mysql_time_zone_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'+' | b':'))
 }
 
 async fn verify_pool_connection(pool: &MySqlPool, timeout: Duration) -> Result<(), String> {
@@ -549,7 +779,10 @@ fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
 fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     (lower.contains("1105") && lower.contains("hy000"))
+        || (lower.contains("1615") && lower.contains("re-prepared"))
         || lower.contains("com_stmt_prepare")
+        || lower.contains("can't parse")
+        || lower.contains("buf doesn't have enough data")
         || lower.contains("prepared statement protocol")
         || lower.contains("this command is not supported in the prepared statement protocol yet")
 }
@@ -651,6 +884,38 @@ fn is_jdbc_param(key: &str) -> bool {
     )
 }
 
+fn is_dbx_handled_mysql_url_param(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "charset"
+            | "catalog"
+            | "time_zone"
+            | "time-zone"
+            | "timezone"
+            | "connect_timeout"
+            | "connecttimeout"
+            | "parsetime"
+            | "loc"
+            | "connectiontimezone"
+            | "servertimezone"
+            | "forceconnectiontimezonetosession"
+    )
+}
+
+/// Strips the database path from a `mysql://[user[:pass]@]host[:port][/path]`
+/// URL, returning only the scheme and authority. Used so mysql_async does not
+/// send the database as the schema during the MySQL handshake (StarRocks would
+/// reject an external-catalog database before `SET catalog` runs in setup).
+fn strip_mysql_url_path(base: &str) -> &str {
+    let Some(rest) = base.strip_prefix("mysql://") else {
+        return base;
+    };
+    match rest.find('/') {
+        Some(idx) => &base[.."mysql://".len() + idx],
+        None => base,
+    }
+}
+
 fn mysql_async_url(url: &str) -> Cow<'_, str> {
     let Some((base, query)) = url.split_once('?') else {
         return Cow::Borrowed(url);
@@ -659,15 +924,10 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
     let original_count = query.split('&').filter(|segment| !segment.trim().is_empty()).count();
     let mut filtered: Vec<String> = Vec::new();
     let mut changed = false;
+    let mut has_catalog = false;
     for segment in query.split('&') {
         let segment = segment.trim();
-        if segment.is_empty()
-            || segment.starts_with("charset=")
-            || segment.starts_with("time_zone=")
-            || segment.starts_with("time-zone=")
-            || segment.to_ascii_lowercase().starts_with("connect_timeout=")
-            || segment.to_ascii_lowercase().starts_with("connecttimeout=")
-        {
+        if segment.is_empty() {
             changed = true;
             continue;
         }
@@ -676,6 +936,13 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
             filtered.push(segment.to_string());
             continue;
         };
+        if key.eq_ignore_ascii_case("catalog") {
+            has_catalog = true;
+        }
+        if is_dbx_handled_mysql_url_param(key) {
+            changed = true;
+            continue;
+        }
         if key.eq_ignore_ascii_case("ssl-mode") || key.eq_ignore_ascii_case("sslmode") {
             changed = true;
             match value.to_ascii_lowercase().replace('-', "_").as_str() {
@@ -701,7 +968,12 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
         filtered.push(segment.to_string());
     }
 
-    if !changed && filtered.len() == original_count {
+    // When a catalog is configured, the database in the URL path must not be
+    // sent as the schema during the MySQL handshake. Strip the path so mysql_async
+    // connects without a default schema; the database is selected via setup queries.
+    let base = if has_catalog { strip_mysql_url_path(base) } else { base };
+
+    if !changed && filtered.len() == original_count && !has_catalog {
         Cow::Borrowed(url)
     } else if filtered.is_empty() {
         Cow::Owned(base.to_string())
@@ -711,8 +983,16 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
 }
 
 pub async fn connect_bare(url: &str, fallback_timeout: Duration) -> Result<MySqlPool, String> {
+    connect_bare_with_pool_limit(url, fallback_timeout, 3).await
+}
+
+pub async fn connect_bare_with_pool_limit(
+    url: &str,
+    fallback_timeout: Duration,
+    max_connections: usize,
+) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool = create_pool(url, None)?;
+    let pool = create_pool(url, None, max_connections)?;
     verify_pool_connection(&pool, timeout).await.map(|_| pool)
 }
 
@@ -765,10 +1045,18 @@ fn database_infos_from_names(
 }
 
 pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
-    let sql = format!(
-        "SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = {} ORDER BY TABLE_NAME",
-        quote_value(database),
-    );
+    list_tables_filtered(pool, database, None, None, None, None).await
+}
+
+pub async fn list_tables_filtered(
+    pool: &MySqlPool,
+    database: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+) -> Result<Vec<TableInfo>, String> {
+    let sql = list_tables_sql(database, filter, limit, offset, object_types);
     let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
     let result = match conn.query_iter(&sql).await {
         Ok(result) => result,
@@ -776,7 +1064,9 @@ pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableIn
             log::debug!(
                 "Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES failed: {err}"
             );
-            return list_tables_show(pool, database).await;
+            return list_tables_show(pool, database)
+                .await
+                .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types));
         }
     };
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -788,19 +1078,346 @@ pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableIn
             (!name.is_empty()).then_some(TableInfo {
                 name,
                 table_type: get_str_by_name(row, "TABLE_TYPE"),
-                comment: get_opt_str(row, "TABLE_COMMENT").filter(|s| !s.is_empty()),
+                comment: get_opt_str(row, "TABLE_COMMENT")
+                    .map(|s| fix_potential_double_encoding(&s))
+                    .filter(|s| !s.is_empty()),
                 parent_schema: None,
                 parent_name: None,
             })
         })
         .collect();
 
-    if tables.is_empty() {
+    if tables.is_empty() && should_fallback_empty_list_tables(filter, limit, offset, object_types) {
         log::debug!("Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables");
         return list_tables_show(pool, database).await;
     }
 
     Ok(tables)
+}
+
+fn should_fallback_empty_list_tables(
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+) -> bool {
+    let has_filter = filter.is_some_and(|filter| !filter.trim().is_empty());
+    let has_object_types = object_types.is_some_and(|object_types| !object_types.is_empty());
+    !has_filter && limit.is_none() && offset.unwrap_or(0) == 0 && !has_object_types
+}
+
+fn filter_list_tables_fallback(
+    tables: Vec<TableInfo>,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+) -> Vec<TableInfo> {
+    let filter = filter.unwrap_or("").trim().to_ascii_lowercase();
+    let normalized_object_types: Vec<String> = object_types
+        .unwrap_or(&[])
+        .iter()
+        .map(|object_type| object_type.to_ascii_uppercase().replace(' ', "_"))
+        .collect();
+    let wants_table =
+        normalized_object_types.is_empty() || normalized_object_types.iter().any(|object_type| object_type == "TABLE");
+    let wants_view =
+        normalized_object_types.is_empty() || normalized_object_types.iter().any(|object_type| object_type == "VIEW");
+
+    tables
+        .into_iter()
+        .filter(|table| filter.is_empty() || table.name.to_ascii_lowercase().contains(&filter))
+        .filter(|table| if table.table_type.eq_ignore_ascii_case("VIEW") { wants_view } else { wants_table })
+        .skip(offset.unwrap_or(0))
+        .take(limit.unwrap_or(usize::MAX))
+        .collect()
+}
+
+fn list_tables_sql(
+    database: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+) -> String {
+    let mut sql = format!(
+        "SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = {}",
+        quote_value(database),
+    );
+    if let Some(object_types) = object_types.filter(|object_types| !object_types.is_empty()) {
+        let wants_table = object_types
+            .iter()
+            .map(|object_type| object_type.to_ascii_uppercase().replace(' ', "_"))
+            .any(|object_type| object_type == "TABLE");
+        let wants_view = object_types
+            .iter()
+            .map(|object_type| object_type.to_ascii_uppercase().replace(' ', "_"))
+            .any(|object_type| object_type == "VIEW");
+        match (wants_table, wants_view) {
+            (true, false) => sql.push_str(" AND TABLE_TYPE <> 'VIEW'"),
+            (false, true) => sql.push_str(" AND TABLE_TYPE = 'VIEW'"),
+            (false, false) => sql.push_str(" AND 1 = 0"),
+            (true, true) => {}
+        }
+    }
+    if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
+        let escaped = filter.to_ascii_lowercase().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let pattern = format!("%{}%", escaped);
+        sql.push_str(&format!(" AND LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\'", quote_value(&pattern)));
+    }
+    sql.push_str(" ORDER BY TABLE_NAME");
+    if let Some(limit) = limit {
+        sql.push_str(&format!(" LIMIT {}", limit));
+    }
+    if let Some(offset) = offset.filter(|offset| *offset > 0) {
+        sql.push_str(&format!(" OFFSET {}", offset));
+    }
+    sql
+}
+
+pub async fn completion_assistant_search(
+    pool: &MySqlPool,
+    request: &CompletionAssistantRequest,
+) -> Result<CompletionAssistantResponse, String> {
+    let database = request.schema.as_deref().filter(|schema| !schema.trim().is_empty()).unwrap_or(&request.database);
+    let limit = request.max_results.unwrap_or(100).clamp(1, 1000);
+    let kinds = if request.object_kinds.is_empty() {
+        vec![CompletionAssistantObjectKind::Table, CompletionAssistantObjectKind::View]
+    } else {
+        request.object_kinds.clone()
+    };
+    let pattern = mysql_completion_like_pattern(&request.mask, request.match_mode.as_ref());
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let mut candidates = Vec::new();
+
+    if kinds
+        .iter()
+        .any(|kind| matches!(kind, CompletionAssistantObjectKind::Database | CompletionAssistantObjectKind::Schema))
+    {
+        let sql = mysql_completion_schemas_sql(&pattern, limit.saturating_sub(candidates.len()));
+        let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        for row in rows {
+            let schema_name = get_str_by_name(&row, "schema_name");
+            candidates.push(CompletionAssistantCandidate {
+                name: schema_name.clone(),
+                kind: CompletionAssistantCandidateKind::Schema,
+                database: Some(schema_name.clone()),
+                schema: Some(schema_name),
+                parent_schema: None,
+                parent_name: None,
+                comment: None,
+                data_type: None,
+            });
+        }
+    }
+
+    if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_table_like) {
+        let sql = mysql_completion_tables_sql(database, &pattern, &kinds, limit.saturating_sub(candidates.len()));
+        let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        for row in rows {
+            let table_type = get_str_by_name(&row, "table_type");
+            candidates.push(CompletionAssistantCandidate {
+                name: get_str_by_name(&row, "object_name"),
+                kind: if table_type.eq_ignore_ascii_case("VIEW") {
+                    CompletionAssistantCandidateKind::View
+                } else {
+                    CompletionAssistantCandidateKind::Table
+                },
+                database: Some(database.to_string()),
+                schema: Some(database.to_string()),
+                parent_schema: None,
+                parent_name: None,
+                comment: get_opt_str(&row, "object_comment")
+                    .map(|s| fix_potential_double_encoding(&s))
+                    .filter(|s| !s.is_empty()),
+                data_type: None,
+            });
+        }
+    }
+
+    if candidates.len() < limit && kinds.iter().any(CompletionAssistantObjectKind::is_routine_like) {
+        let sql = mysql_completion_routines_sql(database, &pattern, &kinds, limit.saturating_sub(candidates.len()));
+        let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        for row in rows {
+            let routine_type = get_str_by_name(&row, "routine_type");
+            candidates.push(CompletionAssistantCandidate {
+                name: get_str_by_name(&row, "object_name"),
+                kind: if routine_type.eq_ignore_ascii_case("PROCEDURE") {
+                    CompletionAssistantCandidateKind::Procedure
+                } else {
+                    CompletionAssistantCandidateKind::Function
+                },
+                database: Some(database.to_string()),
+                schema: Some(database.to_string()),
+                parent_schema: None,
+                parent_name: None,
+                comment: get_opt_str(&row, "object_comment")
+                    .map(|s| fix_potential_double_encoding(&s))
+                    .filter(|s| !s.is_empty()),
+                data_type: get_opt_str(&row, "data_type"),
+            });
+        }
+    }
+
+    if candidates.len() < limit && kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Column)) {
+        if let Some(table) = request.parent_name.as_deref().filter(|table| !table.trim().is_empty()) {
+            let sql = mysql_completion_columns_sql(database, table, &pattern, limit.saturating_sub(candidates.len()));
+            let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+            let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+            for row in rows {
+                candidates.push(CompletionAssistantCandidate {
+                    name: get_str_by_name(&row, "object_name"),
+                    kind: CompletionAssistantCandidateKind::Column,
+                    database: Some(database.to_string()),
+                    schema: Some(database.to_string()),
+                    parent_schema: Some(database.to_string()),
+                    parent_name: Some(table.to_string()),
+                    comment: get_opt_str(&row, "object_comment")
+                        .map(|s| fix_potential_double_encoding(&s))
+                        .filter(|s| !s.is_empty()),
+                    data_type: Some(get_str_by_name(&row, "data_type")),
+                });
+            }
+        }
+    }
+
+    Ok(CompletionAssistantResponse { incomplete: candidates.len() >= limit, candidates, fallback_used: false })
+}
+
+fn mysql_completion_schemas_sql(pattern: &str, limit: usize) -> String {
+    format!(
+        "SELECT SCHEMA_NAME AS schema_name \
+         FROM information_schema.SCHEMATA \
+         WHERE SCHEMA_NAME LIKE {} ESCAPE '\\\\' \
+         ORDER BY SCHEMA_NAME LIMIT {}",
+        quote_value(pattern),
+        limit,
+    )
+}
+
+fn mysql_completion_tables_sql(
+    database: &str,
+    pattern: &str,
+    kinds: &[CompletionAssistantObjectKind],
+    limit: usize,
+) -> String {
+    let table_types = mysql_completion_table_types(kinds);
+    format!(
+        "SELECT TABLE_NAME AS object_name, TABLE_TYPE AS table_type, TABLE_COMMENT AS object_comment \
+         FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = {db} AND TABLE_NAME LIKE {pattern} ESCAPE '\\\\' AND TABLE_TYPE IN ({table_types}) \
+         ORDER BY TABLE_NAME LIMIT {limit}",
+        db = quote_value(database),
+        pattern = quote_value(pattern),
+        table_types = table_types,
+        limit = limit,
+    )
+}
+
+fn mysql_completion_routines_sql(
+    database: &str,
+    pattern: &str,
+    kinds: &[CompletionAssistantObjectKind],
+    limit: usize,
+) -> String {
+    let routine_types = mysql_completion_routine_types(kinds);
+    format!(
+        "SELECT ROUTINE_NAME AS object_name, ROUTINE_TYPE AS routine_type, ROUTINE_COMMENT AS object_comment, DATA_TYPE AS data_type \
+         FROM information_schema.ROUTINES \
+         WHERE ROUTINE_SCHEMA = {db} AND ROUTINE_NAME LIKE {pattern} ESCAPE '\\\\' AND ROUTINE_TYPE IN ({routine_types}) \
+         ORDER BY ROUTINE_NAME LIMIT {limit}",
+        db = quote_value(database),
+        pattern = quote_value(pattern),
+        routine_types = routine_types,
+        limit = limit,
+    )
+}
+
+fn mysql_completion_columns_sql(database: &str, table: &str, pattern: &str, limit: usize) -> String {
+    format!(
+        "SELECT COLUMN_NAME AS object_name, COLUMN_TYPE AS data_type, COLUMN_COMMENT AS object_comment \
+         FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = {db} AND TABLE_NAME = {table} AND COLUMN_NAME LIKE {pattern} ESCAPE '\\\\' \
+         ORDER BY ORDINAL_POSITION LIMIT {limit}",
+        db = quote_value(database),
+        table = quote_value(table),
+        pattern = quote_value(pattern),
+        limit = limit,
+    )
+}
+
+fn mysql_completion_table_types(kinds: &[CompletionAssistantObjectKind]) -> String {
+    let mut types = Vec::new();
+    if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::Table)) {
+        types.push("'BASE TABLE'");
+        types.push("'SYSTEM VERSIONED'");
+    }
+    if kinds.iter().any(|kind| matches!(kind, CompletionAssistantObjectKind::View)) {
+        types.push("'VIEW'");
+    }
+    if types.is_empty() {
+        "'BASE TABLE','VIEW'".to_string()
+    } else {
+        types.join(",")
+    }
+}
+
+fn mysql_completion_routine_types(kinds: &[CompletionAssistantObjectKind]) -> String {
+    let mut types = Vec::new();
+    if kinds
+        .iter()
+        .any(|kind| matches!(kind, CompletionAssistantObjectKind::Procedure | CompletionAssistantObjectKind::Routine))
+    {
+        types.push("'PROCEDURE'");
+    }
+    if kinds
+        .iter()
+        .any(|kind| matches!(kind, CompletionAssistantObjectKind::Function | CompletionAssistantObjectKind::Routine))
+    {
+        types.push("'FUNCTION'");
+    }
+    if types.is_empty() {
+        "'PROCEDURE','FUNCTION'".to_string()
+    } else {
+        types.join(",")
+    }
+}
+
+fn mysql_completion_like_pattern(value: &str, mode: Option<&CompletionAssistantMatchMode>) -> String {
+    if value.trim().is_empty() || value == "%" {
+        return "%".to_string();
+    }
+    let escaped = value.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    match mode.unwrap_or(&CompletionAssistantMatchMode::Prefix) {
+        CompletionAssistantMatchMode::Prefix => format!("{escaped}%"),
+        CompletionAssistantMatchMode::Contains => format!("%{escaped}%"),
+    }
+}
+
+fn table_comment_sql(database: &str, table: &str) -> String {
+    format!(
+        "SELECT TABLE_COMMENT \
+         FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} AND TABLE_TYPE <> 'VIEW' \
+         LIMIT 1",
+        quote_value(database),
+        quote_value(table),
+    )
+}
+
+pub async fn get_table_comment(pool: &MySqlPool, database: &str, table: &str) -> Result<Option<String>, String> {
+    let sql = table_comment_sql(database, table);
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .first()
+        .and_then(|row| get_opt_str(row, "TABLE_COMMENT"))
+        .map(|s| fix_potential_double_encoding(&s))
+        .filter(|s| !s.is_empty()))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -825,7 +1442,9 @@ async fn list_table_status_show(pool: &MySqlPool, database: &str) -> Result<Hash
             (
                 get_str_by_name(row, "Name"),
                 TableStatusMeta {
-                    comment: get_opt_metadata_string(row, "Comment").filter(|s| !s.is_empty()),
+                    comment: get_opt_metadata_string(row, "Comment")
+                        .map(|s| fix_potential_double_encoding(&s))
+                        .filter(|s| !s.is_empty()),
                     created_at: get_opt_metadata_string(row, "Create_time"),
                     updated_at: get_opt_metadata_string(row, "Update_time"),
                 },
@@ -948,7 +1567,9 @@ fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
         name: get_str_by_name(row, "object_name"),
         object_type: get_str_by_name(row, "object_type"),
         schema: Some(database.to_string()),
-        comment: get_opt_str(row, "object_comment").filter(|s| !s.is_empty()),
+        comment: get_opt_str(row, "object_comment")
+            .map(|s| fix_potential_double_encoding(&s))
+            .filter(|s| !s.is_empty()),
         created_at: get_opt_str(row, "created_at"),
         updated_at: get_opt_str(row, "updated_at"),
         parent_schema: get_opt_str(row, "parent_schema"),
@@ -983,6 +1604,31 @@ pub async fn list_objects(pool: &MySqlPool, database: &str) -> Result<Vec<Object
     }
 
     Ok(objects)
+}
+
+pub async fn list_object_statistics(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectStatistics>, String> {
+    let sql = format!(
+        "SELECT TABLE_NAME, TABLE_ROWS, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES \
+         FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = {} AND TABLE_TYPE <> 'VIEW' \
+         ORDER BY TABLE_NAME",
+        quote_value(database),
+    );
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
+            (!name.is_empty()).then_some(ObjectStatistics {
+                name,
+                schema: Some(database.to_string()),
+                estimated_rows: get_opt_i64(row, "TABLE_ROWS"),
+                total_bytes: get_opt_i64(row, "TOTAL_BYTES"),
+            })
+        })
+        .collect())
 }
 
 pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
@@ -1049,15 +1695,9 @@ pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result
 
 fn columns_sql(database: &str, table: &str) -> String {
     format!(
-        "SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, c.COLUMN_COMMENT, \
-         c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, \
-         CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS is_pk \
+        "SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
+         c.COLUMN_COMMENT, c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH \
          FROM information_schema.COLUMNS c \
-         LEFT JOIN information_schema.KEY_COLUMN_USAGE pk \
-           ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA \
-           AND pk.TABLE_NAME = c.TABLE_NAME \
-           AND pk.COLUMN_NAME = c.COLUMN_NAME \
-           AND pk.CONSTRAINT_NAME = 'PRIMARY' \
          WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
          ORDER BY c.ORDINAL_POSITION",
         quote_value(database),
@@ -1065,9 +1705,73 @@ fn columns_sql(database: &str, table: &str) -> String {
     )
 }
 
+/// Attempt to reverse CP1252→UTF-8 double-encoding.
+///
+/// When Chinese text is written to MySQL through a connection with the wrong
+/// charset (e.g. latin1/CP1252), each byte of the correct UTF-8 representation
+/// is stored as a separate CP1252 character, then re-encoded as UTF-8 on read.
+///
+/// Example: "主键" → UTF-8 bytes [E4 B8 BB E9 94 AE]
+///   → each byte → CP1252 char → UTF-8 re-encoded → garbled text
+///   → reversal: map each char back to its CP1252 byte, decode as UTF-8
+fn fix_potential_double_encoding(s: &str) -> String {
+    // Map each character to its CP1252 byte value
+    let mut bytes = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        let byte = match c as u32 {
+            // Characters in CP1252 that differ from Latin-1 (0x80-0x9F range)
+            0x20AC => 0x80, // €
+            0x201A => 0x82, // ‚
+            0x0192 => 0x83, // ƒ
+            0x201E => 0x84, // „
+            0x2026 => 0x85, // …
+            0x2020 => 0x86, // †
+            0x2021 => 0x87, // ‡
+            0x02C6 => 0x88, // ˆ
+            0x2030 => 0x89, // ‰
+            0x0160 => 0x8A, // Š
+            0x2039 => 0x8B, // ‹
+            0x0152 => 0x8C, // Œ
+            0x017D => 0x8E, // Ž
+            0x2018 => 0x91, // '
+            0x2019 => 0x92, // '
+            0x201C => 0x93, // " left double quotation mark
+            0x201D => 0x94, // " right double quotation mark
+            0x2022 => 0x95, // •
+            0x2013 => 0x96, // –
+            0x2014 => 0x97, // —
+            0x02DC => 0x98, // ˜
+            0x2122 => 0x99, // ™
+            0x0161 => 0x9A, // š
+            0x203A => 0x9B, // ›
+            0x0153 => 0x9C, // œ
+            0x017E => 0x9E, // ž
+            0x0178 => 0x9F, // Ÿ
+            v if v <= 0xFF => v as u8,
+            _ => return s.to_string(), // contains non-Latin1 char, skip
+        };
+        bytes.push(byte);
+    }
+
+    // Try decoding the bytes as UTF-8
+    match String::from_utf8(bytes) {
+        Ok(decoded) => {
+            // Only use the decoded version if it actually contains
+            // multi-byte UTF-8 characters (CJK, etc. > U+00FF),
+            // confirming the reversal was successful
+            if decoded.chars().any(|c| c > '\u{00FF}') {
+                decoded
+            } else {
+                s.to_string()
+            }
+        }
+        Err(_) => s.to_string(),
+    }
+}
+
 pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let sql = columns_sql(database, table);
-    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let mut conn = get_conn_with_health_check(pool).await?;
     let result = match conn.query_iter(&sql).await {
         Ok(result) => result,
         Err(err) => {
@@ -1087,15 +1791,16 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
                 return None;
             }
             let column_key = get_str_by_name(row, "COLUMN_KEY");
-            let from_pk_join = row.get::<i32, &str>("is_pk").unwrap_or(0) == 1;
             Some(ColumnInfo {
-                is_primary_key: from_pk_join || column_key.eq_ignore_ascii_case("PRI"),
+                is_primary_key: column_key.eq_ignore_ascii_case("PRI"),
                 name,
                 data_type: get_str_by_name(row, "COLUMN_TYPE"),
                 is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
                 column_default: get_opt_str(row, "COLUMN_DEFAULT"),
                 extra: get_opt_str(row, "EXTRA"),
-                comment: get_opt_str(row, "COLUMN_COMMENT").filter(|s| !s.is_empty()),
+                comment: get_opt_str(row, "COLUMN_COMMENT")
+                    .map(|s| fix_potential_double_encoding(&s))
+                    .filter(|s| !s.is_empty()),
                 numeric_precision: get_opt_i32(row, "NUMERIC_PRECISION"),
                 numeric_scale: get_opt_i32(row, "NUMERIC_SCALE"),
                 character_maximum_length: get_opt_i32(row, "CHARACTER_MAXIMUM_LENGTH"),
@@ -1115,7 +1820,7 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
 
 pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let sql = show_columns_sql(database, table, true);
-    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let mut conn = get_conn_with_health_check(pool).await?;
     let rows: Vec<mysql_async::Row> = match conn.query_iter(&sql).await {
         Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
         Err(_) => {
@@ -1139,7 +1844,9 @@ pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> 
                 column_default: get_opt_str(row, "Default"),
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
                 extra: get_opt_str(row, "Extra"),
-                comment: get_opt_str(row, "Comment").filter(|s| !s.is_empty()),
+                comment: get_opt_str(row, "Comment")
+                    .map(|s| fix_potential_double_encoding(&s))
+                    .filter(|s| !s.is_empty()),
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
@@ -1161,27 +1868,178 @@ fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(crate::query::MAX_ROWS).max(1)
 }
 
+fn should_collect_text_result_set(sql: &str, row_limit: usize, max_rows: Option<usize>) -> bool {
+    max_rows.is_some_and(|_| mysql_top_level_limit(sql).is_some_and(|limit| limit <= row_limit))
+}
+
+fn mysql_top_level_limit(sql: &str) -> Option<usize> {
+    let sql = sql.trim().trim_end_matches(';');
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        i = skip_sql_whitespace_and_comments(bytes, i);
+        if i >= bytes.len() {
+            break;
+        }
+
+        let ch = bytes[i];
+        if matches!(ch, b'\'' | b'"' | b'`') {
+            i = skip_mysql_quoted(sql, i, ch);
+            continue;
+        }
+        if ch == b'(' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if ch == b')' {
+            depth = depth.saturating_sub(1);
+            i += 1;
+            continue;
+        }
+        if depth == 0 && mysql_keyword_at(sql, i, "LIMIT") {
+            return parse_mysql_limit_value(sql, i + "LIMIT".len());
+        }
+        // Move to next byte, but ensure we stay on a UTF-8 boundary
+        i += 1;
+        while i < bytes.len() && !sql.is_char_boundary(i) {
+            i += 1;
+        }
+    }
+
+    None
+}
+
+fn parse_mysql_limit_value(sql: &str, start: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut i = skip_sql_whitespace_and_comments(bytes, start);
+    let first = parse_usize_token(sql, &mut i)?;
+    i = skip_sql_whitespace_and_comments(bytes, i);
+
+    if i < bytes.len() && bytes[i] == b',' {
+        i = skip_sql_whitespace_and_comments(bytes, i + 1);
+        return parse_usize_token(sql, &mut i);
+    }
+
+    Some(first)
+}
+
+fn parse_usize_token(sql: &str, i: &mut usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let start = *i;
+    while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+        *i += 1;
+    }
+    if *i == start {
+        return None;
+    }
+    // Ensure the slice is valid UTF-8 before parsing
+    std::str::from_utf8(&bytes[start..*i]).ok()?.parse().ok()
+}
+
+fn mysql_keyword_at(sql: &str, i: usize, keyword: &str) -> bool {
+    let end = i + keyword.len();
+    if end > sql.len() {
+        return false;
+    }
+    // Ensure indices are on UTF-8 boundaries before slicing
+    if !sql.is_char_boundary(i) || !sql.is_char_boundary(end) {
+        return false;
+    }
+    sql[i..end].eq_ignore_ascii_case(keyword)
+        && (i == 0 || !is_mysql_identifier_byte(sql.as_bytes()[i - 1]))
+        && (end == sql.len() || !is_mysql_identifier_byte(sql.as_bytes()[end]))
+}
+
+fn is_mysql_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+}
+
+fn skip_mysql_quoted(sql: &str, start: usize, quote: u8) -> usize {
+    let bytes = sql.as_bytes();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == quote {
+            if i + 1 < bytes.len() && bytes[i + 1] == quote {
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        if quote == b'\'' && bytes[i] == b'\\' {
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
 /// Get a connection from the pool with a health check. If the connection is dead
 /// (e.g. after app was backgrounded), it tries again with a fresh connection.
 pub async fn get_conn_with_health_check(pool: &MySqlPool) -> Result<mysql_async::Conn, String> {
-    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
-    match conn.ping().await {
+    let timeout = crate::db::connection_timeout();
+    let mut conn = get_conn_with_timeout(pool, timeout).await?;
+    match ping_conn_with_timeout(&mut conn, timeout).await {
         Ok(()) => Ok(conn),
-        Err(_) => {
-            let _ = conn.disconnect().await;
-            pool.get_conn().await.map_err(|e| e.to_string())
+        _ => {
+            let _ = tokio::time::timeout(timeout, conn.disconnect()).await;
+            let mut conn = get_conn_with_timeout(pool, timeout).await?;
+            ping_conn_with_timeout(&mut conn, timeout).await?;
+            Ok(conn)
         }
     }
+}
+
+async fn get_conn_with_timeout(pool: &MySqlPool, timeout: Duration) -> Result<mysql_async::Conn, String> {
+    tokio::time::timeout(timeout, pool.get_conn())
+        .await
+        .map_err(|_| "MySQL get connection timed out".to_string())?
+        .map_err(|e| e.to_string())
+}
+
+async fn ping_conn_with_timeout(conn: &mut mysql_async::Conn, timeout: Duration) -> Result<(), String> {
+    tokio::time::timeout(timeout, conn.ping())
+        .await
+        .map_err(|_| "MySQL ping timed out".to_string())?
+        .map_err(|e| e.to_string())
 }
 
 async fn execute_result_set_with_text_protocol_on_conn(
     conn: &mut mysql_async::Conn,
     sql: &str,
     row_limit: usize,
+    max_rows: Option<usize>,
     start: Instant,
 ) -> Result<QueryResult, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
+    let column_types: Vec<String> =
+        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+
+    if should_collect_text_result_set(sql, row_limit, max_rows) {
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        let truncated = rows.len() > row_limit;
+        let result_rows = rows
+            .iter()
+            .take(row_limit)
+            .map(|row| (0..row.len()).map(|i| mysql_value_to_json(row, i)).collect())
+            .collect();
+
+        return Ok(QueryResult {
+            columns,
+            column_types,
+            column_sortables: vec![],
+            rows: result_rows,
+            affected_rows: 0,
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated,
+            session_id: None,
+            has_more: false,
+        });
+    }
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut stream = result
@@ -1206,6 +2064,8 @@ async fn execute_result_set_with_text_protocol_on_conn(
 
     Ok(QueryResult {
         columns,
+        column_types,
+        column_sortables: vec![],
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1223,6 +2083,8 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 ) -> Result<QueryResult, String> {
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
+    let column_types: Vec<String> =
+        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut stream = result
@@ -1247,6 +2109,8 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 
     Ok(QueryResult {
         columns,
+        column_types,
+        column_sortables: vec![],
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1271,6 +2135,103 @@ pub async fn execute_query_with_max_rows(
     execute_query_on_conn_with_max_rows(&mut conn, sql, bare, max_rows, dialect).await
 }
 
+pub async fn stream_query_rows(
+    pool: &MySqlPool,
+    sql: &str,
+    bare: bool,
+    max_rows: Option<usize>,
+    dialect: MySqlQueryDialect,
+    cancelled: &AtomicBool,
+    mut on_row: impl FnMut(&[serde_json::Value]) -> Result<(), String>,
+) -> Result<u64, String> {
+    let mut conn = get_conn_with_health_check(pool).await?;
+    let row_limit = max_rows.unwrap_or(usize::MAX);
+
+    if bare || prefers_text_protocol_query(sql, dialect) {
+        stream_query_rows_text(&mut conn, sql, row_limit, cancelled, &mut on_row).await
+    } else {
+        match stream_query_rows_prepared(&mut conn, sql, row_limit, cancelled, &mut on_row).await {
+            Ok(rows) => Ok(rows),
+            Err(err) if mysql_error_should_retry_with_text_protocol(&err) => {
+                stream_query_rows_text(&mut conn, sql, row_limit, cancelled, &mut on_row).await
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+async fn stream_query_rows_text(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    row_limit: usize,
+    cancelled: &AtomicBool,
+    on_row: &mut impl FnMut(&[serde_json::Value]) -> Result<(), String>,
+) -> Result<u64, String> {
+    let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+    let mut stream = result
+        .stream::<mysql_async::Row>()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Empty result set stream".to_string())?;
+    let mut rows_exported = 0_u64;
+
+    while let Some(row) = stream.next().await {
+        if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::query::canceled_error());
+        }
+        if rows_exported as usize >= row_limit {
+            break;
+        }
+        let row = row.map_err(|e| e.to_string())?;
+        let values: Vec<serde_json::Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
+        on_row(&values)?;
+        rows_exported += 1;
+    }
+
+    Ok(rows_exported)
+}
+
+async fn stream_query_rows_prepared(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    row_limit: usize,
+    cancelled: &AtomicBool,
+    on_row: &mut impl FnMut(&[serde_json::Value]) -> Result<(), String>,
+) -> Result<u64, String> {
+    let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
+    let mut stream = result
+        .stream::<mysql_async::Row>()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Empty result set stream".to_string())?;
+    let mut rows_exported = 0_u64;
+
+    while let Some(row) = stream.next().await {
+        if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::query::canceled_error());
+        }
+        if rows_exported as usize >= row_limit {
+            break;
+        }
+        let row = row.map_err(|e| e.to_string())?;
+        let values: Vec<serde_json::Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
+        on_row(&values)?;
+        rows_exported += 1;
+    }
+
+    Ok(rows_exported)
+}
+
+pub async fn kill_query(pool: &MySqlPool, connection_id: u32) -> Result<(), String> {
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    conn.query_drop(format!("KILL QUERY {connection_id}")).await.map_err(|e| e.to_string())
+}
+
+pub async fn kill_query_with_opts(opts: mysql_async::Opts, connection_id: u32) -> Result<(), String> {
+    let mut conn = mysql_async::Conn::new(opts).await.map_err(|e| e.to_string())?;
+    conn.query_drop(format!("KILL QUERY {connection_id}")).await.map_err(|e| e.to_string())
+}
+
 pub async fn execute_query_on_conn_with_max_rows(
     conn: &mut mysql_async::Conn,
     sql: &str,
@@ -1282,13 +2243,13 @@ pub async fn execute_query_on_conn_with_max_rows(
     let row_limit = query_result_row_limit(max_rows);
 
     if is_result_set_query(sql, dialect) {
-        if bare || requires_text_protocol_query(sql, dialect) {
-            execute_result_set_with_text_protocol_on_conn(conn, sql, row_limit, start).await
+        if bare || prefers_text_protocol_query(sql, dialect) {
+            execute_result_set_with_text_protocol_on_conn(conn, sql, row_limit, max_rows, start).await
         } else {
             match execute_result_set_with_prepared_protocol_on_conn(conn, sql, row_limit, start).await {
                 Ok(result) => Ok(result),
                 Err(err) if mysql_error_should_retry_with_text_protocol(&err) => {
-                    execute_result_set_with_text_protocol_on_conn(conn, sql, row_limit, start).await
+                    execute_result_set_with_text_protocol_on_conn(conn, sql, row_limit, max_rows, start).await
                 }
                 Err(err) => Err(err),
             }
@@ -1309,6 +2270,8 @@ pub async fn execute_query_on_conn_with_max_rows(
 
         Ok(QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
@@ -1317,6 +2280,12 @@ pub async fn execute_query_on_conn_with_max_rows(
             has_more: false,
         })
     }
+}
+
+fn prefers_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
+    // User-entered result-set queries are not parameterized in DBX. Text protocol
+    // avoids binary result decoding bugs in MySQL-compatible servers and proxies.
+    is_result_set_query(sql, dialect) || requires_text_protocol_query(sql, dialect)
 }
 
 fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
@@ -1350,7 +2319,7 @@ fn requires_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
 
 fn is_admin_show_query(sql: &str) -> bool {
     let tokens = leading_sql_word_tokens(sql, 2);
-    tokens.get(0).is_some_and(|token| token == "admin") && tokens.get(1).is_some_and(|token| token == "show")
+    tokens.first().is_some_and(|token| token == "admin") && tokens.get(1).is_some_and(|token| token == "show")
 }
 
 fn leading_sql_word_tokens(sql: &str, limit: usize) -> Vec<String> {
@@ -1445,8 +2414,13 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
 pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let sql = format!(
         "SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, \
-         kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME \
+         kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME, \
+         rc.UPDATE_RULE, rc.DELETE_RULE \
          FROM information_schema.KEY_COLUMN_USAGE kcu \
+         LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
+           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA \
+          AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME \
+          AND rc.TABLE_NAME = kcu.TABLE_NAME \
          WHERE kcu.TABLE_SCHEMA = {} AND kcu.TABLE_NAME = {} \
          AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
          ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
@@ -1465,13 +2439,15 @@ pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) ->
             ref_schema: Some(get_str_by_name(row, "REFERENCED_TABLE_SCHEMA")),
             ref_table: get_str_by_name(row, "REFERENCED_TABLE_NAME"),
             ref_column: get_str_by_name(row, "REFERENCED_COLUMN_NAME"),
+            on_update: Some(get_str_by_name(row, "UPDATE_RULE")).filter(|value| !value.is_empty()),
+            on_delete: Some(get_str_by_name(row, "DELETE_RULE")).filter(|value| !value.is_empty()),
         })
         .collect())
 }
 
 pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
     let sql = format!(
-        "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING \
+        "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT \
          FROM information_schema.TRIGGERS \
          WHERE TRIGGER_SCHEMA = {} AND EVENT_OBJECT_TABLE = {} \
          ORDER BY TRIGGER_NAME",
@@ -1488,6 +2464,7 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
             name: get_str_by_name(row, "TRIGGER_NAME"),
             event: get_str_by_name(row, "EVENT_MANIPULATION"),
             timing: get_str_by_name(row, "ACTION_TIMING"),
+            statement: Some(get_str_by_name(row, "ACTION_STATEMENT")).filter(|value| !value.is_empty()),
         })
         .collect())
 }
@@ -1496,6 +2473,21 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 mod tests {
     use super::*;
     use mysql_async::consts::ColumnFlags;
+
+    #[test]
+    fn mysql_column_type_names_map_to_friendly_names() {
+        use mysql_async::consts::ColumnType::*;
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_TINY), "tinyint");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONG), "int");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONGLONG), "bigint");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_NEWDECIMAL), "decimal");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VARCHAR), "varchar");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VAR_STRING), "varchar");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_STRING), "char");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_DATETIME), "datetime");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_JSON), "json");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_BLOB), "blob");
+    }
 
     #[test]
     fn mysql_with_queries_are_treated_as_result_sets() {
@@ -1582,6 +2574,82 @@ mod tests {
     }
 
     #[test]
+    fn mysql_list_tables_sql_applies_filter_limit_and_offset() {
+        let sql = list_tables_sql("app", Some("user_%"), Some(101), Some(200), None);
+
+        assert!(sql.contains("FROM information_schema.TABLES"));
+        assert!(sql.contains("TABLE_SCHEMA = 'app'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%user\\\\_\\\\%%' ESCAPE '\\\\'"));
+        assert!(sql.contains("ORDER BY TABLE_NAME"));
+        assert!(sql.contains("LIMIT 101"));
+        assert!(sql.contains("OFFSET 200"));
+    }
+
+    #[test]
+    fn mysql_list_tables_sql_filters_table_type_before_pagination() {
+        let tables = vec!["TABLE".to_string()];
+        let table_sql = list_tables_sql("app", None, Some(1000), None, Some(&tables));
+        assert!(table_sql.contains("TABLE_TYPE <> 'VIEW'"));
+        assert!(table_sql.find("TABLE_TYPE <> 'VIEW'") < table_sql.find("ORDER BY TABLE_NAME"));
+        assert!(table_sql.find("ORDER BY TABLE_NAME") < table_sql.find("LIMIT 1000"));
+
+        let views = vec!["VIEW".to_string()];
+        let view_sql = list_tables_sql("app", None, Some(1000), None, Some(&views));
+        assert!(view_sql.contains("TABLE_TYPE = 'VIEW'"));
+    }
+
+    #[test]
+    fn mysql_empty_list_tables_fallback_only_for_unfiltered_query() {
+        assert!(should_fallback_empty_list_tables(None, None, None, None));
+        assert!(!should_fallback_empty_list_tables(Some("missing"), None, None, None));
+        assert!(!should_fallback_empty_list_tables(None, Some(1000), None, None));
+        assert!(!should_fallback_empty_list_tables(None, None, Some(1000), None));
+        assert!(!should_fallback_empty_list_tables(None, None, None, Some(&["VIEW".to_string()])));
+    }
+
+    #[test]
+    fn mysql_show_tables_fallback_applies_filter_type_limit_and_offset() {
+        let rows = vec![
+            TableInfo {
+                name: "audit_2024".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "audit_view".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "audit_2025".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        let filtered = filter_list_tables_fallback(rows, Some("audit"), Some(1), Some(1), Some(&["TABLE".to_string()]));
+
+        assert_eq!(filtered.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["audit_2025"]);
+    }
+
+    #[test]
+    fn mysql_table_comment_sql_targets_single_table() {
+        let sql = table_comment_sql("app", "users");
+
+        assert!(sql.contains("SELECT TABLE_COMMENT"));
+        assert!(sql.contains("TABLE_SCHEMA = 'app'"));
+        assert!(sql.contains("TABLE_NAME = 'users'"));
+        assert!(sql.contains("TABLE_TYPE <> 'VIEW'"));
+        assert!(sql.contains("LIMIT 1"));
+        assert!(!sql.contains("ORDER BY"));
+    }
+
+    #[test]
     fn mysql_database_infos_filter_blank_names_and_keep_catalogless_marker() {
         let regular = database_infos_from_names(vec!["".to_string(), " app ".to_string(), "mysql".to_string()], true);
         assert_eq!(regular.iter().map(|db| db.name.as_str()).collect::<Vec<_>>(), vec!["app", "mysql"]);
@@ -1626,11 +2694,43 @@ mod tests {
     }
 
     #[test]
-    fn mysql_columns_sql_joins_key_column_usage_for_primary_keys() {
+    fn mysql_completion_like_pattern_uses_prefix_by_default() {
+        assert_eq!(mysql_completion_like_pattern("Temp", Some(&CompletionAssistantMatchMode::Prefix)), "Temp%");
+        assert_eq!(mysql_completion_like_pattern("Temp", Some(&CompletionAssistantMatchMode::Contains)), "%Temp%");
+        assert_eq!(
+            mysql_completion_like_pattern("order_100%", Some(&CompletionAssistantMatchMode::Prefix)),
+            "order\\_100\\%%"
+        );
+    }
+
+    #[test]
+    fn mysql_completion_sql_filters_before_limit() {
+        let table_sql = mysql_completion_tables_sql(
+            "app",
+            "Temp%",
+            &[CompletionAssistantObjectKind::Table, CompletionAssistantObjectKind::View],
+            100,
+        );
+        let routine_sql =
+            mysql_completion_routines_sql("app", "%audit%", &[CompletionAssistantObjectKind::Routine], 50);
+        let column_sql = mysql_completion_columns_sql("app", "users", "id%", 25);
+
+        assert!(table_sql.contains("TABLE_NAME LIKE 'Temp%' ESCAPE '\\\\'"));
+        assert!(table_sql.contains("TABLE_TYPE IN ('BASE TABLE','SYSTEM VERSIONED','VIEW')"));
+        assert!(table_sql.contains("ORDER BY TABLE_NAME LIMIT 100"));
+        assert!(routine_sql.contains("ROUTINE_NAME LIKE '%audit%' ESCAPE '\\\\'"));
+        assert!(routine_sql.contains("ROUTINE_TYPE IN ('PROCEDURE','FUNCTION')"));
+        assert!(column_sql.contains("COLUMN_NAME LIKE 'id%' ESCAPE '\\\\'"));
+        assert!(column_sql.contains("ORDER BY ORDINAL_POSITION LIMIT 25"));
+    }
+
+    #[test]
+    fn mysql_columns_sql_uses_column_key_for_primary_keys_without_join() {
         let sql = columns_sql("app", "users");
 
-        assert!(sql.contains("LEFT JOIN information_schema.KEY_COLUMN_USAGE"));
-        assert!(sql.contains("CONSTRAINT_NAME = 'PRIMARY'"));
+        assert!(sql.contains("information_schema.COLUMNS"));
+        assert!(!sql.contains("KEY_COLUMN_USAGE"));
+        assert!(!sql.contains("CONSTRAINT_NAME = 'PRIMARY'"));
         assert!(sql.contains("c.COLUMN_KEY"));
         assert!(!sql.contains("COLLATE"));
     }
@@ -1699,11 +2799,9 @@ mod tests {
     }
 
     #[test]
-    fn mysql_column_key_marks_primary_when_pk_join_returns_null() {
-        // COLUMN_KEY='PRI' provides a fallback when KEY_COLUMN_USAGE LEFT JOIN returns NULL
-        let from_pk_join = false;
+    fn mysql_column_key_marks_primary() {
         let column_key = "PRI";
-        let is_pk = from_pk_join || column_key.eq_ignore_ascii_case("PRI");
+        let is_pk = column_key.eq_ignore_ascii_case("PRI");
         assert!(is_pk);
     }
 
@@ -1717,6 +2815,38 @@ mod tests {
         assert!(requires_text_protocol_query("SHOW GRANTS FOR 'repl'@'%'", MySqlQueryDialect::default()));
         assert!(!requires_text_protocol_query("SHOW TABLES", MySqlQueryDialect::default()));
         assert!(!requires_text_protocol_query("SELECT * FROM users", MySqlQueryDialect::default()));
+    }
+
+    #[test]
+    fn mysql_user_result_sets_prefer_text_protocol() {
+        let dialect = MySqlQueryDialect::default();
+
+        assert!(prefers_text_protocol_query("SELECT * FROM users", dialect));
+        assert!(prefers_text_protocol_query("WITH recent AS (SELECT 1 AS id) SELECT id FROM recent", dialect));
+        assert!(prefers_text_protocol_query("SHOW TABLES", dialect));
+        assert!(!prefers_text_protocol_query("UPDATE users SET name = 'Ada' WHERE id = 1", dialect));
+    }
+
+    #[test]
+    fn mysql_text_result_sets_use_buffered_collection_for_bounded_page_queries() {
+        assert!(should_collect_text_result_set("SELECT * FROM users LIMIT 100;", 100, Some(100)));
+        assert!(should_collect_text_result_set("SELECT * FROM users ORDER BY id LIMIT 25 OFFSET 50;", 100, Some(100)));
+        assert!(should_collect_text_result_set("SELECT * FROM users LIMIT 20, 50;", 100, Some(100)));
+    }
+
+    #[test]
+    fn mysql_text_result_sets_keep_streaming_when_unbounded_or_too_large() {
+        assert!(!should_collect_text_result_set("SELECT * FROM users", 100, Some(100)));
+        assert!(!should_collect_text_result_set("SELECT * FROM users LIMIT 1000000", 100, Some(100)));
+        assert!(!should_collect_text_result_set("SELECT * FROM users LIMIT 100", 100, None));
+        assert!(!should_collect_text_result_set("SELECT * FROM (SELECT * FROM audit LIMIT 100) t", 100, Some(100)));
+    }
+
+    #[test]
+    fn mysql_binary_decode_parse_errors_retry_with_text_protocol() {
+        assert!(mysql_error_should_retry_with_text_protocol(
+            "Input/output error: can't parse: buf doesn't have enough data"
+        ));
     }
 
     #[test]
@@ -1802,6 +2932,13 @@ mod tests {
     }
 
     #[test]
+    fn mysql_reprepared_statement_error_can_retry_with_text_protocol() {
+        let error = "Server error: ERROR HY000 (1615): Prepared statement needs to be re-prepared";
+
+        assert!(mysql_error_should_retry_with_text_protocol(error));
+    }
+
+    #[test]
     fn mysql_setup_queries_select_requested_database_before_session_init() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4");
 
@@ -1830,6 +2967,27 @@ mod tests {
         );
 
         assert_eq!(mysql_datetime_to_string(value), "2026-05-12 00:00:00");
+    }
+
+    #[test]
+    fn mysql_date_values_display_without_midnight_time() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        let datetime = date.and_hms_opt(0, 0, 0).unwrap();
+
+        assert_eq!(
+            mysql_temporal_value_to_json(ColumnType::MYSQL_TYPE_DATE, Some(datetime), Some(date), None),
+            Some(serde_json::json!("2026-06-10"))
+        );
+    }
+
+    #[test]
+    fn mysql_datetime_values_keep_time_component() {
+        let datetime = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap().and_hms_opt(12, 34, 56).unwrap();
+
+        assert_eq!(
+            mysql_temporal_value_to_json(ColumnType::MYSQL_TYPE_DATETIME, Some(datetime), None, None),
+            Some(serde_json::json!("2026-06-10 12:34:56"))
+        );
     }
 
     #[tokio::test]
@@ -1915,6 +3073,36 @@ mod tests {
     }
 
     #[test]
+    fn mysql_async_url_strips_go_and_timezone_compat_params() {
+        let url = "mysql://host:3306/db?charset=utf8mb4&parseTime=True&loc=Local&connectionTimeZone=Asia%2FShanghai&forceConnectionTimeZoneToSession=true&require_ssl=true";
+
+        assert_eq!(mysql_async_url(url).as_ref(), "mysql://host:3306/db?require_ssl=true");
+    }
+
+    #[test]
+    fn mysql_async_url_strips_database_path_when_catalog_present() {
+        // With a catalog configured, the database path must not reach mysql_async
+        // (it would be sent as the handshake schema and rejected before SET catalog).
+        assert_eq!(
+            mysql_async_url("mysql://root:secret@host:3306/clip?catalog=paimon_catalog").as_ref(),
+            "mysql://root:secret@host:3306"
+        );
+        assert_eq!(
+            mysql_async_url("mysql://host:3306/clip?catalog=paimon_catalog&require_ssl=true").as_ref(),
+            "mysql://host:3306?require_ssl=true"
+        );
+    }
+
+    #[test]
+    fn mysql_async_url_keeps_database_path_when_catalog_absent() {
+        assert_eq!(
+            mysql_async_url("mysql://host:3306/clip?require_ssl=true").as_ref(),
+            "mysql://host:3306/clip?require_ssl=true"
+        );
+        assert_eq!(mysql_async_url("mysql://host:3306/clip").as_ref(), "mysql://host:3306/clip");
+    }
+
+    #[test]
     fn ssl_fallback_does_not_disable_required_tls() {
         assert_eq!(ssl_fallback_url("mysql://host:3306/db?require_ssl=true&charset=utf8mb4"), None);
         assert_eq!(ssl_fallback_url("mysql://host:3306/db?ssl-mode=verify_ca&charset=utf8mb4"), None);
@@ -1935,5 +3123,80 @@ mod tests {
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4;DROP TABLE users"),
             vec!["USE `db`", "SET NAMES utf8mb4"]
         );
+    }
+
+    #[test]
+    fn mysql_setup_queries_apply_explicit_time_zone() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&charset=utf8mb4"),
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+        );
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?time-zone=Asia%2FShanghai"),
+            vec!["USE `db`", "SET time_zone = 'Asia/Shanghai'", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_apply_jdbc_time_zone_aliases() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?serverTimezone=GMT%2B8"),
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+        );
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=UTC"),
+            vec!["USE `db`", "SET time_zone = '+00:00'", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_apply_go_loc_when_no_explicit_time_zone_exists() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?loc=Asia%2FShanghai"),
+            vec!["USE `db`", "SET time_zone = 'Asia/Shanghai'", "SET NAMES utf8mb4"]
+        );
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&loc=UTC"),
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_ignore_unsafe_time_zone_values() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00%27%3BDROP%20TABLE%20users"),
+            vec!["USE `db`", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_switch_catalog_when_present() {
+        // `SET catalog` is pushed last so mysql_async's back-to-front setup
+        // execution (Vec::pop) runs it before `USE <database>`.
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/clip?catalog=paimon_catalog"),
+            vec!["USE `clip`", "SET NAMES utf8mb4", "SET catalog = `paimon_catalog`"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_switch_catalog_without_database() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/?catalog=paimon_catalog"),
+            vec!["SET NAMES utf8mb4", "SET catalog = `paimon_catalog`"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_decodes_catalog_parameter() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?catalog=my%5Fcatalog"),
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET catalog = `my_catalog`"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_omits_catalog_when_absent() {
+        assert_eq!(mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4"), vec!["USE `db`", "SET NAMES utf8mb4"]);
     }
 }

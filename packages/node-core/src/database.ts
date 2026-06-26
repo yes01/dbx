@@ -1,16 +1,25 @@
-import type { ConnectionConfig } from "./connections.js";
+import type { ConnectionConfig, ProxyTunnelConfig } from "./connections.js";
 import { createServer, connect as netConnect, type Server, type Socket } from "node:net";
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { homedir, platform } from "node:os";
 import Database from "better-sqlite3";
 import { sqlSafetyFromEnv } from "./sql-safety.js";
 import { isDirectQueryType } from "./diagnostics.js";
+import { bridgePortFilePath } from "./paths.js";
 
 export interface TableInfo {
   name: string;
   type: string;
 }
+
+export interface CollectionInfo {
+  name: string;
+  id?: string;
+  dimension?: number | null;
+}
+
+type CollectionListEntry = string | CollectionInfo;
 
 export interface ColumnInfo {
   name: string;
@@ -19,6 +28,9 @@ export interface ColumnInfo {
   column_default: string | null;
   is_primary_key: boolean;
   comment: string | null;
+  numeric_precision?: number | null;
+  numeric_scale?: number | null;
+  character_maximum_length?: number | null;
 }
 
 export interface QueryResult {
@@ -42,8 +54,19 @@ interface PoolEntry {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface RqliteResult {
+  columns?: string[];
+  values?: unknown[][];
+  rows_affected?: number;
+  error?: string;
+}
+
+interface RqliteResponse {
+  results?: RqliteResult[];
+}
+
 const pools = new Map<string, PoolEntry>();
-const proxyTunnels = new Map<string, { server: Server; port: number }>();
+const proxyTunnels = new Map<string, { server: Server; port: number; sockets: Set<Socket> }>();
 
 function poolKey(config: ConnectionConfig): string {
   return `${config.id}:${config.database || ""}`;
@@ -51,6 +74,7 @@ function poolKey(config: ConnectionConfig): string {
 
 function evictPool(key: string, entry: PoolEntry) {
   pools.delete(key);
+  clearTimeout(entry.timer);
   if (entry.type === "pg") {
     (entry.pool as import("pg").Pool).end().catch(() => {});
   } else {
@@ -61,6 +85,33 @@ function evictPool(key: string, entry: PoolEntry) {
 function resetIdleTimer(key: string, entry: PoolEntry) {
   clearTimeout(entry.timer);
   entry.timer = setTimeout(() => evictPool(key, entry), IDLE_TIMEOUT_MS);
+}
+
+export async function closeDatabaseResources(): Promise<void> {
+  const poolEntries = [...pools.entries()];
+  pools.clear();
+  await Promise.all(
+    poolEntries.map(async ([, entry]) => {
+      clearTimeout(entry.timer);
+      if (entry.type === "pg") {
+        await (entry.pool as import("pg").Pool).end().catch(() => {});
+      } else {
+        await (entry.pool as import("mysql2/promise").Pool).end().catch(() => {});
+      }
+    }),
+  );
+
+  const tunnels = [...proxyTunnels.values()];
+  proxyTunnels.clear();
+  await Promise.all(
+    tunnels.map(
+      ({ server, sockets }) =>
+        new Promise<void>((resolve) => {
+          for (const socket of sockets) socket.destroy();
+          server.close(() => resolve());
+        }),
+    ),
+  );
 }
 
 async function getPgPool(config: ConnectionConfig): Promise<import("pg").Pool> {
@@ -108,14 +159,30 @@ async function getMysqlPool(config: ConnectionConfig): Promise<import("mysql2/pr
   return pool;
 }
 
+type ProxyLayer = { type: "proxy" } & ProxyTunnelConfig;
+
+function hasActiveSshLayer(config: ConnectionConfig): boolean {
+  return config.transport_layers?.some((layer) => layer.type === "ssh" && layer.enabled !== false && !!layer.host) ?? false;
+}
+
+function firstProxyLayer(config: ConnectionConfig): ProxyLayer | undefined {
+  return config.transport_layers?.find((layer): layer is ProxyLayer => layer.type === "proxy" && layer.enabled !== false && !!layer.host);
+}
+
 async function connectionEndpoint(config: ConnectionConfig): Promise<{ host: string; port: number }> {
-  if (!config.proxy_enabled || !config.proxy_host) return { host: config.host, port: config.port };
+  const proxy = firstProxyLayer(config);
+  if (!proxy) return { host: config.host, port: config.port };
   const existing = proxyTunnels.get(config.id);
   if (existing) return { host: "127.0.0.1", port: existing.port };
 
+  const sockets = new Set<Socket>();
   const server = createServer((inbound) => {
-    connectViaProxy(config)
+    sockets.add(inbound);
+    inbound.once("close", () => sockets.delete(inbound));
+    connectViaProxy(config, proxy)
       .then((outbound) => {
+        sockets.add(outbound);
+        outbound.once("close", () => sockets.delete(outbound));
         inbound.pipe(outbound);
         outbound.pipe(inbound);
       })
@@ -129,39 +196,122 @@ async function connectionEndpoint(config: ConnectionConfig): Promise<{ host: str
       else reject(new Error("Failed to bind proxy tunnel"));
     });
   });
-  proxyTunnels.set(config.id, { server, port });
+  proxyTunnels.set(config.id, { server, port, sockets });
   return { host: "127.0.0.1", port };
 }
 
-function buildConnectionUrl(config: ConnectionConfig, endpoint: { host: string; port: number }): string {
+export function buildConnectionUrl(config: ConnectionConfig, endpoint: { host: string; port: number }): string {
   const db = config.database || "";
-  const params = config.url_params || "";
-  const suffix = params ? `?${params}` : "";
   if (isMysqlType(config.db_type)) {
+    const params = config.url_params || "";
+    const suffix = params ? `?${params}` : "";
     return `mysql://${encodeURIComponent(config.username)}:${encodeURIComponent(config.password)}@${endpoint.host}:${endpoint.port}/${db}${suffix}`;
   }
+  if (!isPostgresType(config.db_type)) {
+    throw new Error(`Unsupported pooled connection type: ${config.db_type}`);
+  }
+  const params = normalizePostgresUrlParams(config.url_params || "", config.ssl);
+  const suffix = params ? `?${params}` : "";
   return `postgres://${encodeURIComponent(config.username)}:${encodeURIComponent(config.password)}@${endpoint.host}:${endpoint.port}/${db}${suffix}`;
 }
 
-function connectViaProxy(config: ConnectionConfig): Promise<Socket> {
+function normalizePostgresUrlParams(value: string, forceTls: boolean): string {
+  const parts: string[] = [];
+  let timezone: string | undefined;
+  let searchPath: string | undefined;
+  for (const part of value.trim().replace(/^\?/, "").split("&")) {
+    if (!part) continue;
+    const [rawKey, rawValue] = splitUrlParam(part);
+    const key = decodeUrlParamPart(rawKey);
+    const lowerKey = key.toLowerCase();
+    if (lowerKey === "timezone" || lowerKey === "time_zone") {
+      const decoded = decodeUrlParamPart(rawValue).trim();
+      if (decoded) timezone = decoded;
+      continue;
+    }
+    if (lowerKey === "schema" || lowerKey === "currentschema") {
+      const decoded = decodeUrlParamPart(rawValue).trim();
+      if (decoded) searchPath = decoded;
+      continue;
+    }
+    if (lowerKey === "ssl-mode") {
+      const value = decodeUrlParamPart(rawValue).toLowerCase().replaceAll("_", "-");
+      if (value === "require" || value === "required") parts.push("sslmode=require");
+      else if (value === "prefer" || value === "preferred") parts.push("sslmode=prefer");
+      else if (value === "disable" || value === "disabled") parts.push("sslmode=disable");
+      else if (value === "verify-ca") parts.push("sslmode=verify-ca");
+      else if (value === "verify-full" || value === "verify-identity") parts.push("sslmode=verify-full");
+      continue;
+    }
+    if (lowerKey === "charset" || lowerKey === "require_ssl" || lowerKey === "verify_ca" || lowerKey === "verify_identity") {
+      continue;
+    }
+    parts.push(part);
+  }
+
+  const connectionOptions: Array<{ needle: string; value: string }> = [];
+  if (searchPath) connectionOptions.push({ needle: "search_path=", value: `-c search_path=${searchPath}` });
+  if (timezone) connectionOptions.push({ needle: "timezone=", value: `-c TimeZone=${timezone}` });
+  if (connectionOptions.length > 0) {
+    const optionsIndex = parts.findIndex((part) => urlParamKeyIs(part, "options"));
+    if (optionsIndex >= 0) {
+      const [rawKey, rawValue] = splitUrlParam(parts[optionsIndex]);
+      const optionsValue = decodeUrlParamPart(rawValue);
+      const lowerOptions = optionsValue.toLowerCase();
+      const appended = connectionOptions.filter((option) => !lowerOptions.includes(option.needle)).map((option) => option.value).join(" ");
+      if (appended) {
+        const combined = `${optionsValue.trim()} ${appended}`.trim();
+        parts[optionsIndex] = `${rawKey}=${encodeURIComponent(combined)}`;
+      }
+    } else {
+      parts.push(`options=${encodeURIComponent(connectionOptions.map((option) => option.value).join(" "))}`);
+    }
+  }
+
+  if (forceTls && !parts.some((part) => urlParamKeyIs(part, "sslmode"))) {
+    parts.unshift("sslmode=require");
+  }
+  return parts.join("&");
+}
+
+function urlParamKeyIs(part: string, expected: string): boolean {
+  const [rawKey] = splitUrlParam(part);
+  return decodeUrlParamPart(rawKey).toLowerCase() === expected.toLowerCase();
+}
+
+function splitUrlParam(part: string): [string, string] {
+  const index = part.indexOf("=");
+  if (index < 0) return [part, ""];
+  return [part.slice(0, index), part.slice(index + 1)];
+}
+
+function decodeUrlParamPart(value: string): string {
+  try {
+    return decodeURIComponent(value.replace(/\+/g, " "));
+  } catch {
+    return value;
+  }
+}
+
+function connectViaProxy(config: ConnectionConfig, proxy: ProxyLayer): Promise<Socket> {
   return new Promise((resolve, reject) => {
-    const socket = netConnect(config.proxy_port || 1080, config.proxy_host || "127.0.0.1");
+    const socket = netConnect(proxy.port || 1080, proxy.host || "127.0.0.1");
     socket.once("error", reject);
     socket.once("connect", () => {
-      if ((config.proxy_type || "socks5") === "http") {
-        httpConnect(socket, config, resolve, reject);
+      if ((proxy.proxy_type || "socks5") === "http") {
+        httpConnect(socket, config, proxy, resolve, reject);
       } else {
-        socks5Connect(socket, config, resolve, reject);
+        socks5Connect(socket, config, proxy, resolve, reject);
       }
     });
   });
 }
 
-function httpConnect(socket: Socket, config: ConnectionConfig, resolve: (socket: Socket) => void, reject: (err: Error) => void) {
+function httpConnect(socket: Socket, config: ConnectionConfig, proxy: ProxyLayer, resolve: (socket: Socket) => void, reject: (err: Error) => void) {
   const target = `${config.host}:${config.port}`;
   const lines = [`CONNECT ${target} HTTP/1.1`, `Host: ${target}`];
-  if (config.proxy_username || config.proxy_password) {
-    const token = Buffer.from(`${config.proxy_username || ""}:${config.proxy_password || ""}`).toString("base64");
+  if (proxy.username || proxy.password) {
+    const token = Buffer.from(`${proxy.username || ""}:${proxy.password || ""}`).toString("base64");
     lines.push(`Proxy-Authorization: Basic ${token}`);
   }
   socket.write(`${lines.join("\r\n")}\r\n\r\n`);
@@ -183,8 +333,8 @@ function httpConnect(socket: Socket, config: ConnectionConfig, resolve: (socket:
   });
 }
 
-function socks5Connect(socket: Socket, config: ConnectionConfig, resolve: (socket: Socket) => void, reject: (err: Error) => void) {
-  const wantsAuth = !!(config.proxy_username || config.proxy_password);
+function socks5Connect(socket: Socket, config: ConnectionConfig, proxy: ProxyLayer, resolve: (socket: Socket) => void, reject: (err: Error) => void) {
+  const wantsAuth = !!(proxy.username || proxy.password);
   socket.write(Buffer.from(wantsAuth ? [0x05, 0x02, 0x00, 0x02] : [0x05, 0x01, 0x00]));
   socket.once("data", (method) => {
     if (method.length < 2 || method[0] !== 0x05) {
@@ -193,8 +343,8 @@ function socks5Connect(socket: Socket, config: ConnectionConfig, resolve: (socke
       return;
     }
     if (method[1] === 0x02) {
-      const user = Buffer.from(config.proxy_username || "");
-      const pass = Buffer.from(config.proxy_password || "");
+      const user = Buffer.from(proxy.username || "");
+      const pass = Buffer.from(proxy.password || "");
       socket.write(Buffer.concat([Buffer.from([0x01, user.length]), user, Buffer.from([pass.length]), pass]));
       socket.once("data", (auth) => {
         if (auth.length < 2 || auth[1] !== 0x00) {
@@ -233,7 +383,11 @@ function portBytes(port: number): Buffer {
 }
 
 function isMysqlType(dbType: string): boolean {
-  return dbType === "mysql" || dbType === "doris" || dbType === "starrocks";
+  return dbType === "mysql" || dbType === "doris" || dbType === "starrocks" || dbType === "manticoresearch";
+}
+
+function isPostgresType(dbType: string): boolean {
+  return dbType === "postgres" || dbType === "redshift" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "questdb";
 }
 
 interface BridgeQueryResult {
@@ -257,6 +411,16 @@ interface BridgeColumnInfo {
   column_default: string | null;
   is_primary_key: boolean;
   comment: string | null;
+  numeric_precision?: number | null;
+  numeric_scale?: number | null;
+  character_maximum_length?: number | null;
+}
+
+export function collectionListToTableInfos(collections: CollectionListEntry[]): TableInfo[] {
+  return collections.map((collection) => ({
+    name: typeof collection === "string" ? collection : collection.name,
+    type: "COLLECTION",
+  }));
 }
 
 interface MongoDocumentResult {
@@ -264,23 +428,10 @@ interface MongoDocumentResult {
   total: number;
 }
 
-function bridgeAppDataDir(): string {
-  const home = homedir();
-  switch (platform()) {
-    case "darwin":
-      return join(home, "Library", "Application Support", "com.dbx.app");
-    case "win32":
-      return join(process.env.APPDATA || join(home, "AppData", "Roaming"), "com.dbx.app");
-    default:
-      return join(home, ".config", "com.dbx.app");
-  }
-}
-
 async function bridgeDataRequest<T>(path: string, body: Record<string, unknown>): Promise<T> {
   let bridgeUrl: string;
   try {
-    const portFile = join(bridgeAppDataDir(), "mcp-bridge-port");
-    const port = (await readFile(portFile, "utf-8")).trim();
+    const port = (await readFile(bridgePortFilePath(), "utf-8")).trim();
     bridgeUrl = `http://127.0.0.1:${port}`;
   } catch {
     throw new Error("DBX desktop app is not running. This database type requires DBX to be running for query execution.");
@@ -315,7 +466,9 @@ function resolveTimeoutMs(options?: QueryOptions): number {
 function convertBridgeQueryResult(result: BridgeQueryResult, options?: QueryOptions): QueryResult {
   const rows = result.rows.slice(0, resolveMaxRows(options)).map((row) => {
     const obj: Record<string, unknown> = {};
-    result.columns.forEach((col, i) => { obj[col] = row[i]; });
+    result.columns.forEach((col, i) => {
+      obj[col] = row[i];
+    });
     return obj;
   });
   return { columns: result.columns, rows, row_count: rows.length };
@@ -346,25 +499,34 @@ async function queryWithRetry(config: ConnectionConfig, fn: () => Promise<QueryR
 }
 
 async function pgQuery(config: ConnectionConfig, sql: string, params?: unknown[], options?: QueryOptions): Promise<QueryResult> {
-  return queryWithRetry(config, async () => {
-    const pool = await getPgPool(config);
-    const result = await pool.query(sql, params);
-    const rows = (result.rows || []).slice(0, resolveMaxRows(options));
-    return { columns: result.fields?.map((f) => f.name) ?? [], rows, row_count: rows.length };
-  }, options);
+  return queryWithRetry(
+    config,
+    async () => {
+      const pool = await getPgPool(config);
+      const result = await pool.query(sql, params);
+      const rows = (result.rows || []).slice(0, resolveMaxRows(options));
+      return { columns: result.fields?.map((f) => f.name) ?? [], rows, row_count: rows.length };
+    },
+    options,
+  );
 }
 
 async function mysqlQuery(config: ConnectionConfig, sql: string, params?: unknown[], options?: QueryOptions): Promise<QueryResult> {
-  return queryWithRetry(config, async () => {
-    const pool = await getMysqlPool(config);
-    const [results, fields] = await pool.query(sql, params);
-    const rows = (Array.isArray(results) ? results : []).slice(0, resolveMaxRows(options)) as Record<string, unknown>[];
-    return { columns: (fields as Array<{ name: string }>)?.map((f) => f.name) ?? [], rows, row_count: rows.length };
-  }, options);
+  return queryWithRetry(
+    config,
+    async () => {
+      const pool = await getMysqlPool(config);
+      const [results, fields] = await pool.query(sql, params);
+      const rows = (Array.isArray(results) ? results : []).slice(0, resolveMaxRows(options)) as Record<string, unknown>[];
+      return { columns: (fields as Array<{ name: string }>)?.map((f) => f.name) ?? [], rows, row_count: rows.length };
+    },
+    options,
+  );
 }
 
 async function query(config: ConnectionConfig, sql: string, params?: unknown[], options?: QueryOptions): Promise<QueryResult> {
   if (config.db_type === "sqlite") return sqliteQuery(config, sql, options);
+  if (config.db_type === "rqlite") return rqliteQuery(config, sql, options);
   if (isMysqlType(config.db_type)) return mysqlQuery(config, sql, params, options);
   return pgQuery(config, sql, params, options);
 }
@@ -398,7 +560,59 @@ function sqliteQuery(config: ConnectionConfig, sql: string, options?: QueryOptio
   }
 }
 
+async function rqliteQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult> {
+  const isReader = /^\s*(?:--[^\n]*\n|\s|\/\*[\s\S]*?\*\/)*(select|pragma|explain|with)\b/i.test(sql);
+  const endpoint = isReader ? "/db/query" : "/db/execute";
+  const result = await rqliteRequest(config, endpoint, sql);
+  if (isReader) {
+    const columns = result.columns ?? [];
+    const rows = (result.values ?? []).slice(0, resolveMaxRows(options)).map((row) => {
+      const record: Record<string, unknown> = {};
+      columns.forEach((column, index) => {
+        record[column] = row[index];
+      });
+      return record;
+    });
+    return { columns, rows, row_count: rows.length };
+  }
+  return { columns: [], rows: [], row_count: result.rows_affected ?? 0 };
+}
+
+async function rqliteRequest(config: ConnectionConfig, endpoint: "/db/query" | "/db/execute", sql: string): Promise<RqliteResult> {
+  const { host, port } = await connectionEndpoint(config);
+  const scheme = config.ssl ? "https" : "http";
+  const params = (config.url_params || "").trim().replace(/^\?/, "");
+  const url = `${scheme}://${host}:${port}${endpoint}${params ? `?${params}` : ""}`;
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (config.username) {
+    headers.authorization = `Basic ${Buffer.from(`${config.username}:${config.password || ""}`).toString("base64")}`;
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify([sql]),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`rqlite error (${response.status}): ${text}`);
+  const payload = JSON.parse(text) as RqliteResponse;
+  const result = payload.results?.[0];
+  if (!result) throw new Error("rqlite returned no result");
+  if (result.error) throw new Error(`rqlite error: ${result.error}`);
+  return result;
+}
+
 export async function executeQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult> {
+  if (hasActiveSshLayer(config)) {
+    const result = await withTimeout(
+      bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
+        connection_name: config.name,
+        database: config.database || "",
+        sql,
+      }),
+      resolveTimeoutMs(options),
+    );
+    return convertBridgeQueryResult(result, options);
+  }
   if (config.db_type === "mongodb") {
     const find = parseMongoFindCommand(sql);
     if (find) {
@@ -414,10 +628,12 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
     if (aggregate) {
       const safety = evaluateMongoAggregateSafety(aggregate, sqlSafetyFromEnv());
       if (!safety.allowed) throw new Error(safety.reason);
-      const result = await withTimeout(
-        mongoAggregateDocuments(config, aggregate.collection, aggregate.pipeline, resolveMaxRows(options)),
-        resolveTimeoutMs(options),
-      );
+      const result = await withTimeout(mongoAggregateDocuments(config, aggregate.collection, aggregate.pipeline, resolveMaxRows(options)), resolveTimeoutMs(options));
+      return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
+    }
+    const getIndexes = parseMongoGetIndexesCommand(sql);
+    if (getIndexes) {
+      const result = await withTimeout(mongoAggregateDocuments(config, getIndexes.collection, '[{"$indexStats":{}}]', resolveMaxRows(options)), resolveTimeoutMs(options));
       return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
     }
     const write = parseMongoWriteCommand(sql);
@@ -427,38 +643,36 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       const affected = await withTimeout(executeMongoWrite(config, write), resolveTimeoutMs(options));
       return { columns: [], rows: [], row_count: affected };
     }
-    throw new Error(
-      "Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.countDocuments({}), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})",
-    );
+    throw new Error("Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.countDocuments({}), db.projects.getIndexes(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})");
   }
   if (isDirectQueryType(config.db_type)) {
     return query(config, sql, undefined, options);
   }
-  const result = await withTimeout(bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
-    connection_name: config.name,
-    database: config.database || "",
-    sql,
-  }), resolveTimeoutMs(options));
+  const result = await withTimeout(
+    bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
+      connection_name: config.name,
+      database: config.database || "",
+      sql,
+    }),
+    resolveTimeoutMs(options),
+  );
   return convertBridgeQueryResult(result, options);
 }
 
 export async function listTables(config: ConnectionConfig, schema?: string): Promise<TableInfo[]> {
   if (config.db_type === "mongodb") {
-    const collections = await bridgeDataRequest<string[]>("/data/mongo/list-collections", {
+    const collections = await bridgeDataRequest<CollectionListEntry[]>("/data/mongo/list-collections", {
       connection_name: config.name,
       database: config.database || "",
       schema: schema || "",
     });
-    return collections.map((name) => ({ name, type: "COLLECTION" }));
+    return collectionListToTableInfos(collections);
   }
-  if (config.db_type === "sqlite") {
-    const result = await query(
-      config,
-      `SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name`,
-    );
+  if (config.db_type === "sqlite" || config.db_type === "rqlite") {
+    const result = await query(config, `SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name`);
     return result.rows.map((r) => ({ name: String(r.name || ""), type: String(r.type || "table") }));
   }
-  if (!isDirectQueryType(config.db_type)) {
+  if (hasActiveSshLayer(config) || !isDirectQueryType(config.db_type)) {
     const tables = await bridgeDataRequest<BridgeTableInfo[]>("/data/list-tables", {
       connection_name: config.name,
       database: config.database || "",
@@ -470,11 +684,7 @@ export async function listTables(config: ConnectionConfig, schema?: string): Pro
   if (isMysqlType(config.db_type)) {
     result = await query(config, `SELECT TABLE_NAME AS name, TABLE_TYPE AS type FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME`);
   } else {
-    result = await query(
-      config,
-      `SELECT table_name AS name, table_type AS type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`,
-      [schema || "public"],
-    );
+    result = await query(config, `SELECT table_name AS name, table_type AS type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`, [schema || "public"]);
   }
   return result.rows.map((r) => ({ name: String(r.name || r.NAME), type: String(r.type || r.TYPE || "TABLE") }));
 }
@@ -484,7 +694,7 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
     const result = await mongoFindDocuments(config, table, 0, 20, "{}");
     return inferMongoColumns(result.documents);
   }
-  if (config.db_type === "sqlite") {
+  if (config.db_type === "sqlite" || config.db_type === "rqlite") {
     const result = await query(config, `PRAGMA table_info(${quoteSqliteIdentifier(table)})`);
     return result.rows.map((r) => ({
       name: String(r.name || ""),
@@ -495,7 +705,7 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
       comment: null,
     }));
   }
-  if (!isDirectQueryType(config.db_type)) {
+  if (hasActiveSshLayer(config) || !isDirectQueryType(config.db_type)) {
     const columns = await bridgeDataRequest<BridgeColumnInfo[]>("/data/describe-table", {
       connection_name: config.name,
       database: config.database || "",
@@ -509,6 +719,9 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
       column_default: c.column_default,
       is_primary_key: c.is_primary_key,
       comment: c.comment,
+      numeric_precision: c.numeric_precision,
+      numeric_scale: c.numeric_scale,
+      character_maximum_length: c.character_maximum_length,
     }));
   }
   let result: QueryResult;
@@ -535,14 +748,7 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
   }));
 }
 
-async function mongoFindDocuments(
-  config: ConnectionConfig,
-  collection: string,
-  skip: number,
-  limit: number,
-  filter: string,
-  sort?: string,
-): Promise<MongoDocumentResult> {
+async function mongoFindDocuments(config: ConnectionConfig, collection: string, skip: number, limit: number, filter: string, sort?: string): Promise<MongoDocumentResult> {
   return bridgeDataRequest<MongoDocumentResult>("/data/mongo/find-documents", {
     connection_name: config.name,
     database: config.database || "",
@@ -585,12 +791,7 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
   return result.affected_rows;
 }
 
-async function mongoAggregateDocuments(
-  config: ConnectionConfig,
-  collection: string,
-  pipelineJson: string,
-  maxRows: number,
-): Promise<MongoDocumentResult> {
+async function mongoAggregateDocuments(config: ConnectionConfig, collection: string, pipelineJson: string, maxRows: number): Promise<MongoDocumentResult> {
   return bridgeDataRequest<MongoDocumentResult>("/data/mongo/aggregate-documents", {
     connection_name: config.name,
     database: config.database || "",
@@ -665,10 +866,11 @@ interface MongoAggregateCommand {
   pipeline: string;
 }
 
-export type MongoWriteCommand =
-  | { kind: "insert"; collection: string; docsJson: string }
-  | { kind: "update"; collection: string; filter: string; update: string; many: boolean }
-  | { kind: "delete"; collection: string; filter: string; many: boolean };
+interface MongoGetIndexesCommand {
+  collection: string;
+}
+
+export type MongoWriteCommand = { kind: "insert"; collection: string; docsJson: string } | { kind: "update"; collection: string; filter: string; update: string; many: boolean } | { kind: "delete"; collection: string; filter: string; many: boolean };
 
 export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
@@ -717,6 +919,15 @@ export function parseMongoAggregateCommand(input: string): MongoAggregateCommand
   const pipeline = normalizeJsonArgument(args[0]);
   if (!pipeline) return null;
   return Array.isArray(JSON.parse(pipeline)) ? { collection: target.collection, pipeline } : null;
+}
+
+export function parseMongoGetIndexesCommand(input: string): MongoGetIndexesCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const target = parseCollectionMethodTarget(source, "getIndexes");
+  if (!target) return null;
+  const args = parseMethodArgs(source, target.methodCallIndex);
+  if (!args || args.some((arg) => arg.trim())) return null;
+  return { collection: target.collection };
 }
 
 export function mongoAggregateWriteStage(pipelineJson: string): "$out" | "$merge" | null {
@@ -777,10 +988,7 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
   return null;
 }
 
-export function evaluateMongoWriteSafety(
-  command: MongoWriteCommand,
-  options: { allowWrites?: boolean; allowDangerous?: boolean },
-): { allowed: boolean; reason?: string } {
+export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: { allowWrites?: boolean; allowDangerous?: boolean }): { allowed: boolean; reason?: string } {
   if (!options.allowWrites) {
     return {
       allowed: false,
@@ -796,10 +1004,7 @@ export function evaluateMongoWriteSafety(
   return { allowed: true };
 }
 
-export function evaluateMongoAggregateSafety(
-  command: MongoAggregateCommand,
-  options: { allowWrites?: boolean; allowDangerous?: boolean },
-): { allowed: boolean; reason?: string } {
+export function evaluateMongoAggregateSafety(command: MongoAggregateCommand, options: { allowWrites?: boolean; allowDangerous?: boolean }): { allowed: boolean; reason?: string } {
   const writeStage = mongoAggregateWriteStage(command.pipeline);
   if (!writeStage) return { allowed: true };
   if (!options.allowWrites) {
@@ -818,10 +1023,11 @@ export function evaluateMongoAggregateSafety(
 }
 
 function parseCollectionMethodTarget(source: string, method: string): { collection: string; methodCallIndex: number } | null {
-  const direct = new RegExp(`^db\\.([A-Za-z_$][\\w$]*)\\.${method}\\s*\\(`).exec(source);
-  if (direct) return { collection: direct[1], methodCallIndex: source.indexOf(`.${method}`) };
-  const quoted = new RegExp(`^db\\.getCollection\\(\\s*(['"])([^'"]+)\\1\\s*\\)\\.${method}\\s*\\(`).exec(source);
-  if (quoted) return { collection: quoted[2], methodCallIndex: source.indexOf(`.${method}`) };
+  const escapedMethod = escapeRegExp(method);
+  const direct = new RegExp(`^db\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
+  if (direct) return { collection: direct[1], methodCallIndex: findChainedMethodCallIndex(source, method) };
+  const quoted = new RegExp(`^db\\s*\\.\\s*getCollection\\s*\\(\\s*(['"])([^'"]+)\\1\\s*\\)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
+  if (quoted) return { collection: quoted[2], methodCallIndex: findChainedMethodCallIndex(source, method) };
   return null;
 }
 
@@ -833,12 +1039,23 @@ function parseMethodArgs(source: string, methodCallIndex: number): string[] | nu
 }
 
 function readChainedCallArgument(chain: string, method: string): string | undefined {
-  const pattern = new RegExp(`\\.${method}\\s*\\(`, "g");
-  const match = pattern.exec(chain);
+  const match = chainedMethodCallPattern(method).exec(chain);
   if (!match) return undefined;
-  const openIndex = match.index + match[0].lastIndexOf("(");
+  const openIndex = chain.indexOf("(", match.index);
   const closeIndex = findMatchingParen(chain, openIndex);
   return closeIndex < 0 ? undefined : chain.slice(openIndex + 1, closeIndex);
+}
+
+function findChainedMethodCallIndex(source: string, method: string): number {
+  return chainedMethodCallPattern(method).exec(source)?.index ?? -1;
+}
+
+function chainedMethodCallPattern(method: string): RegExp {
+  return new RegExp(`\\.\\s*${escapeRegExp(method)}\\s*\\(`, "g");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function readChainedIntegerArgument(chain: string, method: string, fallback: number): number | null {
@@ -849,9 +1066,7 @@ function readChainedIntegerArgument(chain: string, method: string, fallback: num
 }
 
 function normalizeJsonArgument(arg: string): string | null {
-  const value = quoteUnquotedObjectKeys(
-    convertSingleQuotedStrings((arg.trim() || "{}").replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}')),
-  );
+  const value = quoteUnquotedObjectKeys(convertSingleQuotedStrings((arg.trim() || "{}").replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}')));
   try {
     JSON.parse(value);
     return value;

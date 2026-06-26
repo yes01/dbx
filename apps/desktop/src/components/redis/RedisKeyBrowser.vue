@@ -1,21 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import {
-  Search,
-  RefreshCw,
-  Loader2,
-  ChevronRight,
-  ChevronDown,
-  FolderClosed,
-  FolderOpen,
-  Trash2,
-  Plus,
-  KeyRound,
-  TerminalSquare,
-  Asterisk,
-  X,
-} from "@lucide/vue";
+import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio, Clock } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { Splitpanes, Pane } from "splitpanes";
@@ -26,35 +12,42 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Switch } from "@/components/ui/switch";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import RedisValueViewer from "./RedisValueViewer.vue";
+import RedisPubSubPanel from "./RedisPubSubPanel.vue";
+import RedisSlowlogPanel from "./RedisSlowlogPanel.vue";
 import * as api from "@/lib/api";
-import type { RedisKeyInfo, RedisScanResult } from "@/lib/api";
+import type { RedisKeyInfo, RedisScanResult, RedisValue, HistoryEntry } from "@/lib/api";
+import { uuid } from "@/lib/utils";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { useSettingsStore } from "@/stores/settingsStore";
-import {
-  buildRedisKeyTree,
-  collectExpandedGroupIds,
-  collectRootRedisGroupIds,
-  collectRedisGroupKeyRaws,
-  flattenVisibleRedisKeyTree,
-  type RedisKeyTreeNode,
-} from "@/lib/redisKeyTree";
+import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "@/lib/redisKeyTree";
 import { classifyRedisCommandSafety } from "@/lib/redisCommandSafety";
+import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
 import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "@/lib/redisCommandSession";
-import { formatRedisCommandResult, formatRedisStringValue } from "@/lib/redisValuePresentation";
+import { formatRedisConsoleValue, formatRedisStringValue } from "@/lib/redisValuePresentation";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
-import { redisKeyScanCount, redisKeySearchPattern } from "@/lib/redisKeyPattern";
+import { useToast } from "@/composables/useToast";
+import { redisKeySearchPattern } from "@/lib/redisKeyPattern";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 const { t } = useI18n();
+const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 const editorFontFamilyStyle = useEditorFontFamilyStyle();
 
-type RedisSearchMode = "key" | "value";
-type RedisCreateKeyType = "string" | "hash" | "list" | "set" | "zset";
-type RedisSidePanel = "detail" | "command";
+type RedisSearchMode = "key" | "value" | "all";
+type RedisCreateKeyType = "string" | "hash" | "list" | "set" | "zset" | "stream" | "json";
+
+interface CreateKeyEntry {
+  id: number;
+  value: string;
+  field?: string;
+  score?: string;
+}
+type RedisSidePanel = "detail" | "command" | "pubsub" | "slowlog";
 type RedisCommandHistoryEntry = {
   id: number;
   prompt: string;
@@ -72,25 +65,24 @@ const flatKeys = ref<RedisKeyInfo[]>([]);
 const treeKeys = ref<RedisKeyTreeNode[]>([]);
 const loading = ref(false);
 const loadingMore = ref(false);
+const isFetchingAll = ref(false);
 const rootRef = ref<HTMLElement>();
 const commandTerminalRef = ref<HTMLElement>();
 const searchPattern = ref("");
 const searchMode = ref<RedisSearchMode>("key");
-const fuzzyKeySearch = ref(true);
+const fuzzyKeySearch = ref(false);
 const selectedKeyRaw = ref<string | null>(null);
 const hasMore = ref(false);
 const scanCursor = ref(0);
-const backgroundKeySearchRunning = ref(false);
 const expandedGroupIds = ref<Set<string>>(new Set());
 const checkedKeys = ref<Set<string>>(new Set());
-const pendingDanger = ref<
-  { kind: "delete-keys"; title: string; keyRaws: string[] } | { kind: "command"; command: string } | null
->(null);
+const pendingDanger = ref<{ kind: "delete-keys"; title: string; keyRaws: string[] } | { kind: "command"; command: string } | null>(null);
 const showDangerConfirm = ref(false);
 const commandText = ref("");
 const commandRunning = ref(false);
 const commandDb = ref(props.db);
 const commandHistory = ref<RedisCommandHistoryEntry[]>([]);
+const commandHistoryIndex = ref(-1);
 const activeSidePanel = ref<RedisSidePanel>("detail");
 const showCreateKeyDialog = ref(false);
 const creatingKey = ref(false);
@@ -100,27 +92,41 @@ const createKeyValue = ref("");
 const createKeyField = ref("");
 const createKeyScore = ref("0");
 const createKeyError = ref("");
+const createKeyTtl = ref("");
+const createKeyEntries = ref<CreateKeyEntry[]>([]);
+const createKeyRawMode = ref(false);
+const createKeyEntryId = ref("*");
+const jsonModuleAvailable = ref<boolean | null>(null);
+const checkingJsonModule = ref(false);
+let nextEntryId = 0;
 let searchRequestId = 0;
 let redisBrowserIsActive = true;
 let redisDbFlushedListenerRegistered = false;
+const loadedKeyRaws = new Set<string>();
 
 const valueQuery = computed(() => searchPattern.value.trim());
-const effectivePattern = computed(() =>
-  searchMode.value === "key" ? redisKeySearchPattern(searchPattern.value, fuzzyKeySearch.value) : "*",
-);
-const isSearchMode = computed(() =>
-  searchMode.value === "key" ? effectivePattern.value !== "*" : valueQuery.value !== "",
-);
-const searchPlaceholder = computed(() =>
-  searchMode.value === "key"
-    ? fuzzyKeySearch.value
-      ? t("redis.fuzzyPattern")
-      : t("redis.pattern")
-    : t("redis.valueSearchPlaceholder"),
-);
-const loadingEmptyText = computed(() =>
-  searchMode.value === "value" && valueQuery.value ? t("redis.searchingValues") : t("redis.loadingKeys"),
-);
+const isValueSearchMode = computed(() => searchMode.value === "value" || searchMode.value === "all");
+const effectivePattern = computed(() => (searchMode.value === "key" ? redisKeySearchPattern(searchPattern.value, fuzzyKeySearch.value) : "*"));
+const isSearchMode = computed(() => (searchMode.value === "key" ? effectivePattern.value !== "*" : valueQuery.value !== ""));
+const useFlatKeySearchRows = computed(() => searchMode.value === "key" && isSearchMode.value);
+const searchPlaceholder = computed(() => {
+  if (searchMode.value === "key") return fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern");
+  return searchMode.value === "all" ? t("redis.allSearchPlaceholder") : t("redis.valueSearchPlaceholder");
+});
+const loadingEmptyText = computed(() => (isValueSearchMode.value && valueQuery.value ? t(searchMode.value === "all" ? "redis.searchingAll" : "redis.searchingValues") : t("redis.loadingKeys")));
+const redisKeySeparator = computed(() => connectionStore.getConfig(props.connectionId)?.redis_key_separator ?? ":");
+const redisScanPageSize = computed(() => settingsStore.editorSettings.redisScanPageSize);
+watch(redisKeySeparator, () => {
+  if (flatKeys.value.length > 0) rebuildTree(false);
+});
+const lastTotalKeys = ref(0);
+const fetchAllProgressText = computed(() => {
+  if (!isFetchingAll.value) return "";
+  if (lastTotalKeys.value > 0) {
+    return t("redis.fetchAllProgress", { loaded: flatKeys.value.length, total: lastTotalKeys.value });
+  }
+  return t("redis.fetchAllProgressUnknown", { loaded: flatKeys.value.length });
+});
 const selectedKey = computed(() => flatKeys.value.find((key) => key.key_raw === selectedKeyRaw.value) ?? null);
 const dangerDetails = computed(() => {
   if (!pendingDanger.value) return "";
@@ -143,13 +149,16 @@ const createKeyTypeOptions = computed<{ value: RedisCreateKeyType; label: string
   { value: "list", label: "List" },
   { value: "set", label: "Set" },
   { value: "zset", label: "Sorted Set" },
+  { value: "stream", label: "Stream" },
+  { value: "json", label: "JSON" },
 ]);
-const visibleRows = computed(() =>
-  flattenVisibleRedisKeyTree(treeKeys.value, expandedGroupIds.value).map((row) => ({
+const visibleRows = computed(() => {
+  const rows = useFlatKeySearchRows.value ? flatKeys.value.map((key) => redisKeyToFlatTreeRow(key, props.db)) : flattenVisibleRedisKeyTree(treeKeys.value, expandedGroupIds.value);
+  return rows.map((row) => ({
     ...row,
     id: row.node.id,
-  })),
-);
+  }));
+});
 let commandHistoryId = 0;
 
 function countLeaves(node: RedisKeyTreeNode): number {
@@ -158,18 +167,13 @@ function countLeaves(node: RedisKeyTreeNode): number {
 }
 
 function rebuildTree(expandAll = false) {
-  const nextTree = buildRedisKeyTree(flatKeys.value, props.db);
+  const nextTree = buildRedisKeyTree(flatKeys.value, props.db, redisKeySeparator.value);
   treeKeys.value = nextTree;
 
   const nextExpanded = new Set<string>();
   const availableExpanded = collectExpandedGroupIds(nextTree);
-  if (expandAll && !isSearchMode.value) {
+  if (expandAll) {
     for (const id of availableExpanded) nextExpanded.add(id);
-  } else if (isSearchMode.value) {
-    for (const id of collectRootRedisGroupIds(nextTree)) nextExpanded.add(id);
-    for (const id of expandedGroupIds.value) {
-      if (availableExpanded.has(id)) nextExpanded.add(id);
-    }
   } else {
     for (const id of expandedGroupIds.value) {
       if (availableExpanded.has(id)) nextExpanded.add(id);
@@ -182,30 +186,72 @@ function rebuildTree(expandAll = false) {
   }
 }
 
-async function fetchScanPage(): Promise<RedisScanResult> {
-  const resultLimit = settingsStore.editorSettings.redisScanPageSize;
-  const pageSize = redisKeyScanCount(resultLimit, isSearchMode.value);
-  return searchMode.value === "value"
-    ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize)
-    : await api.redisScanKeys(
-        props.connectionId,
-        props.db,
-        scanCursor.value,
-        effectivePattern.value,
-        pageSize,
-        !isSearchMode.value,
-      );
+function mergeTree(newKeys: RedisKeyInfo[]) {
+  if (newKeys.length === 0) return;
+  treeKeys.value = mergeKeysIntoRedisKeyTree(treeKeys.value, newKeys, props.db, redisKeySeparator.value);
+
+  const availableExpanded = collectExpandedGroupIds(treeKeys.value);
+  const nextExpanded = new Set<string>();
+  for (const id of expandedGroupIds.value) {
+    if (availableExpanded.has(id)) nextExpanded.add(id);
+  }
+  expandedGroupIds.value = nextExpanded;
+
+  if (selectedKeyRaw.value && !flatKeys.value.some((key) => key.key_raw === selectedKeyRaw.value)) {
+    selectedKeyRaw.value = null;
+  }
 }
 
-function appendScanResult(result: RedisScanResult) {
-  const existingKeys = new Set(flatKeys.value.map((key) => key.key_raw));
-  flatKeys.value = [...flatKeys.value, ...result.keys.filter((key) => !existingKeys.has(key.key_raw))];
+async function fetchScanPage(): Promise<RedisScanResult> {
+  const pageSize = redisScanPageSize.value;
+  return isValueSearchMode.value ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all") : await api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, 1, false);
+}
+
+/// Batch-scan variant that performs multiple SCAN iterations server-side.
+/// Dramatically reduces frontend↔backend roundtrips for bulk loading.
+async function fetchScanBatchPage(maxIterations: number, options: { count?: number; includeTypes?: boolean } = {}): Promise<RedisScanResult> {
+  const pageSize = options.count ?? redisScanPageSize.value;
+  // Value search cannot be batched because each key requires a GET.
+  if (isValueSearchMode.value) {
+    return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all");
+  }
+  return api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, maxIterations, options.includeTypes ?? false);
+}
+
+function appendScanResult(result: RedisScanResult, options: { updateTree?: boolean } = {}) {
+  const newKeys: RedisKeyInfo[] = [];
+  for (const key of result.keys) {
+    if (loadedKeyRaws.has(key.key_raw)) continue;
+    loadedKeyRaws.add(key.key_raw);
+    newKeys.push(key);
+  }
+  if (newKeys.length > 0) {
+    flatKeys.value = [...flatKeys.value, ...newKeys];
+  }
   scanCursor.value = result.cursor;
   hasMore.value = result.cursor !== 0;
-  rebuildTree(isSearchMode.value);
+  // DBSIZE is only called on the first batch page (cursor==0); subsequent
+  // pages return total_keys=0. Preserve the previously-fetched total when
+  // we get a zero from a continuation. A truly empty DB returns cursor==0
+  // and keys==[] along with total_keys==0, which we do record.
+  if (result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0)) {
+    lastTotalKeys.value = result.total_keys;
+  }
+
+  if (options.updateTree ?? true) {
+    if (useFlatKeySearchRows.value) {
+      treeKeys.value = [];
+      expandedGroupIds.value = new Set();
+    } else if (treeKeys.value.length === 0) {
+      rebuildTree(isSearchMode.value);
+    } else {
+      mergeTree(newKeys);
+    }
+  }
+
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
     loaded: isSearchMode.value ? undefined : flatKeys.value.length,
-    total: result.total_keys,
+    total: result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0) ? result.total_keys : undefined,
   });
 }
 
@@ -217,44 +263,35 @@ async function scanNextPage(requestId = searchRequestId): Promise<boolean> {
 }
 
 async function streamValueSearch(requestId: number) {
-  while (requestId === searchRequestId && searchMode.value === "value" && valueQuery.value && hasMore.value) {
+  while (requestId === searchRequestId && isValueSearchMode.value && valueQuery.value && hasMore.value) {
     const applied = await scanNextPage(requestId);
     if (!applied) return;
   }
 }
 
 async function fillInitialKeyBatch(requestId: number) {
-  const targetCount = isSearchMode.value ? 1 : Math.max(1, settingsStore.editorSettings.redisScanPageSize);
-  while (
-    requestId === searchRequestId &&
-    searchMode.value === "key" &&
-    hasMore.value &&
-    flatKeys.value.length < targetCount
-  ) {
-    const applied = await scanNextPage(requestId);
-    if (!applied) return;
-    if (flatKeys.value.length >= targetCount) return;
-  }
-}
-
-async function streamKeySearch(requestId: number) {
-  backgroundKeySearchRunning.value = true;
-  try {
-    while (requestId === searchRequestId && searchMode.value === "key" && isSearchMode.value && hasMore.value) {
-      const applied = await scanNextPage(requestId);
-      if (!applied) return;
-    }
-  } finally {
-    if (requestId === searchRequestId) {
-      backgroundKeySearchRunning.value = false;
-    }
+  // Initial batch should fetch a substantial number of keys regardless of
+  // redisScanPageSize.  We scan in batches of at most 8 iterations each and
+  // keep going until we've done at least 16 total iterations (enough to cover
+  // most key spaces even with COUNT=200) or hasMore becomes false.
+  const MAX_TOTAL_ITERATIONS = 16;
+  const BATCH_ITERATIONS = 8;
+  let totalIters = 0;
+  while (requestId === searchRequestId && hasMore.value && totalIters < MAX_TOTAL_ITERATIONS) {
+    const batchSize = Math.min(BATCH_ITERATIONS, MAX_TOTAL_ITERATIONS - totalIters);
+    const result = await fetchScanBatchPage(batchSize);
+    if (requestId !== searchRequestId) return;
+    appendScanResult(result);
+    totalIters += batchSize;
   }
 }
 
 async function loadKeys() {
   if (!redisBrowserIsActive) return;
   const requestId = ++searchRequestId;
+  isFetchingAll.value = false;
   loading.value = true;
+  loadedKeyRaws.clear();
   flatKeys.value = [];
   treeKeys.value = [];
   selectedKeyRaw.value = null;
@@ -262,20 +299,16 @@ async function loadKeys() {
   expandedGroupIds.value = new Set();
   scanCursor.value = 0;
   try {
-    if (searchMode.value === "value" && !valueQuery.value) {
+    if (isValueSearchMode.value && !valueQuery.value) {
       hasMore.value = false;
       return;
     }
     const applied = await scanNextPage(requestId);
     if (applied) {
-      if (searchMode.value === "value") {
+      if (isValueSearchMode.value) {
         await streamValueSearch(requestId);
       } else {
         await fillInitialKeyBatch(requestId);
-        if (requestId === searchRequestId) {
-          loading.value = false;
-          void streamKeySearch(requestId);
-        }
       }
     }
   } finally {
@@ -294,6 +327,38 @@ async function loadMore() {
   } finally {
     loadingMore.value = false;
   }
+}
+
+// Fetch-all uses large key-only SCAN pages and rebuilds the tree once at the
+// end; per-page tree sorting dominates runtime on million-key pattern scans.
+const FETCH_ALL_SCAN_COUNT = 50000;
+const FETCH_ALL_BATCH_ITERATIONS = 1;
+
+async function fetchAll() {
+  if (!hasMore.value || isFetchingAll.value) return;
+  const requestId = searchRequestId;
+  isFetchingAll.value = true;
+  let changed = false;
+  try {
+    while (requestId === searchRequestId && isFetchingAll.value && hasMore.value) {
+      const result = await fetchScanBatchPage(FETCH_ALL_BATCH_ITERATIONS, {
+        count: FETCH_ALL_SCAN_COUNT,
+        includeTypes: false,
+      });
+      if (requestId !== searchRequestId) break;
+      appendScanResult(result, { updateTree: false });
+      changed = true;
+    }
+  } finally {
+    if (requestId === searchRequestId) {
+      if (changed && !useFlatKeySearchRows.value) rebuildTree(isSearchMode.value);
+      isFetchingAll.value = false;
+    }
+  }
+}
+
+function stopFetchAll() {
+  isFetchingAll.value = false;
 }
 
 function toggleGroup(groupId: string) {
@@ -315,6 +380,7 @@ function onRowClick(node: RedisKeyTreeNode) {
 
 function onKeyDeleted() {
   if (!selectedKeyRaw.value) return;
+  loadedKeyRaws.delete(selectedKeyRaw.value);
   flatKeys.value = flatKeys.value.filter((key) => key.key_raw !== selectedKeyRaw.value);
   selectedKeyRaw.value = null;
   rebuildTree(false);
@@ -322,6 +388,26 @@ function onKeyDeleted() {
     loaded: isSearchMode.value ? undefined : flatKeys.value.length,
     totalDelta: -1,
   });
+}
+
+function redisValueToKeyInfo(value: RedisValue): RedisKeyInfo {
+  return {
+    key_display: value.key_display,
+    key_raw: value.key_raw,
+    key_type: value.key_type,
+    ttl: value.ttl,
+    size: typeof value.value === "string" ? value.value.length : (value.total ?? 0),
+    value_preview: createdKeyPreview(value.value),
+  };
+}
+
+function onKeyLoaded(value: RedisValue) {
+  const keyInfo = redisValueToKeyInfo(value);
+  const existingIndex = flatKeys.value.findIndex((key) => key.key_raw === keyInfo.key_raw);
+  if (existingIndex < 0) return;
+  flatKeys.value = flatKeys.value.map((key, index) => (index === existingIndex ? keyInfo : key));
+  loadedKeyRaws.add(keyInfo.key_raw);
+  rebuildTree(false);
 }
 
 function toggleCheck(keyRaw: string, event: Event) {
@@ -348,6 +434,7 @@ function requestGroupDelete(node: RedisKeyTreeNode, event: Event) {
 }
 
 function resetLoadedKeys() {
+  loadedKeyRaws.clear();
   flatKeys.value = [];
   treeKeys.value = [];
   selectedKeyRaw.value = null;
@@ -359,6 +446,7 @@ function resetLoadedKeys() {
 async function deleteKeyRaws(keys: string[]) {
   const deletedCount = await api.redisDeleteKeys(props.connectionId, props.db, keys);
   const deleted = new Set(keys);
+  for (const key of deleted) loadedKeyRaws.delete(key);
   flatKeys.value = flatKeys.value.filter((k) => !deleted.has(k.key_raw));
   if (selectedKeyRaw.value && deleted.has(selectedKeyRaw.value)) {
     selectedKeyRaw.value = null;
@@ -383,6 +471,17 @@ function appendCommandHistory(entry: Omit<RedisCommandHistoryEntry, "id">) {
   scrollCommandTerminalToEnd();
 }
 
+function appendCommandOutput(entry: Omit<RedisCommandHistoryEntry, "id">) {
+  // 显示输出但不记入历史（用于错误提示、空命令提示等）
+  const tempEntry = { id: ++commandHistoryId, ...entry };
+  commandHistory.value = [...commandHistory.value, tempEntry];
+  scrollCommandTerminalToEnd();
+  // 1秒后自动移除提示
+  setTimeout(() => {
+    commandHistory.value = commandHistory.value.filter((e) => e.id !== tempEntry.id);
+  }, 1000);
+}
+
 async function runRedisCommand(command: string) {
   const prompt = commandPrompt.value;
   commandRunning.value = true;
@@ -391,30 +490,85 @@ async function runRedisCommand(command: string) {
     appendCommandHistory({
       prompt,
       command,
-      output: formatRedisCommandResult(result.value),
+      output: formatRedisConsoleValue(result.value),
       error: false,
     });
+    // The db this command ran on — capture before nextRedisCommandDb() advances it.
+    const executedDb = commandDb.value;
     commandDb.value = nextRedisCommandDb(commandDb.value, command, result.value);
     if (result.safety === "confirm") {
       await loadKeys();
     }
+    // Drop the cached key-name completion for this db so the editor's autocomplete
+    // reflects keys added/removed/renamed by SET/DEL/RENAME/...
+    if (isRedisMutatingCommand(command)) {
+      connectionStore.invalidateCompletionCache(props.connectionId, String(executedDb));
+      // Refresh the sidebar db key counts (INFO keyspace) so `dbN (count)` stays accurate
+      // after the write. Fire-and-forget so the terminal stays responsive.
+      void connectionStore.refreshRedisDbKeyCounts(props.connectionId);
+    }
+    // Persist to history
+    persistRedisHistory(command, true, result.value);
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
     appendCommandHistory({
       prompt,
       command,
-      output: error instanceof Error ? error.message : String(error),
+      output: errorMessage,
       error: true,
     });
+    // Persist failed command too
+    persistRedisHistory(command, false, null, errorMessage);
   } finally {
     commandRunning.value = false;
     scrollCommandTerminalToEnd();
   }
 }
 
+function persistRedisHistory(command: string, success: boolean, resultValue?: unknown, errorMessage?: string) {
+  const connName = connectionStore.getConfig(props.connectionId)?.name || "";
+  const entry: HistoryEntry = {
+    id: uuid(),
+    connection_id: props.connectionId,
+    connection_name: connName,
+    database: String(commandDb.value),
+    sql: command,
+    executed_at: new Date().toISOString(),
+    execution_time_ms: 0,
+    success,
+    error: errorMessage,
+    activity_kind: "redis_command",
+    operation: command.split(" ")[0].toUpperCase(),
+    target: "",
+    affected_rows: null,
+    rollback_sql: null,
+    details_json: resultValue != null ? JSON.stringify(resultValue) : null,
+  };
+  void api.saveHistory(entry);
+}
+
 async function openCommandPanel() {
   activeSidePanel.value = "command";
   await nextTick();
   getCommandInput()?.focus();
+}
+
+function makeEntry(): CreateKeyEntry {
+  return { id: nextEntryId++, value: "", field: "", score: "0" };
+}
+
+function resetEntries() {
+  createKeyEntries.value = [makeEntry()];
+}
+
+function addEntry() {
+  createKeyEntries.value.push(makeEntry());
+}
+
+function removeEntry(idx: number) {
+  if (createKeyEntries.value.length > 1) {
+    createKeyEntries.value.splice(idx, 1);
+  }
 }
 
 function resetCreateKeyForm() {
@@ -424,6 +578,41 @@ function resetCreateKeyForm() {
   createKeyField.value = "";
   createKeyScore.value = "0";
   createKeyError.value = "";
+  createKeyTtl.value = "";
+  createKeyRawMode.value = false;
+  createKeyEntryId.value = "*";
+  jsonModuleAvailable.value = null;
+  checkingJsonModule.value = false;
+  resetEntries();
+}
+
+function onCreateKeyTypeChange(type: any) {
+  createKeyType.value = (type || "string") as RedisCreateKeyType;
+  createKeyRawMode.value = false;
+  jsonModuleAvailable.value = null;
+  checkingJsonModule.value = false;
+  resetEntries();
+  if (createKeyType.value === "json") {
+    createKeyError.value = "";
+    checkingJsonModule.value = true;
+    api
+      .redisCheckJsonModule(props.connectionId, props.db)
+      .then((ok) => {
+        jsonModuleAvailable.value = ok;
+        if (!ok) {
+          createKeyError.value = t("redis.jsonModuleNotAvailable");
+        }
+      })
+      .catch(() => {
+        jsonModuleAvailable.value = false;
+        createKeyError.value = t("redis.jsonModuleNotAvailable");
+      })
+      .finally(() => {
+        checkingJsonModule.value = false;
+      });
+  } else {
+    createKeyError.value = "";
+  }
 }
 
 function openCreateKeyDialog() {
@@ -455,6 +644,7 @@ function upsertCreatedKey(value: any) {
   } else {
     flatKeys.value = [keyInfo, ...flatKeys.value];
   }
+  loadedKeyRaws.add(keyInfo.key_raw);
   selectedKeyRaw.value = keyInfo.key_raw;
   rebuildTree(isSearchMode.value);
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
@@ -467,15 +657,7 @@ async function createRedisKey() {
   const keyName = createKeyName.value.trim();
   if (!keyName) {
     createKeyError.value = t("redis.createKeyNameRequired");
-    return;
-  }
-  if (createKeyType.value === "hash" && !createKeyField.value.trim()) {
-    createKeyError.value = t("redis.createFieldRequired");
-    return;
-  }
-  const score = Number.parseFloat(createKeyScore.value || "0");
-  if (createKeyType.value === "zset" && Number.isNaN(score)) {
-    createKeyError.value = t("redis.createScoreInvalid");
+    toast(t("redis.createKeyNameRequired"), 3000);
     return;
   }
 
@@ -483,17 +665,65 @@ async function createRedisKey() {
   createKeyError.value = "";
   try {
     const keyRaw = redisKeyTextToRaw(keyName);
-    if (createKeyType.value === "string") {
-      await api.redisSetString(props.connectionId, props.db, keyRaw, createKeyValue.value);
-    } else if (createKeyType.value === "hash") {
-      await api.redisHashSet(props.connectionId, props.db, keyRaw, createKeyField.value, createKeyValue.value);
-    } else if (createKeyType.value === "list") {
-      await api.redisListPush(props.connectionId, props.db, keyRaw, createKeyValue.value);
-    } else if (createKeyType.value === "set") {
-      await api.redisSetAdd(props.connectionId, props.db, keyRaw, createKeyValue.value);
-    } else if (createKeyType.value === "zset") {
-      await api.redisZadd(props.connectionId, props.db, keyRaw, createKeyValue.value, score);
+    const ttl = createKeyTtl.value ? Number.parseInt(createKeyTtl.value) || undefined : undefined;
+
+    if (createKeyType.value === "string" || createKeyType.value === "json" || createKeyRawMode.value) {
+      // Raw text/JSON mode — single value
+      if (createKeyType.value === "string") {
+        await api.redisSetString(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl);
+      } else if (createKeyType.value === "json") {
+        await api.redisJsonSet(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl);
+      } else if (createKeyType.value === "hash") {
+        await api.redisHashSet(props.connectionId, props.db, keyRaw, createKeyField.value, createKeyValue.value, ttl);
+      } else if (createKeyType.value === "list") {
+        await api.redisListPush(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl);
+      } else if (createKeyType.value === "set") {
+        await api.redisSetAdd(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl);
+      } else if (createKeyType.value === "zset") {
+        const score = Number.parseFloat(createKeyScore.value || "0");
+        await api.redisZadd(props.connectionId, props.db, keyRaw, createKeyValue.value, score, ttl);
+      }
+    } else {
+      // Structured entries mode — insert each entry, then set TTL once
+      if (createKeyType.value === "hash") {
+        for (const entry of createKeyEntries.value) {
+          if (entry.field && entry.field.trim()) {
+            await api.redisHashSet(props.connectionId, props.db, keyRaw, entry.field, entry.value);
+          }
+        }
+      } else if (createKeyType.value === "list") {
+        for (const entry of createKeyEntries.value) {
+          if (entry.value) {
+            await api.redisListPush(props.connectionId, props.db, keyRaw, entry.value);
+          }
+        }
+      } else if (createKeyType.value === "set") {
+        for (const entry of createKeyEntries.value) {
+          if (entry.value) {
+            await api.redisSetAdd(props.connectionId, props.db, keyRaw, entry.value);
+          }
+        }
+      } else if (createKeyType.value === "zset") {
+        for (const entry of createKeyEntries.value) {
+          if (entry.value) {
+            const s = Number.parseFloat(entry.score || "0");
+            if (!Number.isNaN(s)) {
+              await api.redisZadd(props.connectionId, props.db, keyRaw, entry.value, s);
+            }
+          }
+        }
+      } else if (createKeyType.value === "stream") {
+        const fields: [string, string][] = createKeyEntries.value.filter((e) => e.field && e.field.trim()).map((e) => [e.field!.trim(), e.value]);
+        if (fields.length > 0) {
+          const entryId = createKeyEntryId.value.trim() || "*";
+          await api.redisStreamAdd(props.connectionId, props.db, keyRaw, entryId, fields, ttl);
+        }
+      }
+      if (ttl) {
+        await api.redisSetTtl(props.connectionId, props.db, keyRaw, ttl);
+      }
     }
+
     const created = await api.redisGetValue(props.connectionId, props.db, keyRaw);
     upsertCreatedKey(created);
     showCreateKeyDialog.value = false;
@@ -507,7 +737,8 @@ async function createRedisKey() {
 async function executeCommand() {
   const command = commandText.value.trim();
   if (!command) {
-    appendCommandHistory({
+    // 空命令显示提示但不记入历史
+    appendCommandOutput({
       prompt: commandPrompt.value,
       command: "",
       output: t("redis.commandEmpty"),
@@ -518,6 +749,7 @@ async function executeCommand() {
   if (isRedisClearScreenCommand(command)) {
     commandHistory.value = [];
     commandText.value = "";
+    commandHistoryIndex.value = -1;
     scrollCommandTerminalToEnd();
     return;
   }
@@ -531,15 +763,18 @@ async function executeCommand() {
       error: true,
     });
     commandText.value = "";
+    commandHistoryIndex.value = -1;
     return;
   }
   if (safety === "confirm") {
     pendingDanger.value = { kind: "command", command };
     showDangerConfirm.value = true;
     commandText.value = "";
+    commandHistoryIndex.value = -1;
     return;
   }
   commandText.value = "";
+  commandHistoryIndex.value = -1;
   await runRedisCommand(command);
 }
 
@@ -593,13 +828,6 @@ function toggleFuzzyKeySearch() {
   if (searchMode.value === "key") void loadKeys();
 }
 
-function stopBackgroundKeySearch() {
-  searchRequestId++;
-  backgroundKeySearchRunning.value = false;
-  loading.value = false;
-  loadingMore.value = false;
-}
-
 function getSearchInput(): HTMLInputElement | null {
   return rootRef.value?.querySelector<HTMLInputElement>("[data-redis-search-input]") ?? null;
 }
@@ -648,9 +876,9 @@ function unregisterRedisDbFlushedListener() {
 function pauseRedisBrowserBackgroundWork() {
   redisBrowserIsActive = false;
   searchRequestId++;
+  isFetchingAll.value = false;
   loading.value = false;
   loadingMore.value = false;
-  backgroundKeySearchRunning.value = false;
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = null;
   unregisterRedisDbFlushedListener();
@@ -659,6 +887,51 @@ function pauseRedisBrowserBackgroundWork() {
 function resumeRedisBrowserBackgroundWork() {
   redisBrowserIsActive = true;
   registerRedisDbFlushedListener();
+}
+
+async function clearInMemoryHistory() {
+  commandHistory.value = [];
+}
+
+function onCommandAreaClick() {
+  // 只有在没有选中文本时才聚焦输入框，避免清除用户的文本选择
+  const selection = window.getSelection();
+  if (!selection || selection.toString().length === 0) {
+    getCommandInput()?.focus();
+  }
+}
+
+function onCommandInputKeydown(event: KeyboardEvent) {
+  // 上下键切换历史命令
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (commandHistory.value.length === 0) return;
+
+    if (commandHistoryIndex.value === -1) {
+      // 首次按上键，从最后一条开始
+      commandHistoryIndex.value = commandHistory.value.length - 1;
+    } else if (commandHistoryIndex.value > 0) {
+      // 继续往前
+      commandHistoryIndex.value--;
+    }
+    commandText.value = commandHistory.value[commandHistoryIndex.value].command;
+  } else if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (commandHistoryIndex.value === -1) return;
+
+    if (commandHistoryIndex.value < commandHistory.value.length - 1) {
+      // 往后
+      commandHistoryIndex.value++;
+      commandText.value = commandHistory.value[commandHistoryIndex.value].command;
+    } else {
+      // 到达末尾，清空输入
+      commandHistoryIndex.value = -1;
+      commandText.value = "";
+    }
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    executeCommand();
+  }
 }
 
 onMounted(() => {
@@ -692,49 +965,18 @@ defineExpose({ focusSearch });
           <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0">
             <Search class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
             <div class="h-6 flex rounded-md border bg-muted/30 p-0.5 shrink-0" role="group">
-              <button
-                type="button"
-                class="h-5 px-2 text-xs rounded-sm transition-colors"
-                :class="
-                  searchMode === 'key'
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                "
-                @click="setSearchMode('key')"
-              >
+              <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'key' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('key')">
                 {{ t("redis.searchByKey") }}
               </button>
-              <button
-                type="button"
-                class="h-5 px-2 text-xs rounded-sm transition-colors"
-                :class="
-                  searchMode === 'value'
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                "
-                @click="setSearchMode('value')"
-              >
+              <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'value' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('value')">
                 {{ t("redis.searchByValue") }}
               </button>
+              <button type="button" class="h-5 px-2 text-xs rounded-sm transition-colors" :class="searchMode === 'all' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="setSearchMode('all')">
+                {{ t("redis.searchByAll") }}
+              </button>
             </div>
-            <Input
-              v-model="searchPattern"
-              data-redis-search-input
-              class="h-6 text-xs border-0 shadow-none focus-visible:ring-0"
-              :placeholder="searchPlaceholder"
-              @input="onSearchInput"
-              @keydown="onSearchKeydown"
-            />
-            <Button
-              v-if="searchMode === 'key'"
-              variant="ghost"
-              size="sm"
-              class="h-6 shrink-0 px-2 text-xs"
-              :class="fuzzyKeySearch ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'"
-              :title="t('redis.fuzzyMatchTitle')"
-              :aria-pressed="fuzzyKeySearch"
-              @click="toggleFuzzyKeySearch"
-            >
+            <Input v-model="searchPattern" data-redis-search-input class="h-6 text-xs border-0 shadow-none focus-visible:ring-0" :placeholder="searchPlaceholder" @input="onSearchInput" @keydown="onSearchKeydown" />
+            <Button v-if="searchMode === 'key'" variant="ghost" size="sm" class="h-6 shrink-0 px-2 text-xs" :class="fuzzyKeySearch ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'" :title="t('redis.fuzzyMatchTitle')" :aria-pressed="fuzzyKeySearch" @click="toggleFuzzyKeySearch">
               <Asterisk class="h-3 w-3 mr-1" />
               {{ t("redis.fuzzyMatch") }}
             </Button>
@@ -742,140 +984,63 @@ defineExpose({ focusSearch });
               <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
               <RefreshCw v-else class="h-3 w-3" />
             </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              class="h-6 w-6 shrink-0"
-              :title="t('redis.createKey')"
-              @click="openCreateKeyDialog"
-            >
+            <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('redis.createKey')" @click="openCreateKeyDialog">
               <Plus class="h-3 w-3" />
             </Button>
-            <span class="text-xs text-muted-foreground shrink-0 ml-1">
-              {{
-                backgroundKeySearchRunning
-                  ? t("redis.searchProgress", { count: flatKeys.length })
-                  : loading && flatKeys.length === 0
-                    ? loadingEmptyText
-                    : t("redis.keys", { count: flatKeys.length })
-              }}
-            </span>
-            <Button
-              v-if="backgroundKeySearchRunning"
-              variant="ghost"
-              size="icon"
-              class="h-6 w-6 shrink-0"
-              :title="t('redis.stopSearch')"
-              @click="stopBackgroundKeySearch"
-            >
-              <X class="h-3 w-3" />
-            </Button>
-            <Button
-              v-if="checkedKeys.size > 0"
-              variant="ghost"
-              size="sm"
-              class="h-6 text-xs text-destructive shrink-0 ml-1"
-              @click="requestBatchDelete"
-            >
-              <Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }}
-            </Button>
+            <span class="text-xs text-muted-foreground shrink-0 ml-1">{{ loading && flatKeys.length === 0 ? loadingEmptyText : t("redis.keys", { count: flatKeys.length }) }}</span>
+            <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 text-xs text-destructive shrink-0 ml-1" @click="requestBatchDelete"> <Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }} </Button>
           </div>
 
-          <div
-            v-if="flatKeys.length === 0 && !loading"
-            class="flex-1 flex items-center justify-center text-muted-foreground text-xs"
-          >
+          <div v-if="flatKeys.length === 0 && !loading" class="flex-1 flex items-center justify-center text-muted-foreground text-xs">
             {{ t("redis.noKeys") }}
           </div>
-          <div
-            v-else-if="loading && flatKeys.length === 0"
-            class="flex-1 flex items-center justify-center gap-2 text-muted-foreground text-xs"
-          >
+          <div v-else-if="loading && flatKeys.length === 0" class="flex-1 flex items-center justify-center gap-2 text-muted-foreground text-xs">
             <Loader2 class="w-3.5 h-3.5 animate-spin" />
             <span>{{ loadingEmptyText }}</span>
           </div>
-          <RecycleScroller
-            v-else
-            class="redis-key-scroller flex-1"
-            :items="visibleRows"
-            :item-size="30"
-            :buffer="600"
-            :skip-hover="true"
-            key-field="id"
-          >
+          <RecycleScroller v-else class="redis-key-scroller flex-1" :items="visibleRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id">
             <template #default="{ item: row }">
-              <div
-                class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer hover:bg-accent/50 group"
-                :class="{ 'bg-accent': row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw }"
-                :style="{ height: '30px' }"
-                @click="onRowClick(row.node)"
-              >
-                <div
-                  class="min-w-0 flex flex-1 items-center gap-1 overflow-hidden"
-                  :style="{ paddingLeft: `${12 + row.depth * 16}px` }"
-                >
+              <div class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer hover:bg-accent/50 group" :class="{ 'bg-accent': row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw }" :style="{ height: '30px' }" @click="onRowClick(row.node)">
+                <div class="min-w-0 flex flex-1 items-center gap-1 overflow-hidden" :style="{ paddingLeft: `${12 + row.depth * 16}px` }">
                   <template v-if="row.node.kind === 'group'">
-                    <component
-                      :is="expandedGroupIds.has(row.node.id) ? ChevronDown : ChevronRight"
-                      class="w-3 h-3 shrink-0 text-muted-foreground"
-                    />
-                    <component
-                      :is="expandedGroupIds.has(row.node.id) ? FolderOpen : FolderClosed"
-                      class="w-3 h-3 shrink-0 text-amber-500"
-                    />
+                    <component :is="expandedGroupIds.has(row.node.id) ? ChevronDown : ChevronRight" class="w-3 h-3 shrink-0 text-muted-foreground" />
+                    <component :is="expandedGroupIds.has(row.node.id) ? FolderOpen : FolderClosed" class="w-3 h-3 shrink-0 text-amber-500" />
                     <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
                     <span class="text-muted-foreground ml-1">({{ countLeaves(row.node) }})</span>
                   </template>
                   <template v-else>
                     <span class="relative flex h-4 w-4 shrink-0 items-center justify-center">
-                      <KeyRound
-                        class="h-3.5 w-3.5 text-muted-foreground/70 transition-opacity group-hover:opacity-0"
-                        :class="{ 'opacity-0': checkedKeys.has(row.node.keyRaw) }"
-                      />
-                      <input
-                        type="checkbox"
-                        class="absolute h-3.5 w-3.5 accent-primary cursor-pointer opacity-0 group-hover:opacity-100"
-                        :class="{ 'opacity-100': checkedKeys.has(row.node.keyRaw) }"
-                        :checked="checkedKeys.has(row.node.keyRaw)"
-                        @click="toggleCheck(row.node.keyRaw, $event)"
-                      />
+                      <KeyRound class="h-3.5 w-3.5 text-muted-foreground/70 transition-opacity group-hover:opacity-0" :class="{ 'opacity-0': checkedKeys.has(row.node.keyRaw) }" />
+                      <input type="checkbox" class="absolute h-3.5 w-3.5 accent-primary cursor-pointer opacity-0 group-hover:opacity-100" :class="{ 'opacity-100': checkedKeys.has(row.node.keyRaw) }" :checked="checkedKeys.has(row.node.keyRaw)" @click="toggleCheck(row.node.keyRaw, $event)" />
                     </span>
                     <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
                   </template>
                 </div>
 
                 <div class="flex shrink-0 items-center justify-end gap-1">
-                  <Badge
-                    v-if="row.node.kind === 'leaf' && row.node.keyType !== 'unknown'"
-                    variant="outline"
-                    class="text-xs px-1.5 py-0"
-                    :class="typeColor(row.node.keyType)"
-                    >{{ row.node.keyType }}</Badge
-                  >
-                  <Button
-                    v-if="row.node.kind === 'group'"
-                    variant="ghost"
-                    size="icon"
-                    class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100"
-                    :title="t('redis.deleteGroup')"
-                    @click="requestGroupDelete(row.node, $event)"
-                  >
+                  <Badge v-if="row.node.kind === 'leaf' && row.node.keyType" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(row.node.keyType)">{{ row.node.keyType }}</Badge>
+                  <Button v-if="row.node.kind === 'group'" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" @click="requestGroupDelete(row.node, $event)">
                     <Trash2 class="h-3 w-3" />
                   </Button>
                 </div>
               </div>
             </template>
           </RecycleScroller>
-          <div v-if="hasMore" class="shrink-0 border-t px-2 py-1.5 flex items-center justify-center">
-            <Button
-              variant="outline"
-              size="sm"
-              class="h-7 text-xs w-full"
-              :disabled="loadingMore || loading"
-              @click="loadMore"
-            >
+          <div v-if="hasMore && !isFetchingAll" class="shrink-0 border-t px-2 py-1.5 flex items-center gap-1.5">
+            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loadingMore || loading" @click="loadMore">
               <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
               {{ t("redis.loadMoreKeys") }}
+            </Button>
+            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loading || !hasMore" @click="fetchAll">
+              {{ t("redis.fetchAllKeys") }}
+            </Button>
+          </div>
+          <div v-if="isFetchingAll" class="shrink-0 border-t px-2 py-1.5 space-y-1">
+            <div class="text-xs text-muted-foreground text-center">
+              {{ fetchAllProgressText }}
+            </div>
+            <Button variant="destructive" size="sm" class="h-7 text-xs w-full" @click="stopFetchAll">
+              {{ t("redis.stopFetchAll") }}
             </Button>
           </div>
         </div>
@@ -884,46 +1049,41 @@ defineExpose({ focusSearch });
       <!-- Workspace (right) -->
       <Pane :size="64" :min-size="36">
         <div class="h-full min-w-0 bg-background flex flex-col overflow-hidden">
-          <Tabs v-model="activeSidePanel" class="h-full min-h-0 gap-0">
-            <div class="h-9 shrink-0 border-b bg-background px-3 flex items-center">
+          <Tabs v-model="activeSidePanel" :unmount-on-hide="false" class="h-full min-h-0 gap-0">
+            <div class="h-9 shrink-0 border-b bg-background px-3 flex items-center justify-between">
               <TabsList class="h-7 gap-1 p-0.5">
                 <TabsTrigger value="detail" class="h-6 flex-none gap-1.5 rounded-md px-2 text-xs">
                   <KeyRound class="size-3.5" />
                   {{ t("redis.keyDetail") }}
                 </TabsTrigger>
-                <TabsTrigger
-                  value="command"
-                  class="h-6 flex-none gap-1.5 rounded-md px-2 text-xs"
-                  @click="openCommandPanel"
-                >
+                <TabsTrigger value="command" class="h-6 flex-none gap-1.5 rounded-md px-2 text-xs" @click="openCommandPanel">
                   <TerminalSquare class="size-3.5" />
                   {{ t("redis.commandLine") }}
                 </TabsTrigger>
+                <TabsTrigger value="pubsub" class="h-6 flex-none gap-1.5 rounded-md px-2 text-xs">
+                  <Radio class="size-3.5" />
+                  {{ t("redis.pubsub") }}
+                </TabsTrigger>
+                <TabsTrigger value="slowlog" class="h-6 flex-none gap-1.5 rounded-md px-2 text-xs">
+                  <Clock class="size-3.5" />
+                  {{ t("redis.slowlog") }}
+                </TabsTrigger>
               </TabsList>
+              <Button v-if="activeSidePanel === 'command'" variant="ghost" size="icon" class="h-6 w-6" :title="t('redis.clearHistory')" @click="clearInMemoryHistory">
+                <History class="size-3.5" />
+              </Button>
             </div>
 
             <TabsContent value="detail" class="m-0 min-h-0 flex-1 flex flex-col">
-              <RedisValueViewer
-                v-if="selectedKey"
-                :key="selectedKey.key_raw"
-                :connection-id="connectionId"
-                :db="db"
-                :key-display="selectedKey.key_display"
-                :key-raw="selectedKey.key_raw"
-                :metadata="selectedKey"
-                @deleted="onKeyDeleted"
-              />
+              <RedisValueViewer v-if="selectedKey" :key="selectedKey.key_raw" :connection-id="connectionId" :db="db" :key-display="selectedKey.key_display" :key-raw="selectedKey.key_raw" :metadata="selectedKey" @deleted="onKeyDeleted" @loaded="onKeyLoaded" />
               <div v-else class="flex-1 flex items-center justify-center text-xs text-muted-foreground">
                 {{ t("redis.selectKeyForDetail") }}
               </div>
             </TabsContent>
 
             <TabsContent value="command" class="m-0 min-h-0 flex-1 flex flex-col">
-              <div
-                class="dbx-editor-font-family relative flex min-h-0 flex-1 flex-col bg-[#171b21] text-[13px] leading-5 text-slate-200"
-                @click="getCommandInput()?.focus()"
-              >
-                <div ref="commandTerminalRef" class="min-h-0 flex-1 overflow-auto px-4 pb-3 pt-4">
+              <div class="dbx-editor-font-family relative flex min-h-0 flex-1 flex-col bg-[#171b21] text-[13px] leading-5 text-slate-200" @click="onCommandAreaClick">
+                <div ref="commandTerminalRef" class="redis-command-terminal min-h-0 flex-1 overflow-auto px-4 pb-3 pt-4">
                   <div class="mb-4 text-slate-400">
                     <span class="text-slate-200">{{ t("redis.commandWelcome") }}</span>
                   </div>
@@ -933,46 +1093,41 @@ defineExpose({ focusSearch });
                       <span class="shrink-0 text-[#d7ba7d]">{{ entry.prompt }}</span>
                       <span class="min-w-0 text-slate-200">{{ entry.command }}</span>
                     </div>
-                    <pre
-                      v-if="entry.output"
-                      class="ml-0 whitespace-pre-wrap break-words pl-0"
-                      :class="entry.error ? 'text-[#ff6b6b]' : 'text-slate-300'"
-                      >{{ entry.output }}</pre
-                    >
+                    <pre v-if="entry.output" class="ml-0 whitespace-pre-wrap break-words pl-0" :class="entry.error ? 'text-[#ff6b6b]' : 'text-slate-300'">{{ entry.output }}</pre>
                   </div>
                 </div>
 
-                <form
-                  class="flex shrink-0 items-center gap-2 border-t border-white/10 bg-[#171b21] px-4 py-2"
-                  @submit.prevent="executeCommand"
-                >
+                <form class="flex shrink-0 items-center gap-2 border-t border-white/10 bg-[#171b21] px-4 py-2" @submit.prevent="executeCommand">
                   <span class="shrink-0 text-[#d7ba7d]">{{ commandPrompt }}</span>
                   <input
                     v-model="commandText"
                     data-redis-command-input
                     class="dbx-editor-font-family min-w-0 flex-1 border-0 bg-transparent p-0 text-[13px] text-slate-200 caret-[#d7ba7d] outline-none placeholder:text-slate-500"
-                    :disabled="commandRunning"
+                    :class="{ 'opacity-50': commandRunning }"
+                    :readonly="commandRunning"
                     autocomplete="off"
                     autocapitalize="off"
                     spellcheck="false"
-                    @keydown.enter.prevent="executeCommand"
+                    @keydown="onCommandInputKeydown"
                   />
                   <Loader2 v-if="commandRunning" class="h-3.5 w-3.5 shrink-0 animate-spin text-slate-500" />
                 </form>
               </div>
+            </TabsContent>
+
+            <TabsContent value="pubsub" class="m-0 min-h-0 flex-1 flex flex-col">
+              <RedisPubSubPanel :connection-id="connectionId" :db="db" />
+            </TabsContent>
+
+            <TabsContent value="slowlog" class="m-0 min-h-0 flex-1 flex flex-col">
+              <RedisSlowlogPanel :connection-id="connectionId" :db="db" />
             </TabsContent>
           </Tabs>
         </div>
       </Pane>
     </Splitpanes>
 
-    <DangerConfirmDialog
-      v-model:open="showDangerConfirm"
-      :message="t('dangerDialog.deleteMessage')"
-      :details="dangerDetails"
-      :confirm-label="dangerConfirmLabel"
-      @confirm="applyDangerAction"
-    />
+    <DangerConfirmDialog v-model:open="showDangerConfirm" :message="t('dangerDialog.deleteMessage')" :details="dangerDetails" :confirm-label="dangerConfirmLabel" @confirm="applyDangerAction" />
 
     <Dialog v-model:open="showCreateKeyDialog">
       <DialogContent class="sm:max-w-md" :style="editorFontFamilyStyle">
@@ -983,20 +1138,12 @@ defineExpose({ focusSearch });
         <div class="grid gap-3">
           <label class="grid gap-1.5 text-xs font-medium">
             <span>{{ t("redis.createKeyName") }}</span>
-            <Input
-              v-model="createKeyName"
-              class="dbx-editor-font-family h-8 text-xs"
-              :placeholder="t('redis.createKeyNamePlaceholder')"
-              @keydown.enter="createRedisKey"
-            />
+            <Input v-model="createKeyName" class="dbx-editor-font-family h-8 text-xs" :placeholder="t('redis.createKeyNamePlaceholder')" @keydown.enter="createRedisKey" />
           </label>
 
           <label class="grid gap-1.5 text-xs font-medium">
             <span>{{ t("redis.createKeyType") }}</span>
-            <Select
-              :model-value="createKeyType"
-              @update:model-value="(value: any) => (createKeyType = value as RedisCreateKeyType)"
-            >
+            <Select :model-value="createKeyType" @update:model-value="onCreateKeyTypeChange">
               <SelectTrigger class="h-8 text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -1008,36 +1155,72 @@ defineExpose({ focusSearch });
             </Select>
           </label>
 
-          <label v-if="createKeyType === 'hash'" class="grid gap-1.5 text-xs font-medium">
+          <label v-if="createKeyType === 'hash' && createKeyRawMode" class="grid gap-1.5 text-xs font-medium">
             <span>{{ t("redis.createField") }}</span>
-            <Input
-              v-model="createKeyField"
-              class="dbx-editor-font-family h-8 text-xs"
-              :placeholder="t('redis.createFieldPlaceholder')"
-              @keydown.enter="createRedisKey"
-            />
+            <Input v-model="createKeyField" class="dbx-editor-font-family h-8 text-xs" :placeholder="t('redis.createFieldPlaceholder')" @keydown.enter="createRedisKey" />
           </label>
 
-          <label v-if="createKeyType === 'zset'" class="grid gap-1.5 text-xs font-medium">
+          <label v-if="createKeyType === 'zset' && createKeyRawMode" class="grid gap-1.5 text-xs font-medium">
             <span>{{ t("redis.createScore") }}</span>
-            <Input
-              v-model="createKeyScore"
-              class="dbx-editor-font-family h-8 text-xs"
-              placeholder="0"
-              @keydown.enter="createRedisKey"
-            />
+            <Input v-model="createKeyScore" class="dbx-editor-font-family h-8 text-xs" placeholder="0" @keydown.enter="createRedisKey" />
           </label>
 
+          <!-- TTL input -- always visible -->
           <label class="grid gap-1.5 text-xs font-medium">
-            <span>{{
-              t(createKeyType === "set" || createKeyType === "zset" ? "redis.createMember" : "redis.createValue")
-            }}</span>
-            <textarea
-              v-model="createKeyValue"
-              class="dbx-editor-font-family min-h-28 resize-y rounded-md border bg-background p-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              spellcheck="false"
-              :placeholder="t('redis.createValuePlaceholder')"
-            />
+            <span>{{ t("redis.createKeyTtl") }}</span>
+            <Input v-model="createKeyTtl" class="dbx-editor-font-family h-8 text-xs" type="number" min="0" :placeholder="t('redis.createKeyTtlPlaceholder')" @keydown.enter="createRedisKey" />
+          </label>
+
+          <!-- Raw mode toggle (non-string, non-stream, non-json types) -->
+          <div v-if="createKeyType !== 'string' && createKeyType !== 'stream' && createKeyType !== 'json'" class="flex items-center justify-end gap-1.5">
+            <label class="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span>{{ t("redis.createKeyRawMode") }}</span>
+              <Switch size="sm" v-model="createKeyRawMode" />
+            </label>
+          </div>
+
+          <!-- Structured entries (non-string, non-json, non-raw mode) -->
+          <template v-if="createKeyType !== 'string' && createKeyType !== 'json' && !createKeyRawMode">
+            <!-- Stream entry ID -->
+            <label v-if="createKeyType === 'stream'" class="grid gap-1.5 text-xs font-medium">
+              <span>{{ t("redis.createKeyEntryId") }}</span>
+              <Input v-model="createKeyEntryId" class="dbx-editor-font-family h-8 text-xs font-mono" placeholder="*" />
+            </label>
+
+            <div class="grid gap-2">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-medium">{{ t("redis.createKeyEntries") }}</span>
+                <Button variant="outline" size="sm" class="h-6 gap-1 text-xs" @click="addEntry">
+                  <Plus class="h-3 w-3" />
+                  {{ t("redis.createKeyAddEntry") }}
+                </Button>
+              </div>
+              <div v-for="(entry, idx) in createKeyEntries" :key="entry.id" class="flex items-start gap-2">
+                <!-- Hash / Stream: field + value -->
+                <template v-if="createKeyType === 'hash' || createKeyType === 'stream'">
+                  <Input v-model="entry.field" class="dbx-editor-font-family h-8 w-2/5 text-xs" :placeholder="t('redis.createFieldPlaceholder')" />
+                  <Input v-model="entry.value" class="dbx-editor-font-family h-8 flex-1 text-xs" :placeholder="t('redis.createValuePlaceholder')" />
+                </template>
+                <!-- ZSet: score + member -->
+                <template v-else-if="createKeyType === 'zset'">
+                  <Input v-model="entry.score" class="dbx-editor-font-family h-8 w-20 text-xs" type="number" step="any" placeholder="0" />
+                  <Input v-model="entry.value" class="dbx-editor-font-family h-8 flex-1 text-xs" :placeholder="t('redis.createMember')" />
+                </template>
+                <!-- List / Set: single value -->
+                <template v-else>
+                  <Input v-model="entry.value" class="dbx-editor-font-family h-8 flex-1 text-xs" :placeholder="t('redis.createValuePlaceholder')" />
+                </template>
+                <Button variant="ghost" size="sm" class="h-8 w-8 shrink-0 p-0 text-muted-foreground hover:text-destructive" :disabled="createKeyEntries.length <= 1" @click="removeEntry(idx)">
+                  <Trash2 class="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </template>
+
+          <!-- Raw value textarea (string, json, or raw mode for other types) -->
+          <label v-if="createKeyType === 'string' || createKeyType === 'json' || createKeyRawMode" class="grid gap-1.5 text-xs font-medium">
+            <span>{{ t(createKeyType === "set" || createKeyType === "zset" ? "redis.createMember" : "redis.createValue") }}</span>
+            <textarea v-model="createKeyValue" class="dbx-editor-font-family min-h-28 resize-y rounded-md border bg-background p-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" spellcheck="false" :placeholder="t('redis.createValuePlaceholder')" />
           </label>
 
           <p v-if="createKeyError" class="text-xs text-destructive">{{ createKeyError }}</p>
@@ -1047,7 +1230,7 @@ defineExpose({ focusSearch });
           <Button variant="ghost" :disabled="creatingKey" @click="showCreateKeyDialog = false">
             {{ t("dangerDialog.cancel") }}
           </Button>
-          <Button :disabled="creatingKey" @click="createRedisKey">
+          <Button :disabled="creatingKey || checkingJsonModule || (createKeyType === 'json' && jsonModuleAvailable !== true)" @click="createRedisKey">
             <Loader2 v-if="creatingKey" class="h-4 w-4 animate-spin" />
             <Plus v-else class="h-4 w-4" />
             {{ t("redis.createKeySubmit") }}
@@ -1076,5 +1259,10 @@ defineExpose({ focusSearch });
 
 .redis-workspace-splitpanes :deep(.splitpanes__splitter:hover) {
   background: var(--primary) !important;
+}
+
+.redis-command-terminal {
+  user-select: text;
+  -webkit-user-select: text;
 }
 </style>

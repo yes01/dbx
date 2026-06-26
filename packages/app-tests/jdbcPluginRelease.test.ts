@@ -1,5 +1,5 @@
-﻿import { strict as assert } from "node:assert";
-import test from "node:test";
+import { strict as assert } from "node:assert";
+import { test } from "vitest";
 import { evaluateJdbcPluginReleaseBump } from "../../.github/scripts/bump-jdbc-plugin-version.mjs";
 import { evaluateJdbcPluginVersionChange } from "../../.github/scripts/check-jdbc-plugin-version.mjs";
 import { augmentLatestJsonWithJdbcPlugin } from "../../.github/scripts/augment-latest-json-jdbc-plugin.mjs";
@@ -70,6 +70,22 @@ test("auto bumps JDBC plugin patch version when runtime files changed for releas
   assert.match(result.manifestJson, /"version": "0\.1\.10"/);
 });
 
+test("does not auto bump JDBC plugin again when release range already includes a version bump", () => {
+  const result = evaluateJdbcPluginReleaseBump({
+    changedFiles: [
+      "plugins/jdbc/src/main/java/app/dbx/jdbc/DbxJdbcPlugin.java",
+      "plugins/jdbc/pom.xml",
+      "plugins/jdbc/manifest.json",
+    ],
+    pomXml: "<project><version>0.1.10</version></project>",
+    manifestJson: '{ "version": "0.1.10" }',
+  });
+
+  assert.equal(result.changed, false);
+  assert.equal(result.oldVersion, "0.1.10");
+  assert.equal(result.newVersion, "0.1.10");
+});
+
 test("does not auto bump JDBC plugin version for release packaging-only changes", () => {
   const result = evaluateJdbcPluginReleaseBump({
     changedFiles: ["plugins/jdbc/README.md", "plugins/jdbc/package.sh"],
@@ -108,7 +124,7 @@ test("adds JDBC plugin metadata to latest.json without disturbing updater fields
     }),
     jdbcVersion: "0.1.3",
     protocolVersion: 1,
-    url: "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip",
+    url: "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip",
   });
   const parsed = JSON.parse(result);
 
@@ -117,7 +133,6 @@ test("adds JDBC plugin metadata to latest.json without disturbing updater fields
   assert.deepEqual(parsed.jdbc_plugin, {
     version: "0.1.3",
     protocol_version: 1,
-    url: "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip",
+    url: "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip",
   });
 });
-

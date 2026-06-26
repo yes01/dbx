@@ -1,4 +1,4 @@
-import type { ColumnInfo, DatabaseType, IndexInfo } from "../types/database.ts";
+import type { ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "../types/database.ts";
 
 export interface ColumnIdentity {
   generation?: "BY DEFAULT" | "ALWAYS";
@@ -10,6 +10,10 @@ export interface ColumnExtra {
   autoIncrement?: boolean;
   onUpdateCurrentTimestamp?: boolean;
   identity?: ColumnIdentity;
+  manticoreIndexed?: boolean;
+  manticoreStored?: boolean;
+  manticoreAttribute?: boolean;
+  manticoreSecondaryIndex?: boolean;
 }
 
 export interface EditableStructureColumn {
@@ -30,6 +34,7 @@ export interface EditableStructureIndex {
   id: string;
   name: string;
   columns: string[];
+  nameEdited?: boolean;
   isUnique: boolean;
   isPrimary: boolean;
   filter: string;
@@ -40,12 +45,37 @@ export interface EditableStructureIndex {
   markedForDrop: boolean;
 }
 
+export interface EditableStructureForeignKey {
+  id: string;
+  name: string;
+  column: string;
+  refSchema: string;
+  refTable: string;
+  refColumn: string;
+  onUpdate: string;
+  onDelete: string;
+  original?: ForeignKeyInfo;
+  markedForDrop: boolean;
+}
+
+export interface EditableStructureTrigger {
+  id: string;
+  name: string;
+  timing: string;
+  event: string;
+  statement: string;
+  original?: TriggerInfo;
+  markedForDrop: boolean;
+}
+
 export interface BuildTableStructureChangeSqlOptions {
   databaseType?: DatabaseType;
   schema?: string;
   tableName: string;
   columns: EditableStructureColumn[];
   indexes: EditableStructureIndex[];
+  foreignKeys?: EditableStructureForeignKey[];
+  triggers?: EditableStructureTrigger[];
   tableComment?: string;
   originalTableComment?: string;
 }

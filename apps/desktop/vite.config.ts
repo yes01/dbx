@@ -6,16 +6,7 @@ import path from "path";
 const host = process.env.TAURI_DEV_HOST;
 const isTauri = !!host || !!process.env.TAURI_ENV_ARCH;
 const manualChunks: Record<string, string[]> = {
-  codemirror: [
-    "codemirror",
-    "@codemirror/lang-sql",
-    "@codemirror/view",
-    "@codemirror/state",
-    "@codemirror/autocomplete",
-    "@codemirror/commands",
-    "@codemirror/theme-one-dark",
-  ],
-  "sql-formatter": ["sql-formatter"],
+  codemirror: ["codemirror", "@codemirror/lang-sql", "@codemirror/view", "@codemirror/state", "@codemirror/autocomplete", "@codemirror/commands", "@codemirror/theme-one-dark"],
   "vue-echarts": ["vue-echarts"],
   ui: ["reka-ui"],
   marked: ["marked"],
@@ -84,14 +75,13 @@ export default defineConfig(async () => ({
           port: 1421,
         }
       : undefined,
-    proxy: isTauri
-      ? undefined
-      : {
-          "/api": {
-            target: "http://localhost:4224",
-            changeOrigin: true,
-          },
-        },
+    proxy: {
+      "/api": {
+        target: "http://localhost:4224",
+        changeOrigin: true,
+        ws: true,
+      },
+    },
     watch: {
       ignored: ["**/src-tauri/**"],
     },

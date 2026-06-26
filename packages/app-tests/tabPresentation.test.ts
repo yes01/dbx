@@ -1,9 +1,19 @@
 import { strict as assert } from "node:assert";
-import test from "node:test";
+import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { shouldShowTabOverflowControls, tabDisplayTitle } from "../../apps/desktop/src/lib/tabPresentation.ts";
+import {
+  activeResultRun,
+  databaseDisplayNameForTab,
+  executionSummaryItems,
+  nextExecutionSummaryView,
+  resultGridCacheKey,
+  resultRunItems,
+  tabDisplayTitle,
+  tabModeLabel,
+  tabularResultItems,
+} from "../../apps/desktop/src/lib/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
-import type { ConnectionConfig, QueryTab } from "../../apps/desktop/src/types/database.ts";
+import type { ConnectionConfig, QueryResult, QueryTab } from "../../apps/desktop/src/types/database.ts";
 
 function installMemoryStorage() {
   const values = new Map<string, string>();
@@ -48,13 +58,14 @@ function queryTab(overrides: Partial<QueryTab> = {}): QueryTab {
   };
 }
 
-test("tab overflow controls only show when there are hidden tabs to reach", () => {
-  assert.equal(shouldShowTabOverflowControls(0, true, true, true), false);
-  assert.equal(shouldShowTabOverflowControls(3, false, false, false), false);
-  assert.equal(shouldShowTabOverflowControls(3, true, false, false), true);
-  assert.equal(shouldShowTabOverflowControls(3, false, true, false), true);
-  assert.equal(shouldShowTabOverflowControls(3, false, false, true), true);
-});
+function result(columns: string[]): QueryResult {
+  return {
+    columns,
+    rows: [],
+    affected_rows: 0,
+    execution_time_ms: 1,
+  };
+}
 
 test("query tab display title uses custom title when present", () => {
   const restoreStorage = installMemoryStorage();
@@ -68,4 +79,137 @@ test("query tab display title uses custom title when present", () => {
   } finally {
     restoreStorage();
   }
+});
+
+test("jdbc tabs use the connection target when database is empty", () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  useConnectionStore().addEphemeralConnection({
+    ...conn("conn-1"),
+    db_type: "jdbc",
+    connection_string: "jdbc:oracle:thin:@172.20.66.143:20001:XE",
+  });
+  const t = (key: string) => (key === "editor.noDatabase" ? "No database selected" : key);
+
+  try {
+    assert.equal(databaseDisplayNameForTab("conn-1", "", t), "XE");
+    assert.equal(
+      tabDisplayTitle(
+        queryTab({
+          database: "",
+          mode: "data",
+          tableMeta: {
+            schema: "SYSTEM",
+            tableName: "DBX_JDBC_TEST",
+            columns: [],
+            primaryKeys: ["ID"],
+          },
+        }),
+        t,
+      ),
+      "DBX_JDBC_TEST@XE.SYSTEM",
+    );
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("zookeeper tabs use key browser labels", () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  useConnectionStore().addEphemeralConnection({
+    ...conn("conn-1"),
+    name: "ZK Prod",
+    db_type: "zookeeper",
+    port: 2181,
+  });
+  const t = (key: string) => (key === "tabs.zookeeper" ? "ZooKeeper" : key);
+
+  try {
+    const tab = queryTab({ mode: "zookeeper", database: "", title: "ZooKeeper Keys" });
+    assert.equal(tabDisplayTitle(tab, t), "ZK Prod@keys");
+    assert.equal(tabModeLabel(tab, t), "ZooKeeper");
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("tabular result items hide statement results without returned columns", () => {
+  const results = [result([]), result(["id"]), result([]), result(["name"])];
+
+  assert.deepEqual(
+    tabularResultItems(results).map((item) => ({ index: item.index, n: item.n, columns: item.result.columns })),
+    [
+      { index: 1, n: 1, columns: ["id"] },
+      { index: 3, n: 2, columns: ["name"] },
+    ],
+  );
+  assert.deepEqual(tabularResultItems([result([])]), []);
+  assert.deepEqual(tabularResultItems(undefined), []);
+});
+
+test("result run items expose ordered labels and active state", () => {
+  const tab = queryTab({
+    activeResultRunId: "run-2",
+    resultRuns: [
+      {
+        id: "run-1",
+        title: "Run 1",
+        sequence: 1,
+        sql: "select 1",
+        createdAt: 10,
+        result: result(["one"]),
+      },
+      {
+        id: "run-2",
+        title: "Run 2",
+        sequence: 2,
+        sql: "select 2",
+        createdAt: 20,
+        result: result(["two"]),
+      },
+    ],
+  });
+
+  assert.deepEqual(resultRunItems(tab), [
+    { id: "run-1", title: "Run 1", sequence: 1, active: false },
+    { id: "run-2", title: "Run 2", sequence: 2, active: true },
+  ]);
+  assert.equal(activeResultRun(tab)?.id, "run-2");
+  assert.deepEqual(resultRunItems(queryTab()).map((item) => item.title), []);
+});
+
+test("result grid cache key includes result run id and statement result index", () => {
+  const tab = queryTab({ activeResultRunId: "run-7", activeResultIndex: 3 });
+
+  assert.equal(resultGridCacheKey(tab), "tab-1-run-7-3");
+  assert.equal(resultGridCacheKey(queryTab({ activeResultIndex: undefined })), "tab-1-current-0");
+});
+
+test("execution summary items include table and non-table statement results", () => {
+  const items = executionSummaryItems({
+    results: [result([]), result(["id"]), { ...result(["Error"]), rows: [["boom"]] }],
+  });
+
+  assert.deepEqual(
+    items.map((item) => ({
+      index: item.index,
+      hasTabularResult: item.hasTabularResult,
+      returnedColumns: item.returnedColumns,
+      returnedRows: item.returnedRows,
+      isError: item.isError,
+    })),
+    [
+      { index: 0, hasTabularResult: false, returnedColumns: 0, returnedRows: 0, isError: false },
+      { index: 1, hasTabularResult: true, returnedColumns: 1, returnedRows: 0, isError: false },
+      { index: 2, hasTabularResult: true, returnedColumns: 1, returnedRows: 1, isError: true },
+    ],
+  );
+});
+
+test("execution summary button toggles back to result only when result view is available", () => {
+  assert.equal(nextExecutionSummaryView("result", true), "summary");
+  assert.equal(nextExecutionSummaryView("chart", true), "summary");
+  assert.equal(nextExecutionSummaryView("summary", true), "result");
+  assert.equal(nextExecutionSummaryView("summary", false), "summary");
 });

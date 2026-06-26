@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { test } from "vitest";
 import Database from "better-sqlite3";
 import type { ConnectionConfig } from "../src/connections.js";
 import { describeTable, executeQuery, listTables } from "../src/database.js";
@@ -18,6 +18,30 @@ function sqliteConfig(path: string): ConnectionConfig {
     password: "",
     ssh_enabled: false,
     ssl: false,
+  };
+}
+
+function mysqlSshConfig(): ConnectionConfig {
+  return {
+    id: "mysql-ssh-test",
+    name: "mysql-over-ssh",
+    db_type: "mysql",
+    host: "10.0.0.10",
+    port: 3306,
+    username: "root",
+    password: "secret",
+    ssl: false,
+    transport_layers: [
+      {
+        type: "ssh",
+        id: "bastion",
+        enabled: true,
+        host: "bastion.example.com",
+        port: 22,
+        user: "root",
+        password: "ssh-secret",
+      },
+    ],
   };
 }
 
@@ -82,6 +106,22 @@ test("lists and describes SQLite tables without the DBX bridge", async () => {
       ],
     );
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("routes SSH transport layer connections through the DBX bridge", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dbx-mcp-bridge-home-"));
+  const originalHome = process.env.HOME;
+  process.env.HOME = dir;
+
+  try {
+    await assert.rejects(() => executeQuery(mysqlSshConfig(), "select 1"), /DBX desktop app is not running/);
+    await assert.rejects(() => listTables(mysqlSshConfig()), /DBX desktop app is not running/);
+    await assert.rejects(() => describeTable(mysqlSshConfig(), "users"), /DBX desktop app is not running/);
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
     rmSync(dir, { recursive: true, force: true });
   }
 });

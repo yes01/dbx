@@ -6,12 +6,14 @@ export interface AgentDriverInstallState {
   installed: boolean;
 }
 
-export function showAgentDriverInstallHint(
-  dbType: DatabaseType | undefined,
-  drivers: readonly AgentDriverInstallState[],
-  driverProfile?: string,
-): boolean {
+function agentDriverInstallKey(dbType: DatabaseType | undefined, driverProfile?: string): string | undefined {
+  if (dbType === "oracle") return "oracle";
+  if (dbType === "mongodb") return "mongodb";
+  return driverProfile && driverProfile !== dbType ? driverProfile : dbType;
+}
+
+export function showAgentDriverInstallHint(dbType: DatabaseType | undefined, drivers: readonly AgentDriverInstallState[], driverProfile?: string): boolean {
   if (!supportsDriverManagement(dbType)) return false;
-  const driverKey = driverProfile && driverProfile !== dbType ? driverProfile : dbType;
+  const driverKey = agentDriverInstallKey(dbType, driverProfile);
   return drivers.find((driver) => driver.db_type === driverKey)?.installed !== true;
 }

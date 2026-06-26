@@ -3,11 +3,41 @@ import type { DatabaseType } from "@/types/database";
 
 export type ExecuteMode = "all" | "current";
 
-export function resolveExecutableSql(
-  fullSql: string,
-  selectedSql: string,
-  options?: { mode?: ExecuteMode; cursorPos?: number },
-): string {
+export interface SqlExecutionSnapshot {
+  fullSql: string;
+  selectedSql: string;
+  cursorPos: number;
+}
+
+export type SqlExecutionOverride = string | SqlExecutionSnapshot;
+
+export type SqlExecutionTargetKind = "cursor" | "all";
+
+/**
+ * A candidate execution target surfaced by the execution target picker.
+ * `from`/`to` are offsets into the full document so the editor can highlight
+ * the corresponding range as a preview while the picker is open.
+ */
+export interface SqlExecutionCandidate {
+  kind: SqlExecutionTargetKind;
+  label: string;
+  sql: string;
+  from: number;
+  to: number;
+}
+
+export interface SqlExecutionChoiceRequest {
+  fullSql: string;
+  selectedSql: string;
+  cursorPos: number;
+  candidates: SqlExecutionCandidate[];
+}
+
+export function isSqlExecutionSnapshot(value: SqlExecutionOverride | undefined): value is SqlExecutionSnapshot {
+  return typeof value === "object" && value !== null && typeof value.fullSql === "string" && typeof value.selectedSql === "string" && typeof value.cursorPos === "number";
+}
+
+export function resolveExecutableSql(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number }): string {
   const trimmedSelection = selectedSql.trim();
   if (trimmedSelection) return trimmedSelection;
 
@@ -18,11 +48,7 @@ export function resolveExecutableSql(
   return fullSql;
 }
 
-export async function resolveExecutableSqlWithBackend(
-  fullSql: string,
-  selectedSql: string,
-  options?: { mode?: ExecuteMode; cursorPos?: number; databaseType?: DatabaseType },
-): Promise<string> {
+export async function resolveExecutableSqlWithBackend(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number; databaseType?: DatabaseType }): Promise<string> {
   const trimmedSelection = selectedSql.trim();
   if (trimmedSelection) return trimmedSelection;
 

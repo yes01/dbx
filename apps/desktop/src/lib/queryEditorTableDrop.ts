@@ -1,5 +1,5 @@
 import type { DatabaseType } from "@/types/database";
-import { qualifiedTableName } from "@/lib/tableSelectSql";
+import { qualifiedTableName, quoteTableIdentifier } from "@/lib/tableSelectSql";
 
 export const DBX_TABLE_REFERENCE_MIME = "application/x-dbx-table-reference";
 export const DBX_TABLE_REFERENCE_DROP_EVENT = "dbx-table-reference-drop";
@@ -10,6 +10,8 @@ export interface QueryEditorTableReferencePayload {
   database: string;
   schema?: string;
   tableName: string;
+  columnName?: string;
+  referenceType?: "table" | "column";
   databaseType?: DatabaseType;
 }
 
@@ -21,13 +23,7 @@ export interface QueryEditorTableReferenceDropDetail {
 
 let activeTableReferencePayload: QueryEditorTableReferencePayload | null = null;
 
-export function createTableReferencePayload(options: {
-  connectionId?: string;
-  database?: string;
-  schema?: string;
-  tableName?: string;
-  databaseType?: DatabaseType;
-}): QueryEditorTableReferencePayload | null {
+export function createTableReferencePayload(options: { connectionId?: string; database?: string; schema?: string; tableName?: string; columnName?: string; databaseType?: DatabaseType }): QueryEditorTableReferencePayload | null {
   if (!options.connectionId || options.database == null || !options.tableName) return null;
   const payload: QueryEditorTableReferencePayload = {
     kind: "dbx-table-reference",
@@ -35,6 +31,10 @@ export function createTableReferencePayload(options: {
     database: options.database,
     tableName: options.tableName,
   };
+  if (options.columnName) {
+    payload.columnName = options.columnName;
+    payload.referenceType = "column";
+  }
   if (options.schema) payload.schema = options.schema;
   if (options.databaseType) payload.databaseType = options.databaseType;
   return payload;
@@ -48,22 +48,22 @@ export function parseTableReferencePayload(value: string | undefined | null): Qu
   if (!value) return null;
   try {
     const parsed = JSON.parse(value) as Partial<QueryEditorTableReferencePayload>;
-    if (
-      parsed.kind !== "dbx-table-reference" ||
-      typeof parsed.connectionId !== "string" ||
-      typeof parsed.database !== "string" ||
-      typeof parsed.tableName !== "string" ||
-      !parsed.connectionId ||
-      !parsed.tableName
-    ) {
+    if (parsed.kind !== "dbx-table-reference" || typeof parsed.connectionId !== "string" || typeof parsed.database !== "string" || typeof parsed.tableName !== "string" || !parsed.connectionId || !parsed.tableName) {
       return null;
     }
+    const columnName = typeof parsed.columnName === "string" && parsed.columnName ? parsed.columnName : undefined;
+    const referenceType = parsed.referenceType === "column" || columnName ? "column" : "table";
+    if (referenceType === "column" && !columnName) return null;
     const payload: QueryEditorTableReferencePayload = {
       kind: "dbx-table-reference",
       connectionId: parsed.connectionId,
       database: parsed.database,
       tableName: parsed.tableName,
     };
+    if (referenceType === "column" && columnName) {
+      payload.columnName = columnName;
+      payload.referenceType = "column";
+    }
     if (typeof parsed.schema === "string" && parsed.schema) payload.schema = parsed.schema;
     if (parsed.databaseType) payload.databaseType = parsed.databaseType;
     return payload;
@@ -98,12 +98,13 @@ export function createTableReferenceDropEvent(detail: QueryEditorTableReferenceD
   return new CustomEvent<QueryEditorTableReferenceDropDetail>(DBX_TABLE_REFERENCE_DROP_EVENT, { detail });
 }
 
-export function tableReferenceInsertText(
-  payload: QueryEditorTableReferencePayload,
-  fallbackDatabaseType?: DatabaseType,
-): string {
+export function tableReferenceInsertText(payload: QueryEditorTableReferencePayload, fallbackDatabaseType?: DatabaseType): string {
+  const databaseType = payload.databaseType ?? fallbackDatabaseType;
+  if (payload.referenceType === "column" && payload.columnName) {
+    return quoteTableIdentifier(databaseType, payload.columnName);
+  }
   return qualifiedTableName({
-    databaseType: payload.databaseType ?? fallbackDatabaseType,
+    databaseType,
     schema: payload.schema,
     tableName: payload.tableName,
   });

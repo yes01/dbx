@@ -1,9 +1,6 @@
 import { strict as assert } from "node:assert";
-import test from "node:test";
-import {
-  selectedTreeNodesInVisibleOrder,
-  treeSelectionRangeIds,
-} from "../../apps/desktop/src/lib/sidebarTreeSelection.ts";
+import { test } from "vitest";
+import { selectedTreeNodesInVisibleOrder, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "../../apps/desktop/src/lib/sidebarTreeSelection.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 const nodes: TreeNode[] = [
@@ -23,6 +20,12 @@ test("tree range selection falls back to the current node when the anchor is fil
   const filtered = [nodes[1], nodes[3]];
 
   assert.deepEqual(treeSelectionRangeIds(filtered, "customers", "orders"), ["customers"]);
+});
+
+test("tree range selection can reuse precomputed visible indexes", () => {
+  const filtered = [nodes[0], nodes[1], nodes[3]];
+
+  assert.deepEqual(treeSelectionRangeIdsByIndex(filtered, 2, 0, "customers"), ["orders", "order_lines", "customers"]);
 });
 
 test("selected tree nodes are ordered and limited by visible nodes", () => {

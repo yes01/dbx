@@ -8,20 +8,34 @@ const props = withDefaults(
     side?: "top" | "right" | "bottom" | "left";
     sideOffset?: number;
     delay?: number;
+    closeDelay?: number;
+    openOnFocus?: boolean;
   }>(),
   {
     disabled: false,
     side: "top",
     sideOffset: 8,
     delay: 300,
+    closeDelay: 100,
+    openOnFocus: true,
   },
 );
 
 const triggerRef = ref<HTMLElement>();
+const tooltipRef = ref<HTMLElement>();
 const show = ref(false);
 const x = ref(0);
 const y = ref(0);
 let timer: ReturnType<typeof setTimeout> | null = null;
+let closeTimer: ReturnType<typeof setTimeout> | null = null;
+let suppressOpenUntil = 0;
+let openSource: "hover" | "focus" | null = null;
+
+function clearCloseTimer() {
+  if (!closeTimer) return;
+  clearTimeout(closeTimer);
+  closeTimer = null;
+}
 
 function triggerElement(): HTMLElement | undefined {
   const root = triggerRef.value;
@@ -63,11 +77,31 @@ function clearTimer() {
   timer = null;
 }
 
-function isTriggerActive(): boolean {
+function isPointerActive(): boolean {
   const el = triggerElement();
   if (!el || !el.isConnected) return false;
+  return el.matches(":hover") || tooltipRef.value?.matches(":hover") || false;
+}
+
+function isFocusActive(): boolean {
+  const el = triggerElement();
   const active = document.activeElement;
-  return el.matches(":hover") || (active instanceof Node && el.contains(active));
+  return !!el && active instanceof Node && el.contains(active);
+}
+
+function hasFocusVisible(): boolean {
+  const el = triggerElement();
+  const root = triggerRef.value;
+  if (!el || !root) return false;
+  try {
+    return el.matches(":focus-visible") || !!root.querySelector(":focus-visible");
+  } catch {
+    return false;
+  }
+}
+
+function isOpenSourceActive(): boolean {
+  return openSource === "focus" ? isFocusActive() : isPointerActive();
 }
 
 function isDisabled(): boolean {
@@ -102,12 +136,40 @@ function updatePosition() {
 
 function close() {
   clearTimer();
+  clearCloseTimer();
   show.value = false;
+  openSource = null;
   removeGlobalListeners();
 }
 
+function suppressForContextMenu() {
+  suppressOpenUntil = Date.now() + 250;
+  close();
+}
+
 function closeIfTriggerInactive() {
-  if (!isTriggerActive()) close();
+  if (isOpenSourceActive()) {
+    clearCloseTimer();
+  } else {
+    scheduleClose();
+  }
+}
+
+function scheduleClose() {
+  if (props.closeDelay <= 0) {
+    if (!isOpenSourceActive()) close();
+    return;
+  }
+  if (closeTimer) return;
+  closeTimer = setTimeout(() => {
+    closeTimer = null;
+    if (!isOpenSourceActive()) close();
+  }, props.closeDelay);
+}
+
+function onPointerDown(e: PointerEvent) {
+  if (tooltipRef.value?.contains(e.target as Node)) return;
+  close();
 }
 
 function addGlobalListeners() {
@@ -116,7 +178,7 @@ function addGlobalListeners() {
   window.addEventListener("blur", close);
   document.addEventListener("visibilitychange", close);
   document.addEventListener("pointermove", closeIfTriggerInactive, true);
-  document.addEventListener("pointerdown", close, true);
+  document.addEventListener("pointerdown", onPointerDown, true);
   document.addEventListener("contextmenu", close, true);
 }
 
@@ -126,25 +188,39 @@ function removeGlobalListeners() {
   window.removeEventListener("blur", close);
   document.removeEventListener("visibilitychange", close);
   document.removeEventListener("pointermove", closeIfTriggerInactive, true);
-  document.removeEventListener("pointerdown", close, true);
+  document.removeEventListener("pointerdown", onPointerDown, true);
   document.removeEventListener("contextmenu", close, true);
 }
 
-function open() {
-  if (isDisabled() || !props.text) return;
-  if (!isTriggerActive()) return;
+const slots = defineSlots<{ default(): any; content?(): any }>();
+const hasContent = computed(() => !!props.text || !!slots.content);
+
+function open(source: "hover" | "focus") {
+  if (Date.now() < suppressOpenUntil) return;
+  if (isDisabled() || !hasContent.value) return;
+  if (source === "focus" ? !hasFocusVisible() : !isPointerActive()) return;
   updatePosition();
+  openSource = source;
   show.value = true;
   addGlobalListeners();
 }
 
-function scheduleOpen() {
-  if (isDisabled() || !props.text) return;
+function scheduleOpen(source: "hover" | "focus" = "hover") {
+  if (Date.now() < suppressOpenUntil) return;
+  if (isDisabled() || !hasContent.value) return;
   clearTimer();
-  timer = setTimeout(open, props.delay);
+  timer = setTimeout(() => open(source), props.delay);
 }
 
-onBeforeUnmount(close);
+function scheduleFocusOpen() {
+  if (!props.openOnFocus) return;
+  if (!hasFocusVisible()) return;
+  scheduleOpen("focus");
+}
+
+onBeforeUnmount(() => {
+  close();
+});
 
 watch(
   () => [props.disabled, props.text] as const,
@@ -156,25 +232,21 @@ watch(
 </script>
 
 <template>
-  <span
-    ref="triggerRef"
-    class="contents"
-    @mouseenter="scheduleOpen"
-    @mouseleave="close"
-    @focusin="scheduleOpen"
-    @focusout="close"
-  >
+  <span ref="triggerRef" class="contents" @mouseenter="() => scheduleOpen('hover')" @mouseleave="scheduleClose" @focusin="scheduleFocusOpen" @focusout="close" @contextmenu.capture="suppressForContextMenu">
     <slot />
   </span>
   <Teleport to="body">
     <div
       v-if="show"
-      class="pointer-events-none fixed z-50 inline-flex w-fit max-w-xs items-center gap-1.5 rounded-md bg-foreground px-3 py-1.5 text-xs text-background"
-      :class="tooltipTransformClass"
+      ref="tooltipRef"
+      class="fixed z-50 rounded-md bg-foreground text-xs text-background"
+      :class="[slots.content ? '' : 'inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5', tooltipTransformClass]"
       :style="{ left: `${x}px`, top: `${y}px` }"
       role="tooltip"
+      @mouseenter="clearCloseTimer"
+      @mouseleave="scheduleClose"
     >
-      {{ text }}
+      <slot name="content">{{ text }}</slot>
       <span :class="[arrowClass, 'size-2.5 rotate-45 rounded-[2px] bg-foreground']" aria-hidden="true" />
     </div>
   </Teleport>

@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{is_schema_aware, quote_table_identifier};
+use crate::sql_dialect::{is_schema_aware, qualified_table_name, quote_table_identifier};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DatabaseObjectType {
     Table,
     View,
+    MaterializedView,
     Procedure,
     Function,
 }
@@ -49,6 +50,7 @@ pub struct CreateDatabaseSqlOptions {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(feature = "duckdb-bundled")]
 pub struct DuckDbAttachDatabaseSqlOptions {
     pub path: String,
     pub name: String,
@@ -136,11 +138,21 @@ pub fn build_create_database_sql(options: CreateDatabaseSqlOptions) -> String {
     format!("CREATE DATABASE {name} CHARACTER SET {charset}{collate_clause};")
 }
 
+#[cfg(feature = "duckdb-bundled")]
 pub fn build_duckdb_attach_database_sql(options: DuckDbAttachDatabaseSqlOptions) -> String {
     format!(
         "ATTACH {} AS {};",
         quote_sql_string(&options.path),
         quote_table_identifier(Some(DatabaseType::DuckDb), &options.name)
+    )
+}
+
+pub fn build_create_user_sql(username: &str, password: &str, tablespace: &str) -> String {
+    format!(
+        "CREATE USER {} IDENTIFIED BY {} DEFAULT TABLESPACE {};",
+        quote_table_identifier(Some(DatabaseType::Dameng), username),
+        quote_sql_string(password),
+        quote_table_identifier(Some(DatabaseType::Dameng), tablespace)
     )
 }
 
@@ -153,7 +165,13 @@ pub fn build_drop_object_sql(options: DropObjectSqlOptions) -> String {
 }
 
 pub fn build_drop_table_sql(options: TableAdminSqlOptions) -> String {
-    format!("DROP TABLE {};", qualified_name(options.database_type, options.schema.as_deref(), &options.table_name))
+    let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
+    if matches!(options.database_type, Some(DatabaseType::Iotdb)) {
+        return format!("DELETE TIMESERIES {};", iotdb_timeseries_pattern(&table));
+    } else if matches!(options.database_type, Some(DatabaseType::InfluxDb)) {
+        return format!("DROP MEASUREMENT {};", table);
+    }
+    format!("DROP TABLE {table};")
 }
 
 pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions) -> Result<String, String> {
@@ -174,7 +192,9 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
                 Some(
                     DatabaseType::Postgres
                         | DatabaseType::Gaussdb
+                        | DatabaseType::Kwdb
                         | DatabaseType::OpenGauss
+                        | DatabaseType::Questdb
                         | DatabaseType::Highgo
                         | DatabaseType::Vastbase
                         | DatabaseType::Kingbase
@@ -203,7 +223,9 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
                 Some(
                     DatabaseType::Postgres
                         | DatabaseType::Gaussdb
+                        | DatabaseType::Kwdb
                         | DatabaseType::OpenGauss
+                        | DatabaseType::Questdb
                         | DatabaseType::Highgo
                         | DatabaseType::Vastbase
                         | DatabaseType::Kingbase
@@ -230,14 +252,19 @@ pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
     match options.database_type {
         Some(DatabaseType::ClickHouse) => format!("ALTER TABLE {table} DELETE WHERE 1 = 1;"),
         Some(DatabaseType::Bigquery) => format!("DELETE FROM {table} WHERE TRUE;"),
-        Some(DatabaseType::Cassandra | DatabaseType::Hive | DatabaseType::Kylin) => format!("TRUNCATE TABLE {table};"),
+        Some(DatabaseType::Cassandra | DatabaseType::Hive | DatabaseType::Kylin | DatabaseType::Questdb) => {
+            format!("TRUNCATE TABLE {table};")
+        }
+        Some(DatabaseType::Iotdb) => format!("DELETE FROM {};", iotdb_timeseries_pattern(&table)),
         _ => format!("DELETE FROM {table};"),
     }
 }
 
 pub fn build_truncate_table_sql(options: TableAdminSqlOptions) -> String {
     let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
-    if matches!(options.database_type, Some(DatabaseType::Sqlite | DatabaseType::DuckDb)) {
+    if matches!(options.database_type, Some(DatabaseType::Iotdb)) {
+        format!("DELETE FROM {};", iotdb_timeseries_pattern(&table))
+    } else if matches!(options.database_type, Some(DatabaseType::Sqlite | DatabaseType::DuckDb)) {
         format!("DELETE FROM {table};")
     } else {
         format!("TRUNCATE TABLE {table};")
@@ -254,7 +281,7 @@ pub fn build_create_schema_sql(options: SchemaNameSqlOptions) -> String {
 
 pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
     let schema = quote_table_identifier(options.database_type, &options.name);
-    if matches!(options.database_type, Some(DatabaseType::Postgres | DatabaseType::Gaussdb)) {
+    if matches!(options.database_type, Some(DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb)) {
         format!("DROP SCHEMA {schema} CASCADE;")
     } else {
         format!("DROP SCHEMA {schema};")
@@ -267,13 +294,16 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     if options.database_type == Some(DatabaseType::Mysql) {
         return format!("CREATE TABLE {target} LIKE {source};");
     }
+    if options.database_type == Some(DatabaseType::Questdb) {
+        return format!("CREATE TABLE {target} (LIKE {source});");
+    }
     if options.database_type.is_some_and(is_postgres_like_structure_copy) {
         return format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);");
     }
     if options.database_type == Some(DatabaseType::SqlServer) {
         return format!("SELECT TOP 0 * INTO {target} FROM {source};");
     }
-    if options.database_type.is_some_and(uses_fetch_first_duplicate_structure) {
+    if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
         return format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0");
     }
     format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
@@ -296,7 +326,10 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
         return matches!(object_type, DatabaseObjectType::Table | DatabaseObjectType::View);
     }
     if is_postgres_like_rename(database_type) || is_oracle_like_rename(database_type) {
-        return matches!(object_type, DatabaseObjectType::Table | DatabaseObjectType::View);
+        return matches!(
+            object_type,
+            DatabaseObjectType::Table | DatabaseObjectType::View | DatabaseObjectType::MaterializedView
+        );
     }
     false
 }
@@ -359,6 +392,7 @@ fn is_postgres_like_rename(database_type: DatabaseType) -> bool {
         DatabaseType::Postgres
             | DatabaseType::Redshift
             | DatabaseType::Gaussdb
+            | DatabaseType::Kwdb
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
             | DatabaseType::Vastbase
@@ -372,12 +406,17 @@ fn is_oracle_like_rename(database_type: DatabaseType) -> bool {
 fn is_postgres_like_structure_copy(database_type: DatabaseType) -> bool {
     matches!(
         database_type,
-        DatabaseType::Postgres | DatabaseType::Redshift | DatabaseType::Gaussdb | DatabaseType::OpenGauss
+        DatabaseType::Postgres
+            | DatabaseType::Redshift
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kwdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Questdb
     )
 }
 
-fn uses_fetch_first_duplicate_structure(database_type: DatabaseType) -> bool {
-    matches!(database_type, DatabaseType::Oracle | DatabaseType::Dameng)
+fn uses_false_predicate_duplicate_structure(database_type: DatabaseType) -> bool {
+    matches!(database_type, DatabaseType::Oracle | DatabaseType::Dameng | DatabaseType::Iris)
 }
 
 fn sqlserver_string(value: &str) -> String {
@@ -393,6 +432,9 @@ fn quote_rename_identifier(database_type: Option<DatabaseType>, name: &str) -> S
 }
 
 fn qualified_name(database_type: Option<DatabaseType>, schema: Option<&str>, name: &str) -> String {
+    if matches!(database_type, Some(DatabaseType::Iotdb)) {
+        return qualified_table_name(database_type, schema, name);
+    }
     if database_type.is_some_and(is_schema_aware) && schema.is_some_and(|schema| !schema.is_empty()) {
         format!(
             "{}.{}",
@@ -401,6 +443,15 @@ fn qualified_name(database_type: Option<DatabaseType>, schema: Option<&str>, nam
         )
     } else {
         quote_rename_identifier(database_type, name)
+    }
+}
+
+fn iotdb_timeseries_pattern(path: &str) -> String {
+    let path = path.trim().trim_end_matches(';');
+    if path.ends_with(".*") || path.ends_with(".**") {
+        path.to_string()
+    } else {
+        format!("{path}.*")
     }
 }
 
@@ -415,6 +466,7 @@ fn object_type_keyword(object_type: DatabaseObjectType) -> &'static str {
     match object_type {
         DatabaseObjectType::Table => "TABLE",
         DatabaseObjectType::View => "VIEW",
+        DatabaseObjectType::MaterializedView => "MATERIALIZED VIEW",
         DatabaseObjectType::Procedure => "PROCEDURE",
         DatabaseObjectType::Function => "FUNCTION",
     }
@@ -474,6 +526,7 @@ mod tests {
         assert!(!supports_create_database_charset(Some(DatabaseType::Postgres), None));
     }
 
+    #[cfg(feature = "duckdb-bundled")]
     #[test]
     fn builds_duckdb_attach_sql() {
         assert_eq!(
@@ -482,6 +535,14 @@ mod tests {
                 name: "report db".to_string(),
             }),
             "ATTACH '/Users/me/O''Reilly analytics.duckdb' AS \"report db\";"
+        );
+    }
+
+    #[test]
+    fn builds_dameng_create_user_sql_with_escaped_values() {
+        assert_eq!(
+            build_create_user_sql("app\"user", "pa'ss", "main\"space"),
+            "CREATE USER \"app\"\"user\" IDENTIFIED BY 'pa''ss' DEFAULT TABLESPACE \"main\"\"space\";"
         );
     }
 
@@ -501,7 +562,7 @@ mod tests {
                 schema: None,
                 table_name: "PresetSubjectInfo".to_string(),
             }),
-            "ALTER TABLE \"PresetSubjectInfo\" DELETE WHERE 1 = 1;"
+            "ALTER TABLE `PresetSubjectInfo` DELETE WHERE 1 = 1;"
         );
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
@@ -509,7 +570,7 @@ mod tests {
                 schema: None,
                 table_name: "PresetSubjectInfo".to_string(),
             }),
-            "TRUNCATE TABLE \"PresetSubjectInfo\";"
+            "TRUNCATE TABLE `PresetSubjectInfo`;"
         );
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {
@@ -534,6 +595,47 @@ mod tests {
                 table_name: "events".to_string(),
             }),
             "DELETE FROM \"events\";"
+        );
+        assert_eq!(
+            build_drop_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Iotdb),
+                schema: Some("root.test".to_string()),
+                table_name: "DCU_101".to_string(),
+            }),
+            "DELETE TIMESERIES root.test.DCU_101.*;"
+        );
+        assert_eq!(
+            build_empty_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Iotdb),
+                schema: Some("root.test".to_string()),
+                table_name: "root.test.DCU_101".to_string(),
+            }),
+            "DELETE FROM root.test.DCU_101.*;"
+        );
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Iotdb),
+                schema: Some("root.test".to_string()),
+                table_name: "DCU_101".to_string(),
+            }),
+            "DELETE FROM root.test.DCU_101.*;"
+        );
+
+        assert_eq!(
+            build_empty_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Questdb),
+                schema: None,
+                table_name: "table_sample".to_string(),
+            }),
+            "TRUNCATE TABLE `table_sample`;"
+        );
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Questdb),
+                schema: None,
+                table_name: "table_sample".to_string(),
+            }),
+            "TRUNCATE TABLE `table_sample`;"
         );
     }
 
@@ -564,7 +666,7 @@ mod tests {
         );
         assert_eq!(
             build_drop_schema_sql(SchemaNameSqlOptions {
-                database_type: Some(DatabaseType::Gaussdb),
+                database_type: Some(DatabaseType::Kwdb),
                 name: "analytics".to_string(),
             }),
             "DROP SCHEMA \"analytics\" CASCADE;"
@@ -639,6 +741,18 @@ mod tests {
             .unwrap(),
             "DROP TRIGGER \"orders_audit\" ON \"public\".\"orders\";"
         );
+
+        assert_eq!(
+            build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {
+                database_type: Some(DatabaseType::Questdb),
+                object_type: TableChildObjectType::Column,
+                schema: Some("public".to_string()),
+                table_name: "orders".to_string(),
+                name: "status".to_string(),
+            })
+            .unwrap(),
+            "ALTER TABLE `orders` DROP COLUMN `status`;"
+        );
     }
 
     #[test]
@@ -654,7 +768,7 @@ mod tests {
         );
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
-                database_type: Some(DatabaseType::Postgres),
+                database_type: Some(DatabaseType::Kwdb),
                 schema: Some("public".to_string()),
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
@@ -678,6 +792,24 @@ mod tests {
                 target_name: "USERS_COPY".to_string(),
             }),
             "CREATE TABLE \"HR\".\"USERS_COPY\" AS SELECT * FROM \"HR\".\"USERS\" WHERE 1=0"
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Iris),
+                schema: Some("SQLUSER".to_string()),
+                source_name: "tb_a".to_string(),
+                target_name: "tb_a_copy".to_string(),
+            }),
+            "CREATE TABLE \"SQLUSER\".\"tb_a_copy\" AS SELECT * FROM \"SQLUSER\".\"tb_a\" WHERE 1=0"
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Questdb),
+                schema: None,
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+            }),
+            "CREATE TABLE `users_copy` (LIKE `users`);"
         );
     }
 

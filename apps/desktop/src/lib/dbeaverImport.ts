@@ -48,7 +48,10 @@ const profileMap: Record<string, ConnectionProfile> = {
   dameng: { dbType: "dameng", profile: "dm", label: "DM (Dameng)", port: 5236, user: "SYSDBA" },
   dm: { dbType: "dameng", profile: "dm", label: "DM (Dameng)", port: 5236, user: "SYSDBA" },
   gaussdb: { dbType: "gaussdb", profile: "gaussdb", label: "GaussDB", port: 5432, user: "gaussdb" },
+  kwdb: { dbType: "kwdb", profile: "kwdb", label: "KWDB", port: 26257, user: "root" },
   opengauss: { dbType: "gaussdb", profile: "opengauss", label: "openGauss", port: 5432, user: "gaussdb" },
+  questdb: { dbType: "questdb", profile: "questdb", label: "QuestDB", port: 8812, user: "questdb" },
+  influxdb: { dbType: "influxdb", profile: "influxdb", label: "InfluxDB", port: 8086, user: "" },
 };
 
 function normalizeKey(value: unknown) {
@@ -81,9 +84,7 @@ function base64ToBytes(value: string) {
   return bytes;
 }
 
-async function decryptCredentialsFile(
-  base64?: string,
-): Promise<Record<string, Record<string, Record<string, string>>>> {
+async function decryptCredentialsFile(base64?: string): Promise<Record<string, Record<string, Record<string, string>>>> {
   if (!base64) return {};
   const bytes = base64ToBytes(base64);
   if (bytes.length <= 16) return {};
@@ -99,10 +100,7 @@ async function decryptCredentialsFile(
   }
 }
 
-function readCredentials(
-  entry: DbeaverConnectionEntry,
-  credentials: Record<string, Record<string, Record<string, string>>>,
-) {
+function readCredentials(entry: DbeaverConnectionEntry, credentials: Record<string, Record<string, Record<string, string>>>) {
   const secure = credentials[entry.id]?.["#connection"] || {};
   const inline = entry.configuration?.credentials || {};
   return {
@@ -184,9 +182,7 @@ function extractConnections(parsed: any): DbeaverConnectionEntry[] {
   if (!source || typeof source !== "object") return [];
 
   if (Array.isArray(source)) {
-    return source
-      .filter((entry) => entry && typeof entry === "object")
-      .map((entry) => ({ ...entry, id: getString(entry.id || entry.uuid || entry.name) }));
+    return source.filter((entry) => entry && typeof entry === "object").map((entry) => ({ ...entry, id: getString(entry.id || entry.uuid || entry.name) }));
   }
 
   return Object.entries(source)
@@ -194,17 +190,12 @@ function extractConnections(parsed: any): DbeaverConnectionEntry[] {
     .map(([id, entry]) => ({ ...(entry as Record<string, any>), id: getString((entry as any).id || id) }));
 }
 
-function buildConnection(
-  entry: DbeaverConnectionEntry,
-  credentials: ReturnType<typeof readCredentials>,
-): ConnectionConfig | null {
+function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<typeof readCredentials>): ConnectionConfig | null {
   const profile = inferProfile(entry);
   const config = entry.configuration || {};
   const url = getString(config.url);
   const parsedUrl = parseJdbcUrl(url, profile);
-  const host = getString(
-    config.host || config["host-name"] || parsedUrl.host || (profile.dbType === "sqlite" ? "" : "127.0.0.1"),
-  );
+  const host = getString(config.host || config["host-name"] || parsedUrl.host || (profile.dbType === "sqlite" ? "" : "127.0.0.1"));
   const database = getString(config.database || config["database-name"] || config.schema || parsedUrl.database);
   const name = getString(entry.name || database || host || profile.label);
   if (!entry.id || !name) return null;
@@ -221,22 +212,13 @@ function buildConnection(
     password: credentials.password || getString(parsedUrl.password),
     database: database || undefined,
     color: getString(config.color || config["connection-color"]),
-    ssh_enabled: false,
-    ssh_host: "",
-    ssh_port: 22,
-    ssh_user: "",
-    ssh_password: "",
-    ssh_key_path: "",
-    ssh_key_passphrase: "",
-    ssh_expose_lan: false,
-    ssh_connect_timeout_secs: 5,
-    connect_timeout_secs: 5,
+    transport_layers: [],
+    connect_timeout_secs: 10,
     query_timeout_secs: 30,
     ssl: false,
     oracle_connection_type: profile.dbType === "oracle" ? parsedUrl.oracleConnectionType || "service_name" : undefined,
     connection_string: profile.dbType === "jdbc" || profile.dbType === "mongodb" ? url || undefined : undefined,
-    jdbc_driver_class:
-      profile.dbType === "jdbc" ? getString(config["driver-class"] || entry.driver) || undefined : undefined,
+    jdbc_driver_class: profile.dbType === "jdbc" ? getString(config["driver-class"] || entry.driver) || undefined : undefined,
     jdbc_driver_paths: [],
   };
 

@@ -1,5 +1,5 @@
-﻿import assert from "node:assert/strict";
-import test from "node:test";
+import assert from "node:assert/strict";
+import { test } from "vitest";
 
 import { canDownloadAndInstallUpdate } from "../../apps/desktop/src/composables/useAppUpdater.ts";
 import type { UpdateInfo } from "../../apps/desktop/src/lib/api.ts";
@@ -10,8 +10,8 @@ function updateInfo(overrides: Partial<UpdateInfo> = {}): UpdateInfo {
     latest_version: "0.5.26",
     update_available: true,
     portable_mode: false,
-    release_name: "TestTeam DBX v0.5.26",
-    release_url: "https://dl.dbxio.com/releases/latest/",
+    release_name: "DBX v0.5.26",
+    release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.26",
     release_notes: "",
     ...overrides,
   };
@@ -30,4 +30,3 @@ test("blocks in-app update installation outside desktop runtime or without an up
   assert.equal(canDownloadAndInstallUpdate(updateInfo({ update_available: false }), true), false);
   assert.equal(canDownloadAndInstallUpdate(null, true), false);
 });
-

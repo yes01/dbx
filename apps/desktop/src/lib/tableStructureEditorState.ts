@@ -1,14 +1,20 @@
-import type { ColumnInfo, DatabaseType, IndexInfo } from "../types/database.ts";
-import type { ColumnExtra, EditableStructureColumn, EditableStructureIndex } from "./tableStructureEditorSql.ts";
+import type { ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "../types/database.ts";
+import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "./tableStructureEditorSql.ts";
 
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
   mysql: [
     "tinyint",
+    "tinyint unsigned",
     "smallint",
+    "smallint unsigned",
     "mediumint",
+    "mediumint unsigned",
     "int",
+    "int unsigned",
     "integer",
+    "integer unsigned",
     "bigint",
+    "bigint unsigned",
     "float",
     "double",
     "double precision",
@@ -114,6 +120,8 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "oid",
   ],
   sqlite: ["integer", "real", "text", "blob", "numeric"],
+  rqlite: ["integer", "real", "text", "blob", "numeric"],
+  turso: ["integer", "real", "text", "blob", "numeric"],
   sqlserver: [
     "bit",
     "tinyint",
@@ -228,6 +236,38 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "MultiPolygon",
     "JSON",
   ],
+  manticoresearch: ["text", "string", "int", "bit", "bigint", "bool", "timestamp", "float", "json", "float_vector", "multi", "mva"],
+  informix: [
+    "smallint",
+    "integer",
+    "int",
+    "bigint",
+    "int8",
+    "serial",
+    "serial8",
+    "bigserial",
+    "decimal",
+    "numeric",
+    "money",
+    "smallfloat",
+    "float",
+    "real",
+    "char",
+    "varchar",
+    "lvarchar",
+    "nchar",
+    "nvarchar",
+    "text",
+    "clob",
+    "byte",
+    "blob",
+    "boolean",
+    "date",
+    "datetime year to second",
+    "datetime year to fraction",
+    "interval day to second",
+  ],
+  questdb: ["boolean", "ipv4", "byte", "short", "char", "int", "float", "symbol", "varchar", "string", "long", "date", "timestamp", "timestamp_ns", "double", "uuid", "binary", "long256", "geohash", "array", "interval", "decimal"],
 };
 
 const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
@@ -235,8 +275,11 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   starrocks: "mysql",
   goldendb: "mysql",
   sundb: "mysql",
+  gbase: "mysql",
   gaussdb: "postgres",
+  kwdb: "postgres",
   opengauss: "postgres",
+  questdb: "questdb",
   redshift: "postgres",
   highgo: "postgres",
   vastbase: "postgres",
@@ -251,14 +294,57 @@ export function getDataTypeOptions(dbType: DatabaseType | undefined): string[] {
   return DATA_TYPE_OPTIONS[key] ?? [];
 }
 
+export interface ColumnEditorControls {
+  length: boolean;
+  nullable: boolean;
+  primaryKey: boolean;
+  defaultValue: boolean;
+  comment: boolean;
+}
+
+const DEFAULT_COLUMN_EDITOR_CONTROLS: ColumnEditorControls = {
+  length: true,
+  nullable: true,
+  primaryKey: true,
+  defaultValue: true,
+  comment: true,
+};
+
+export function getColumnEditorControls(dbType: DatabaseType | undefined): ColumnEditorControls {
+  if (dbType === "manticoresearch") {
+    return {
+      length: true,
+      nullable: false,
+      primaryKey: false,
+      defaultValue: false,
+      comment: false,
+    };
+  }
+  return DEFAULT_COLUMN_EDITOR_CONTROLS;
+}
+
+export function isProtectedManticoreIdColumn(dbType: DatabaseType | undefined, columnName: string): boolean {
+  return dbType === "manticoresearch" && columnName.trim().toLowerCase() === "id";
+}
+
+export function canEditManticoreColumnProperties(dbType: DatabaseType | undefined, hasOriginalColumn: boolean): boolean {
+  return dbType === "manticoresearch" && !hasOriginalColumn;
+}
+
 export const DEFAULT_TYPE_LENGTHS: Record<string, string> = {
   tinyint: "4",
+  "tinyint unsigned": "4",
   smallint: "6",
+  "smallint unsigned": "6",
   mediumint: "9",
+  "mediumint unsigned": "9",
   int: "11",
+  "int unsigned": "11",
   integer: "11",
+  "integer unsigned": "11",
   int4: "11",
   bigint: "20",
+  "bigint unsigned": "20",
   int8: "20",
   float: "10,2",
   real: "10,2",
@@ -281,6 +367,60 @@ export const DEFAULT_TYPE_LENGTHS: Record<string, string> = {
   year: "4",
 };
 
+export const QUESTDB_TYPE_LENGTHS: Record<string, string> = {
+  geohash: "8c",
+  decimal: "10,2",
+};
+
+export const DEFAULT_TYPE_LENGTH_DISABLES: string[] = [];
+
+export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
+  "bigint",
+  "int8",
+  "bigserial",
+  "serial8",
+  "boolean",
+  "bool",
+  "box",
+  "bytea",
+  "cidr",
+  "circle",
+  "date",
+  "double precision",
+  "float",
+  "float8",
+  "inet",
+  "integer",
+  "int",
+  "int4",
+  "json",
+  "jsonb",
+  "line",
+  "lseg",
+  "macaddr",
+  "macaddr8",
+  "money",
+  "path",
+  "pg_lsn",
+  "pg_snapshot",
+  "point",
+  "polygon",
+  "real",
+  "float4",
+  "smallint",
+  "int2",
+  "smallserial",
+  "serial2",
+  "serial",
+  "serial4",
+  "text",
+  "tsquery",
+  "tsvector",
+  "txid_snapshot",
+  "uuid",
+  "xml",
+];
+
 export function parseExtraToColumnExtra(extra: string | null | undefined, databaseType?: DatabaseType): ColumnExtra {
   const result: ColumnExtra = {};
   if (!extra) return result;
@@ -294,14 +434,7 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
     if (lower.includes("on update current_timestamp")) {
       result.onUpdateCurrentTimestamp = true;
     }
-  } else if (
-    databaseType === "postgres" ||
-    databaseType === "gaussdb" ||
-    databaseType === "opengauss" ||
-    databaseType === "highgo" ||
-    databaseType === "vastbase" ||
-    databaseType === "kingbase"
-  ) {
+  } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "opengauss" || databaseType === "questdb" || databaseType === "highgo" || databaseType === "vastbase" || databaseType === "kingbase") {
     const identityMatch = lower.match(/generated\s+(by\s+default|always)\s+as\s+identity/i);
     if (identityMatch) {
       const sequenceMatch = lower.match(/start\s+with\s*(-?\d+)\s+increment\s+by\s*(-?\d+)/i);
@@ -324,9 +457,66 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
         };
       }
     }
+  } else if (databaseType === "manticoresearch") {
+    const tokens = new Set(lower.split(/\s+/).filter(Boolean));
+    if (tokens.has("indexed")) result.manticoreIndexed = true;
+    if (tokens.has("stored")) result.manticoreStored = true;
+    if (tokens.has("attribute")) result.manticoreAttribute = true;
+    if (/secondary_index\s*=\s*['"]?1['"]?/.test(lower)) result.manticoreSecondaryIndex = true;
   }
 
   return result;
+}
+
+const MANTICORE_COLUMN_PROPERTY_TOKENS = new Set(["indexed", "stored", "attribute"]);
+
+function splitManticoreDdlColumnLine(line: string): { name: string; dataType: string; extra: string } | null {
+  const trimmed = line.trim().replace(/,$/, "").trim();
+  if (!trimmed || trimmed.startsWith(")") || trimmed.startsWith("(")) return null;
+
+  let name = "";
+  let rest = "";
+  const quoted = trimmed.match(/^`((?:``|[^`])+)`\s+(.+)$/);
+  if (quoted) {
+    name = quoted[1]!.replace(/``/g, "`");
+    rest = quoted[2]!.trim();
+  } else {
+    const plain = trimmed.match(/^([A-Za-z_][\w$]*)\s+(.+)$/);
+    if (!plain) return null;
+    name = plain[1]!;
+    rest = plain[2]!.trim();
+  }
+
+  const parts = rest.split(/\s+/).filter(Boolean);
+  const dataType = parts.shift() ?? "";
+  const properties = parts.filter((part) => {
+    const normalized = part.toLowerCase();
+    return MANTICORE_COLUMN_PROPERTY_TOKENS.has(normalized) || /^secondary_index\s*=/.test(normalized);
+  });
+  if (!name || !dataType || properties.length === 0) return null;
+
+  return { name, dataType, extra: properties.join(" ") };
+}
+
+export function applyManticoreDdlColumnExtras(columns: ColumnInfo[], ddl: string): ColumnInfo[] {
+  if (!ddl.trim()) return columns;
+  const extrasByColumn = new Map<string, { dataType: string; extra: string }>();
+  for (const line of ddl.split(/\r?\n/)) {
+    const parsed = splitManticoreDdlColumnLine(line);
+    if (parsed) extrasByColumn.set(parsed.name.toLowerCase(), { dataType: parsed.dataType, extra: parsed.extra });
+  }
+  if (extrasByColumn.size === 0) return columns;
+
+  return columns.map((column) => {
+    const ddlColumn = extrasByColumn.get(column.name.toLowerCase());
+    if (!ddlColumn) return column;
+    const existingExtra = column.extra?.trim();
+    return {
+      ...column,
+      data_type: ddlColumn.dataType || column.data_type,
+      extra: existingExtra ? `${existingExtra} ${ddlColumn.extra}` : ddlColumn.extra,
+    };
+  });
 }
 
 export function createColumnDrafts(columns: ColumnInfo[], databaseType?: DatabaseType): EditableStructureColumn[] {
@@ -350,6 +540,7 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
     id: `existing:${index.name}`,
     name: index.name,
     columns: [...index.columns],
+    nameEdited: true,
     isUnique: index.is_unique,
     isPrimary: index.is_primary,
     filter: index.filter ?? "",
@@ -361,16 +552,105 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
   }));
 }
 
+export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableStructureForeignKey[] {
+  const groups = new Map<string, ForeignKeyInfo[]>();
+  for (const foreignKey of foreignKeys) {
+    const key = [foreignKey.name, foreignKey.ref_schema ?? "", foreignKey.ref_table, foreignKey.on_update ?? "", foreignKey.on_delete ?? ""].join("\u0000");
+    groups.set(key, [...(groups.get(key) ?? []), foreignKey]);
+  }
+
+  return [...groups.values()].map((group, index) => {
+    const first = group[0]!;
+    const original = {
+      ...first,
+      column: group.map((foreignKey) => foreignKey.column).join(", "),
+      ref_column: group.map((foreignKey) => foreignKey.ref_column).join(", "),
+    };
+    return {
+      id: `existing:${first.name}:${index}`,
+      name: first.name,
+      column: original.column,
+      refSchema: first.ref_schema ?? "",
+      refTable: first.ref_table,
+      refColumn: original.ref_column,
+      onUpdate: first.on_update ?? "",
+      onDelete: first.on_delete ?? "",
+      original,
+      markedForDrop: false,
+    };
+  });
+}
+
+export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureTrigger[] {
+  return triggers.map((trigger) => ({
+    id: `existing:${trigger.name}`,
+    name: trigger.name,
+    timing: trigger.timing,
+    event: trigger.event,
+    statement: trigger.statement ?? "",
+    original: trigger,
+    markedForDrop: false,
+  }));
+}
+
 export function toColumnNames(columns: string[]): string {
   return columns.join(", ");
+}
+
+const AUTO_INDEX_NAME_MAX_LENGTH = 63;
+
+function normalizeIndexNamePart(value: string): string {
+  const trimmed = value.trim();
+  const unquoted = (trimmed.startsWith("[") && trimmed.endsWith("]")) || (trimmed.startsWith("`") && trimmed.endsWith("`")) || (trimmed.startsWith('"') && trimmed.endsWith('"')) ? trimmed.slice(1, -1) : trimmed;
+  return unquoted
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+}
+
+function truncateIndexName(value: string, maxLength = AUTO_INDEX_NAME_MAX_LENGTH): string {
+  if (value.length <= maxLength) return value;
+  const suffix = "_IDX";
+  if (!value.endsWith(suffix)) return value.slice(0, maxLength).replace(/_+$/g, "");
+  return `${value.slice(0, maxLength - suffix.length).replace(/_+$/g, "")}${suffix}`;
+}
+
+export function generateIndexName(tableName: string, columns: string[], maxLength = AUTO_INDEX_NAME_MAX_LENGTH): string {
+  const parts = [tableName, ...columns].map(normalizeIndexNamePart).filter(Boolean);
+  if (parts.length === 0) return "";
+  return truncateIndexName(`${parts.join("_")}_IDX`, maxLength);
+}
+
+export function generateUniqueIndexName(tableName: string, columns: string[], existingNames: Iterable<string>, maxLength = AUTO_INDEX_NAME_MAX_LENGTH): string {
+  const base = generateIndexName(tableName, columns, maxLength);
+  if (!base) return "";
+
+  const taken = new Set([...existingNames].map((name) => name.trim().toLowerCase()).filter(Boolean));
+  if (!taken.has(base.toLowerCase())) return base;
+
+  for (let counter = 2; counter < 10_000; counter++) {
+    const suffix = `_${counter}`;
+    const stem = base.length + suffix.length <= maxLength ? base : base.slice(0, maxLength - suffix.length).replace(/_+$/g, "");
+    const candidate = `${stem}${suffix}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return base;
 }
 
 export function splitDataType(raw: string): { baseType: string; params: string } {
   const trimmed = raw.trim();
   const parenIdx = trimmed.indexOf("(");
   if (parenIdx === -1) return { baseType: trimmed, params: "" };
-  const baseType = trimmed.slice(0, parenIdx).trim();
-  const params = trimmed.slice(parenIdx + 1, trimmed.lastIndexOf(")")).trim();
+  const closeIdx = trimmed.lastIndexOf(")");
+  const baseTypePrefix = trimmed.slice(0, parenIdx).trim();
+  const params = trimmed.slice(parenIdx + 1, closeIdx).trim();
+  const suffix = trimmed
+    .slice(closeIdx + 1)
+    .trim()
+    .replace(/\s+/g, " ");
+  const baseType = /^(?:signed|unsigned|zerofill)(?:\s+(?:signed|unsigned|zerofill))*$/i.test(suffix) ? `${baseTypePrefix} ${suffix}`.trim() : baseTypePrefix;
   return { baseType, params };
 }
 
@@ -383,7 +663,13 @@ export function combineDataType(baseType: string, params: string): string {
 }
 
 export function combineDataTypeForDatabase(dbType: DatabaseType | undefined, baseType: string, params: string): string {
-  return combineDataType(baseType, normalizeDataTypeParams(dbType, baseType, params));
+  if (isDataTypeLengthDisabled(dbType, baseType)) {
+    return baseType;
+  }
+  const normalizedParams = normalizeDataTypeParams(dbType, baseType, params);
+  const mysqlType = combineMysqlNumericAttributeType(dbType, baseType, normalizedParams);
+  if (mysqlType) return mysqlType;
+  return combineDataType(baseType, normalizedParams);
 }
 
 export function normalizeDataTypeParams(dbType: DatabaseType | undefined, baseType: string, params: string): string {
@@ -404,28 +690,39 @@ function isTemporalPrecisionType(dbType: DatabaseType | undefined, baseType: str
       return ["time", "datetime", "timestamp"].includes(normalized);
     case "postgres":
     case "gaussdb":
+    case "kwdb":
     case "opengauss":
     case "highgo":
     case "vastbase":
     case "kingbase":
     case "redshift":
-      return [
-        "time",
-        "time without time zone",
-        "time with time zone",
-        "timestamp",
-        "timestamp without time zone",
-        "timestamp with time zone",
-      ].includes(normalized);
+      return ["time", "time without time zone", "time with time zone", "timestamp", "timestamp without time zone", "timestamp with time zone"].includes(normalized);
     case "sqlserver":
       return ["time", "datetime2", "datetimeoffset"].includes(normalized);
     case "oracle":
     case "dameng":
     case "oceanbase-oracle":
       return ["timestamp", "timestamp with time zone", "timestamp with local time zone"].includes(normalized);
+    case "questdb":
+      return ["timestamp"].includes(normalized);
     default:
       return false;
   }
+}
+
+function combineMysqlNumericAttributeType(dbType: DatabaseType | undefined, baseType: string, params: string): string | null {
+  if (!params || !isMysqlLikeStructureType(dbType)) return null;
+  const parts = baseType.trim().replace(/\s+/g, " ").split(" ").filter(Boolean);
+  const typeName = parts[0]?.toLowerCase();
+  if (!typeName || !["tinyint", "smallint", "mediumint", "int", "integer", "bigint", "real", "double", "float", "decimal", "numeric"].includes(typeName)) return null;
+  const attrIndex = parts.findIndex((part) => ["signed", "unsigned", "zerofill"].includes(part.toLowerCase()));
+  if (attrIndex === -1) return null;
+  if (!parts.slice(attrIndex).every((part) => ["signed", "unsigned", "zerofill"].includes(part.toLowerCase()))) return null;
+  return `${parts.slice(0, attrIndex).join(" ")}(${params}) ${parts.slice(attrIndex).join(" ")}`;
+}
+
+function isMysqlLikeStructureType(dbType: DatabaseType | undefined): boolean {
+  return dbType === "mysql" || dbType === "doris" || dbType === "starrocks" || dbType === "goldendb" || dbType === "sundb" || dbType === "databend";
 }
 
 function isValidTemporalPrecision(dbType: DatabaseType | undefined, params: string): boolean {
@@ -437,15 +734,27 @@ function isValidTemporalPrecision(dbType: DatabaseType | undefined, params: stri
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string): string {
   const key = baseType.trim().toLowerCase();
-  return DEFAULT_TYPE_LENGTHS[key] ?? "";
+  if (_dbType === "questdb") {
+    return QUESTDB_TYPE_LENGTHS[key] ?? "";
+  } else {
+    return DEFAULT_TYPE_LENGTHS[key] ?? "";
+  }
 }
 
-export function buildStructureTargetLabel(
-  connectionName: string | undefined,
-  database: string | undefined,
-  schema: string | undefined,
-  tableName: string | undefined,
-): string {
+export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, baseType: string): boolean {
+  const key = baseType.trim().toLowerCase();
+  if (_dbType === "questdb") {
+    return key !== "geohash" && key !== "decimal";
+  } else if (_dbType === "manticoresearch") {
+    return key !== "bit" && key !== "float_vector";
+  } else if (_dbType === "postgres" || _dbType === "gaussdb" || _dbType === "kwdb" || _dbType === "opengauss" || _dbType === "highgo" || _dbType === "vastbase" || _dbType === "kingbase") {
+    return POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
+  } else {
+    return DEFAULT_TYPE_LENGTH_DISABLES.includes(key);
+  }
+}
+
+export function buildStructureTargetLabel(connectionName: string | undefined, database: string | undefined, schema: string | undefined, tableName: string | undefined): string {
   const parts = [connectionName, database];
   if (schema && schema !== database) parts.push(schema);
   if (tableName) parts.push(tableName);

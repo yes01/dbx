@@ -1,4 +1,4 @@
-import type { AiAgentPlan, AiAgentStep } from "@/lib/aiAgentPlan";
+﻿import type { AiAgentPlan, AiAgentStep } from "@/lib/aiAgentPlan";
 
 export type AiAgentStepTone = "success" | "active" | "warning" | "danger" | "muted";
 
@@ -8,6 +8,16 @@ export interface AiAgentStepItem {
   tone: AiAgentStepTone;
   titleKey?: string;
   titleParams?: Record<string, string>;
+  /** Tool name for display */
+  toolName?: string;
+  /** Tool arguments (e.g., SQL query) for display */
+  toolArgs?: Record<string, unknown>;
+  /** Tool result content (e.g., query results) for display */
+  toolResult?: string;
+  /** Whether this is an error result */
+  isError?: boolean;
+  /** Structured explain plan data (for explain_query tool results) */
+  explainData?: unknown;
 }
 
 export function buildAiAgentStepItems(plan: AiAgentPlan): AiAgentStepItem[] {

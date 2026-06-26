@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -23,6 +24,50 @@ function taskProcess(task) {
   };
 }
 
+const testRoots = [
+  "packages/app-tests",
+  "apps/desktop/src",
+  "packages/node-core/tests",
+  "packages/cli/tests",
+  "packages/mcp-server/tests",
+  "docs/lib",
+];
+
+function walkFiles(dir) {
+  try {
+    if (!statSync(dir).isDirectory()) return [];
+  } catch {
+    return [];
+  }
+
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...walkFiles(entryPath));
+    } else if (/\.(test|spec)\.ts$/.test(entry.name)) {
+      files.push(entryPath.replaceAll(path.sep, "/"));
+    }
+  }
+  return files;
+}
+
+function testFilesUsing(importSource) {
+  const matcher = new RegExp(`from ['"]${importSource.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}['"]`);
+  return testRoots.flatMap(walkFiles).filter((file) => matcher.test(readFileSync(file, "utf8")));
+}
+
+function chunk(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+const nodeTestFiles = testFilesUsing("node:test");
+const vitestFiles = testFilesUsing("vitest");
+
 const tasks = [
   {
     name: "format",
@@ -39,12 +84,17 @@ const tasks = [
     command: "vue-tsc",
     args: ["--noEmit", "--project", "apps/desktop/tsconfig.json"],
   },
-  {
+  vitestFiles.length > 0 && {
     name: "test",
-    command: "tsx",
-    args: ["--tsconfig", "apps/desktop/tsconfig.json", "--test", "packages/app-tests/*.test.ts"],
+    command: "vitest",
+    args: ["run"],
   },
-];
+  ...chunk(nodeTestFiles, 12).map((files, index) => ({
+    name: nodeTestFiles.length > 12 ? `node-test-${index + 1}` : "node-test",
+    command: "tsx",
+    args: ["--tsconfig", "apps/desktop/tsconfig.json", "--test", ...files],
+  })),
+].filter(Boolean);
 
 function runTask(task) {
   const startedAt = performance.now();
