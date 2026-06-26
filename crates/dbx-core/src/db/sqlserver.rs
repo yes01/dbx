@@ -1117,7 +1117,18 @@ fn sqlserver_list_tables_sql(
 ) -> String {
     let filter_clause = filter
         .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(" AND LOWER(o.name) LIKE LOWER('%{}%') ESCAPE '\\' ", escape_like_literal(value.trim())))
+        .map(|value| {
+            let contains_pattern = format!("%{}%", escape_like_literal(value.trim()));
+            if crate::sql::fuzzy_filter_enabled(value) {
+                let fuzzy_pattern =
+                    crate::sql::fuzzy_like_pattern_with_escape(value.trim(), escape_like_literal);
+                format!(
+                    " AND (LOWER(o.name) LIKE LOWER('{contains_pattern}') ESCAPE '\\' OR LOWER(o.name) LIKE LOWER('{fuzzy_pattern}') ESCAPE '\\') "
+                )
+            } else {
+                format!(" AND LOWER(o.name) LIKE LOWER('{contains_pattern}') ESCAPE '\\' ")
+            }
+        })
         .unwrap_or_default();
     let schema_escaped = schema.replace('\'', "''");
     let base_columns = "o.name, CASE WHEN o.type = 'V' THEN 'VIEW' ELSE 'BASE TABLE' END, ep.value AS TABLE_COMMENT";
@@ -1914,6 +1925,7 @@ mod tests {
         let sql = sqlserver_list_tables_sql("dbo", Some("temp"), Some(200), None);
 
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('%temp%') ESCAPE '\\'"));
+        assert!(sql.contains("LOWER(o.name) LIKE LOWER('%t%e%m%p%') ESCAPE '\\'"));
         assert!(sql.contains("SELECT TOP (200)"));
     }
 
@@ -1922,6 +1934,25 @@ mod tests {
         let sql = sqlserver_list_tables_sql("dbo", Some("Temp_Table[%]"), Some(200), None);
 
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('%Temp\\_Table\\[\\%]%') ESCAPE '\\'"));
+        assert!(sql.contains("LOWER(o.name) LIKE LOWER('%T%e%m%p%\\_%T%a%b%l%e%\\[%\\%%]%') ESCAPE '\\'"));
+    }
+
+    #[test]
+    fn sqlserver_list_tables_filter_adds_fuzzy_pattern() {
+        let sql = sqlserver_list_tables_sql("dbo", Some("sysu"), Some(200), None);
+
+        assert!(sql.contains("LOWER(o.name) LIKE LOWER('%sysu%') ESCAPE '\\'"));
+        assert!(sql.contains("LOWER(o.name) LIKE LOWER('%s%y%s%u%') ESCAPE '\\'"));
+        assert!(sql.contains("SELECT TOP (200)"));
+    }
+
+    #[test]
+    fn sqlserver_list_tables_filter_skips_fuzzy_pattern_for_single_character() {
+        let sql = sqlserver_list_tables_sql("dbo", Some("u"), Some(200), None);
+
+        assert!(sql.contains("LOWER(o.name) LIKE LOWER('%u%') ESCAPE '\\'"));
+        assert!(!sql.contains(" OR LOWER(o.name) LIKE"));
+        assert!(sql.contains("SELECT TOP (200)"));
     }
 
     #[test]
