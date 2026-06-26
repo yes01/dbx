@@ -499,6 +499,8 @@ export default {
     copyRowUpdate: "Copiar como UPDATE",
     copyAll: "Copiar Tudo (TSV)",
     selection: "Seleção",
+    selectionSum: "SUM: {value}",
+    selectionCells: "{count} células",
     copySelectionTsv: "Copiar Seleção (TSV)",
     copySelectionTsvWithHeaders: "Copiar Seleção com Cabeçalhos (TSV)",
     copySelectionCsv: "Copiar Seleção (CSV)",

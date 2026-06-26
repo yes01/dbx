@@ -562,6 +562,8 @@ export default {
     copyRowUpdate: "复制为 UPDATE 语句",
     copyAll: "复制全部 (TSV)",
     selection: "选区",
+    selectionSum: "SUM: {value}",
+    selectionCells: "{count} 个单元",
     copySelectionTsv: "复制选区 (TSV)",
     copySelectionTsvWithHeaders: "复制选区含表头 (TSV)",
     copySelectionCsv: "复制选区 (CSV)",

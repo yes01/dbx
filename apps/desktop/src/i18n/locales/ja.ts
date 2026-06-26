@@ -549,6 +549,8 @@ export default {
     copyRowUpdate: "UPDATEとしてコピー",
     copyAll: "すべてコピー (TSV)",
     selection: "選択範囲",
+    selectionSum: "SUM: {value}",
+    selectionCells: "{count} 個のセル",
     copySelectionTsv: "選択範囲をコピー (TSV)",
     copySelectionTsvWithHeaders: "ヘッダー付きで選択範囲をコピー (TSV)",
     copySelectionCsv: "選択範囲をコピー (CSV)",

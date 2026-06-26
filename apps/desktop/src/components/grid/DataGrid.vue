@@ -129,7 +129,7 @@ import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, re
 import { allNullColumnIndexes, filterColumnVisibilityOptions, hiddenColumnIndexesWithAllNullColumns, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGridColumnVisibility";
 import { columnOrderKeysForIndexes, isDefaultColumnOrder, moveVisibleColumnIndex, orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, loadDataGridColumnOrder, removeDataGridColumnOrder, saveDataGridColumnOrder } from "@/lib/dataGridColumnLayoutStorage";
-import { parseClipboardTable } from "@/lib/gridSelection";
+import { parseClipboardTable, summarizeSelection } from "@/lib/gridSelection";
 
 import { useToast } from "@/composables/useToast";
 import { useDataGridExport } from "@/composables/useDataGridExport";
@@ -3242,6 +3242,14 @@ const multiRowCount = computed(() => {
   const range = selectedRange.value;
   if (range && range.startRow !== range.endRow) return range.endRow - range.startRow + 1;
   return 1;
+});
+
+const selectionSummary = computed(() => (hasCellSelection.value ? summarizeSelection(selectedCells.value) : null));
+const selectionSummarySumText = computed(() => {
+  const summary = selectionSummary.value;
+  if (!summary) return "0";
+  const sum = Object.is(summary.sum, -0) ? 0 : summary.sum;
+  return Number.isInteger(sum) ? String(sum) : sum.toLocaleString(undefined, { maximumFractionDigits: 12 });
 });
 
 const isMultiRow = computed(() => multiRowCount.value > 1);
@@ -8180,6 +8188,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       <span v-else class="min-w-0" />
 
       <div class="flex min-w-max items-center justify-end gap-1">
+        <div v-if="selectionSummary" class="flex shrink-0 items-center gap-3 tabular-nums">
+          <span class="shrink-0">{{ t("grid.selectionSum", { value: selectionSummarySumText }) }}</span>
+          <div class="flex shrink-0 items-center gap-1">
+            <span class="shrink-0">{{ t("grid.selectionCells", { count: selectionSummary.cellCount }) }}</span>
+            <span class="shrink-0">{{ t("grid.rows", { count: selectionSummary.rowCount }) }}</span>
+          </div>
+        </div>
         <Loader2 v-if="loading" class="w-3 h-3 animate-spin text-muted-foreground" />
         <template v-if="infiniteScrollEnabled">
           <span v-if="infiniteScrollAllLoaded" class="text-xs text-muted-foreground shrink-0">
