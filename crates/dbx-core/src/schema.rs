@@ -3464,7 +3464,12 @@ mod ddl_tests {
 pub async fn mysql_ddl(pool: &db::mysql::MySqlPool, table: &str) -> Result<String, String> {
     use mysql_async::prelude::*;
     let sql = format!("SHOW CREATE TABLE `{}`", table.replace('`', "``"));
-    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    // Use the health-checked getter so a stale pooled connection (server closed
+    // it after an idle timeout, NAT/firewall dropped the TCP state, etc.) is
+    // detected and replaced before issuing the query. Without this, the first
+    // DDL request after a period of inactivity could surface a low-level
+    // connection error that a manual refresh would have masked.
+    let mut conn = db::mysql::get_conn_with_health_check(pool).await?;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let row = rows.first().ok_or("DDL not found")?;
