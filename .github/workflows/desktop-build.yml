@@ -80,8 +80,8 @@ jobs:
         run: |
           VERSION="$(node -p "require('./package.json').version")"
           node scripts/build-macos-dmg.mjs \
-            "target/${{ matrix.target }}/release/bundle/macos/TestTeam DBX.app" \
-            "target/${{ matrix.target }}/release/bundle/dmg/TestTeam.DBX_${VERSION}_aarch64.dmg"
+            "target/${{ matrix.target }}/release/bundle/macos/DBX.app" \
+            "target/${{ matrix.target }}/release/bundle/dmg/DBX_${VERSION}_aarch64.dmg"
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
