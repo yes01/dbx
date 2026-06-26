@@ -21,7 +21,7 @@ jobs:
       matrix:
         include:
           - label: Windows x64
-            os: windows-latest
+            os: windows-2022
             target: x86_64-pc-windows-msvc
             artifact: dbx-windows-x64
             bundle_path: target/x86_64-pc-windows-msvc/release/bundle

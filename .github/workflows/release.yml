@@ -25,7 +25,7 @@ jobs:
       matrix:
         include:
           - label: Windows x64
-            os: windows-latest
+            os: windows-2022
             target: x86_64-pc-windows-msvc
             build_args: --ci --no-sign --config src-tauri/tauri.ci.conf.json --target x86_64-pc-windows-msvc
           - label: macOS Apple Silicon
