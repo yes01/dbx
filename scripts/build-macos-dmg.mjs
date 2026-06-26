@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
-import { cp } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -40,11 +39,8 @@ const stagingDir = mkdtempSync(join(tmpdir(), 'dbx-dmg-'));
 
 try {
   const stagedAppPath = join(stagingDir, basename(appPath));
-  await cp(appPath, stagedAppPath, {
-    recursive: true,
-    preserveTimestamps: true,
-    verbatimSymlinks: true,
-  });
+  // Preserve macOS bundle metadata so the copied app remains codesign-verifiable.
+  run('ditto', [appPath, stagedAppPath]);
   symlinkSync('/Applications', join(stagingDir, 'Applications'));
 
   run('mkdir', ['-p', dirname(dmgPath)]);
