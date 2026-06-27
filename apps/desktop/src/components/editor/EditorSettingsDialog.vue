@@ -2476,11 +2476,11 @@ watch(
                       { key: 'sqlFile', label: t('sqlFile.title') },
                       { key: 'schemaDiff', label: t('diff.title') },
                       { key: 'dataCompare', label: t('dataCompare.title') },
+                      { key: 'checkUpdates', label: t('updates.check') },
                       { key: 'sqlLibrary', label: t('sqlLibrary.title') },
                       { key: 'history', label: t('history.title') },
                       { key: 'ai', label: 'AI' },
                       { key: 'theme', label: t('toolbar.theme') },
-                      { key: 'github', label: 'GitHub' },
                     ]"
                     :key="item.key"
                     class="flex items-center gap-2"
