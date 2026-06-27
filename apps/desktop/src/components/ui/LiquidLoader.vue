@@ -41,8 +41,10 @@ function columnStyle(column: LiquidColumn) {
         <span class="liquid-loader__shine" />
         <span class="liquid-loader__bubble liquid-loader__bubble--one" />
         <span class="liquid-loader__bubble liquid-loader__bubble--two" />
+        <span class="liquid-loader__bubble liquid-loader__bubble--three" />
       </span>
       <span class="liquid-loader__base" />
+      <span class="liquid-loader__reflection" />
     </div>
   </div>
 </template>
@@ -50,7 +52,7 @@ function columnStyle(column: LiquidColumn) {
 <style scoped>
 .liquid-loader {
   display: flex;
-  height: 132px;
+  height: 148px;
   align-items: flex-end;
   justify-content: center;
   gap: 12px;
@@ -68,7 +70,7 @@ function columnStyle(column: LiquidColumn) {
   position: relative;
   display: flex;
   width: 18px;
-  height: 112px;
+  height: 128px;
   flex-direction: column;
   align-items: center;
   justify-content: flex-end;
@@ -190,6 +192,15 @@ function columnStyle(column: LiquidColumn) {
   animation-delay: calc(var(--liquid-delay) + var(--liquid-bubble-delay) + 260ms);
 }
 
+/* ── Third bubble: tiny, floats higher with offset timing ── */
+.liquid-loader__bubble--three {
+  right: 2px;
+  bottom: 42px;
+  width: 2.5px;
+  height: 2.5px;
+  animation-delay: calc(var(--liquid-delay) + var(--liquid-bubble-delay) + 480ms);
+}
+
 .liquid-loader__base {
   width: 8px;
   height: 8px;
@@ -199,6 +210,21 @@ function columnStyle(column: LiquidColumn) {
   transform: scale(0.8);
   animation: liquid-loader-base 2.35s var(--liquid-delay) ease-in-out infinite;
 }
+
+/* ── Reflection pool: blurred ellipse below the bar ── */
+.liquid-loader__reflection {
+  display: block;
+  width: 16px;
+  height: 6px;
+  margin-top: 2px;
+  border-radius: 999px;
+  background: var(--liquid-color);
+  filter: blur(4px);
+  opacity: 0;
+  animation: liquid-loader-reflection 2.35s var(--liquid-delay) ease-in-out infinite;
+}
+
+/* ── Keyframes ── */
 
 @keyframes liquid-loader-rise {
   0%,
@@ -213,6 +239,7 @@ function columnStyle(column: LiquidColumn) {
   44% {
     border-radius: 999px 999px 54% 54%;
     transform: translateY(-8px) scaleY(1);
+    filter: saturate(1.08) brightness(1.12);
   }
   58% {
     border-radius: 56% 56% 999px 999px;
@@ -252,6 +279,9 @@ function columnStyle(column: LiquidColumn) {
   }
   36% {
     transform: translateY(-1px) scaleX(1.16) scaleY(1.08);
+  }
+  44% {
+    transform: translateY(-2px) scaleX(1.22) scaleY(1.14);
   }
   56% {
     transform: translateY(2px) scaleX(0.92) scaleY(0.82);
@@ -336,6 +366,27 @@ function columnStyle(column: LiquidColumn) {
   }
 }
 
+/* ── Reflection: fades in sync with bar rise ── */
+@keyframes liquid-loader-reflection {
+  0%,
+  100% {
+    opacity: 0.08;
+    transform: scaleX(0.7);
+  }
+  44% {
+    opacity: 0.32;
+    transform: scaleX(1.3);
+  }
+  58% {
+    opacity: 0.14;
+    transform: scaleX(0.9);
+  }
+  74% {
+    opacity: 0.22;
+    transform: scaleX(1.1);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .liquid-loader__drop,
   .liquid-loader__bar,
@@ -343,7 +394,8 @@ function columnStyle(column: LiquidColumn) {
   .liquid-loader__wave,
   .liquid-loader__shine,
   .liquid-loader__bubble,
-  .liquid-loader__base {
+  .liquid-loader__base,
+  .liquid-loader__reflection {
     animation: none;
   }
 
@@ -358,6 +410,10 @@ function columnStyle(column: LiquidColumn) {
 
   .liquid-loader__bubble {
     opacity: 0.42;
+  }
+
+  .liquid-loader__reflection {
+    opacity: 0.18;
   }
 }
 </style>

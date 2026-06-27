@@ -7,8 +7,13 @@ import LiquidLoader from "@/components/ui/LiquidLoader.vue";
     <div class="startup-splash__panel">
       <LiquidLoader />
       <div class="startup-splash__copy">
-        <span class="startup-splash__name">TestTeam DBX</span>
-        <span class="startup-splash__state">Loading workspace</span>
+        <span class="startup-splash__label">TestTeam</span>
+        <span class="startup-splash__hero">DBX</span>
+        <div class="startup-splash__dots">
+          <span class="startup-splash__dot" />
+          <span class="startup-splash__dot" />
+          <span class="startup-splash__dot" />
+        </div>
       </div>
     </div>
   </div>
@@ -39,20 +44,80 @@ import LiquidLoader from "@/components/ui/LiquidLoader.vue";
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
+  gap: 2px;
 }
 
-.startup-splash__name {
-  font-size: 14px;
-  font-weight: 650;
-  letter-spacing: 0;
-}
-
-.startup-splash__state {
+.startup-splash__label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
   color: var(--muted-foreground);
-  font-size: 12px;
 }
 
+.startup-splash__hero {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  background: linear-gradient(135deg, oklch(0.62 0.2 300), oklch(0.61 0.19 255), oklch(0.68 0.15 215), oklch(0.72 0.15 165), oklch(0.78 0.16 112), oklch(0.75 0.17 68), oklch(0.66 0.2 35));
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: startup-splash-gradient 4s ease-in-out infinite;
+}
+
+.startup-splash__dots {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.startup-splash__dot {
+  display: block;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--muted-foreground);
+  opacity: 0.25;
+  animation: startup-splash-dot 1.4s ease-in-out infinite;
+}
+
+.startup-splash__dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.startup-splash__dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* ── Keyframes ── */
+@keyframes startup-splash-gradient {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes startup-splash-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.85);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+/* ── Leave transition (used by <Transition name="startup-splash"> in App.vue) ── */
 .startup-splash-leave-active {
   transition:
     opacity 420ms cubic-bezier(0.22, 1, 0.36, 1),
@@ -65,6 +130,15 @@ import LiquidLoader from "@/components/ui/LiquidLoader.vue";
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .startup-splash__hero {
+    animation: none;
+  }
+
+  .startup-splash__dot {
+    animation: none;
+    opacity: 0.5;
+  }
+
   .startup-splash-leave-active {
     transition: opacity 160ms ease-out;
   }
