@@ -71,7 +71,6 @@ import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/utils";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
-import AppLogo from "@/components/icons/AppLogo.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import type { AppThemeAppearance } from "@/lib/appTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
