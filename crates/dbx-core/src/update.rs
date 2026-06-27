@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 const LATEST_JSON_PATH: &str = "https://github.com/yes01/dbx/releases/latest/download/latest.json";
-const LATEST_JSON_R2_PATH: &str = "releases/latest/latest.json";
-const RELEASE_URL_PREFIX: &str = "https://dl.dbxio.com/releases/latest/";
+const RELEASE_URL_PREFIX: &str = "https://github.com/yes01/dbx/releases/latest";
 
 #[derive(Debug, Deserialize)]
 pub struct TauriRelease {
@@ -34,31 +33,15 @@ pub struct UpdateInfo {
 pub async fn fetch_latest_release() -> Result<TauriRelease, String> {
     let client = build_update_http_client()?;
 
-    let resp = fetch_latest_json(&client).await.map_err(|e| format!("Failed to check updates: {e}"))?;
-
-    resp.json::<TauriRelease>().await.map_err(|e| format!("Failed to parse update response: {e}"))
-}
-
-async fn fetch_latest_json(client: &reqwest::Client) -> Result<reqwest::Response, String> {
-    let github = client
+    let resp = client
         .get(LATEST_JSON_PATH)
         .header(reqwest::header::USER_AGENT, "dbx-update-checker")
         .send()
         .await
-        .and_then(|r| r.error_for_status());
-
-    if let Ok(resp) = github {
-        return Ok(resp);
-    }
-
-    let cdn_url = format!("{}{}", crate::R2_CDN_BASE, LATEST_JSON_R2_PATH);
-    client
-        .get(&cdn_url)
-        .header(reqwest::header::USER_AGENT, "dbx-update-checker")
-        .send()
-        .await
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("{e}"))
+        .map_err(|e| format!("Failed to check updates: {e}"))?;
+
+    resp.json::<TauriRelease>().await.map_err(|e| format!("Failed to parse update response: {e}"))
 }
 
 fn build_update_http_client() -> Result<reqwest::Client, String> {
@@ -353,7 +336,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
         let info = build_update_info(release, "0.5.2");
 
         assert_eq!(info.release_name, "TestTeam DBX v0.5.3");
-        assert_eq!(info.release_url, "https://dl.dbxio.com/releases/latest/");
+        assert_eq!(info.release_url, "https://github.com/yes01/dbx/releases/latest");
         assert_eq!(info.release_notes, "Internal release notes");
         assert!(!info.portable_mode);
     }

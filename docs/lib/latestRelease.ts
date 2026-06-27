@@ -7,7 +7,7 @@ export type LatestReleaseInfo = {
   pub_date?: string;
 };
 
-const LATEST_RELEASE_URL = 'https://dl.dbxio.com/releases/latest/latest.json';
+const LATEST_RELEASE_URL = 'https://github.com/yes01/dbx/releases/latest/download/latest.json';
 
 function normalizeVersion(version: string) {
   return version.replace(/^v/, '');

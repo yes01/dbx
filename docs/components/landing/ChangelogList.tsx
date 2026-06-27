@@ -41,7 +41,7 @@ function ReleaseCard({ release, lang }: { release: ChangelogRelease; lang: strin
           </span>
         </div>
         <a
-          href="https://dl.dbxio.com/releases/latest/"
+          href="https://github.com/yes01/dbx/releases/latest"
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-[rgba(155,176,205,0.25)] text-sm text-[#e2e8f0] hover:border-[rgba(155,176,205,0.4)] transition-colors"
@@ -119,5 +119,4 @@ export function ChangelogList({ releases, lang }: { releases: ChangelogRelease[]
     </>
   );
 }
-
 
