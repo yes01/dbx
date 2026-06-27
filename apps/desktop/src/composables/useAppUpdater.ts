@@ -34,6 +34,7 @@ export function useAppUpdater() {
   const downloadProgress = ref(0);
   const updateReady = ref(false);
   const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true);
+  let updateCheckInFlight = false;
 
   function openUrl(url: string) {
     if (isTauriRuntime()) {
@@ -44,8 +45,12 @@ export function useAppUpdater() {
   }
 
   async function checkUpdates(options: { silent?: boolean } = {}) {
-    if (checkingUpdates.value) return;
-    checkingUpdates.value = true;
+    if (updateCheckInFlight) return;
+    updateCheckInFlight = true;
+    const showCheckingState = options.silent !== true;
+    if (showCheckingState) {
+      checkingUpdates.value = true;
+    }
     updateCheckMessage.value = "";
     try {
       const info = await api.checkForUpdates();
@@ -64,7 +69,10 @@ export function useAppUpdater() {
         showUpdateDialog.value = true;
       }
     } finally {
-      checkingUpdates.value = false;
+      if (showCheckingState) {
+        checkingUpdates.value = false;
+      }
+      updateCheckInFlight = false;
     }
   }
 

@@ -103,9 +103,7 @@ const { checkingUpdates, updateInfo, updateCheckMessage, showUpdateDialog, isDow
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
-const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const STARTUP_SPLASH_DURATION_MS = 3000;
-let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
 const needsAuth = ref(!isDesktop);
 const authenticated = ref(isDesktop);
 const setupRequired = ref(false);
@@ -1345,16 +1343,9 @@ function runUpdateNotificationChecks() {
 watch(updateNotificationsEnabled, (enabled) => {
   if (!enabled) {
     agentDriverUpdateCount.value = 0;
-    if (updateCheckTimer) {
-      clearInterval(updateCheckTimer);
-      updateCheckTimer = undefined;
-    }
     return;
   }
-  runUpdateNotificationChecks();
-  if (!updateCheckTimer) {
-    updateCheckTimer = setInterval(runUpdateNotificationChecks, UPDATE_CHECK_INTERVAL_MS);
-  }
+  void refreshAgentDriverUpdateCount();
 });
 
 onMounted(async () => {
@@ -1411,9 +1402,6 @@ onMounted(async () => {
   setupFileDrop().catch(() => {});
   setTimeout(() => {
     runUpdateNotificationChecks();
-    if (updateNotificationsEnabled.value && !updateCheckTimer) {
-      updateCheckTimer = setInterval(runUpdateNotificationChecks, UPDATE_CHECK_INTERVAL_MS);
-    }
   }, 10_000);
   api
     .getAppVersion()
@@ -1436,9 +1424,6 @@ onUnmounted(() => {
   }
   cleanupTauriListeners();
   cleanupCloseActionPromptListener();
-  if (updateCheckTimer) {
-    clearInterval(updateCheckTimer);
-  }
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   document.removeEventListener("contextmenu", handleContextMenu);
