@@ -13,6 +13,7 @@ permissions:
 env:
   APP_NAME: dbx
   PRODUCT_NAME: TestTeam DBX
+  PRODUCT_ASSET_PREFIX: TestTeam.DBX
   REPO_OWNER: t8y2
 
 jobs:
@@ -42,9 +43,8 @@ jobs:
           TAG="${{ steps.version.outputs.tag }}"
 
           ASSETS=(
-            "${PRODUCT_NAME}_${VERSION}_aarch64.dmg"
-            "${PRODUCT_NAME}_${VERSION}_x64.dmg"
-            "${PRODUCT_NAME}_${VERSION}_x64-setup.exe"
+            "${PRODUCT_ASSET_PREFIX}_${VERSION}_aarch64.dmg"
+            "${PRODUCT_ASSET_PREFIX}_${VERSION}_x64-setup.exe"
           )
 
           for ASSET in "${ASSETS[@]}"; do
@@ -77,17 +77,28 @@ jobs:
           }
 
           echo "SHA256 hashes:"
-          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_aarch64.dmg" "sha_dmg_arm64"
-          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64.dmg" "sha_dmg_x64"
-          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64-setup.exe" "sha_exe"
+          compute_hash "artifacts/${PRODUCT_ASSET_PREFIX}_${VERSION}_aarch64.dmg" "sha_dmg_arm64"
+          compute_hash "artifacts/${PRODUCT_ASSET_PREFIX}_${VERSION}_x64-setup.exe" "sha_exe"
+
+      - name: Check package publishing configuration
+        id: publish-config
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          if [[ -z "${TAP_GITHUB_TOKEN}" ]]; then
+            echo "::notice::TAP_GITHUB_TOKEN is not configured; skipping Homebrew and Scoop publishing."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Publish Homebrew Cask
+        if: steps.publish-config.outputs.enabled == 'true'
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           SHA_ARM64="${{ steps.hashes.outputs.sha_dmg_arm64 }}"
-          SHA_X64="${{ steps.hashes.outputs.sha_dmg_x64 }}"
 
           git clone --depth 1 \
             "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/${REPO_OWNER}/homebrew-tap.git" \
@@ -97,19 +108,17 @@ jobs:
 
           cat > Casks/dbx.rb <<'RUBY_EOF'
           cask "dbx" do
-            arch arm: "aarch64", intel: "x64"
-
             version "__VERSION__"
-            sha256 arm:   "__SHA_ARM64__",
-                   intel: "__SHA_X64__"
+            sha256 "__SHA_ARM64__"
 
-            url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT___#{version}_#{arch}.dmg",
+            url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT_ASSET___#{version}_aarch64.dmg",
                 verified: "github.com/__OWNER__/__APP__/"
             name "TestTeam DBX"
             desc "Database management tool"
             homepage "https://dbxio.com/"
 
             depends_on macos: :big_sur
+            depends_on arch: :arm64
 
             app "TestTeam DBX.app"
 
@@ -127,9 +136,8 @@ jobs:
           sed -i "s/__VERSION__/${VERSION}/g" Casks/dbx.rb
           sed -i "s/__OWNER__/${REPO_OWNER}/g" Casks/dbx.rb
           sed -i "s/__APP__/${APP_NAME}/g" Casks/dbx.rb
-          sed -i "s/__PRODUCT__/${PRODUCT_NAME}/g" Casks/dbx.rb
+          sed -i "s/__PRODUCT_ASSET__/${PRODUCT_ASSET_PREFIX}/g" Casks/dbx.rb
           sed -i "s/__SHA_ARM64__/${SHA_ARM64}/g" Casks/dbx.rb
-          sed -i "s/__SHA_X64__/${SHA_X64}/g" Casks/dbx.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -144,6 +152,7 @@ jobs:
           fi
 
       - name: Publish Scoop manifest
+        if: steps.publish-config.outputs.enabled == 'true'
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
@@ -163,7 +172,7 @@ jobs:
               "license": "MIT",
               "architecture": {
                   "64bit": {
-                      "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v${VERSION}/${PRODUCT_NAME}_${VERSION}_x64-setup.exe",
+                      "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v${VERSION}/${PRODUCT_ASSET_PREFIX}_${VERSION}_x64-setup.exe",
                       "hash": "${SHA_EXE}"
                   }
               },
@@ -181,7 +190,7 @@ jobs:
               "autoupdate": {
                   "architecture": {
                       "64bit": {
-                          "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v\$version/${PRODUCT_NAME}_\$version_x64-setup.exe"
+                          "url": "https://github.com/${REPO_OWNER}/${APP_NAME}/releases/download/v\$version/${PRODUCT_ASSET_PREFIX}_\$version_x64-setup.exe"
                       }
                   }
               }
@@ -213,7 +222,23 @@ jobs:
           TAG="$(echo "${TAG}" | xargs)"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
+      - name: Check R2 configuration
+        id: r2-config
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          if [[ -z "${R2_ACCOUNT_ID}" || -z "${R2_BUCKET_NAME}" || -z "${R2_ACCESS_KEY_ID}" || -z "${R2_SECRET_ACCESS_KEY}" ]]; then
+            echo "::notice::R2 secrets are not configured; skipping R2 upload."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download release assets
+        if: steps.r2-config.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -225,21 +250,27 @@ jobs:
           ls -lh assets/
 
       - name: Upload to R2 (versioned)
+        if: steps.r2-config.outputs.enabled == 'true'
         run: |
-          aws s3 sync ./assets "s3://${{ secrets.R2_BUCKET_NAME }}/releases/${{ steps.version.outputs.tag }}/" \
-            --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          aws s3 sync ./assets "s3://${R2_BUCKET_NAME}/releases/${{ steps.version.outputs.tag }}/" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
 
       - name: Upload to R2 (latest)
+        if: steps.r2-config.outputs.enabled == 'true'
         run: |
-          aws s3 sync ./assets "s3://${{ secrets.R2_BUCKET_NAME }}/releases/latest/" \
-            --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com" \
+          aws s3 sync ./assets "s3://${R2_BUCKET_NAME}/releases/latest/" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             --delete
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
 
   promote-release:
     name: Promote to Release
