@@ -34,7 +34,6 @@ export function useAppUpdater() {
   const downloadProgress = ref(0);
   const updateReady = ref(false);
   const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true);
-  const latestReleaseUrl = "https://github.com/yes01/dbx/releases/latest";
 
   function openUrl(url: string) {
     if (isTauriRuntime()) {
@@ -77,15 +76,9 @@ export function useAppUpdater() {
     return t("updates.failed", { error: message });
   }
 
-  function openLatestRelease() {
-    const url = updateInfo.value?.release_url || latestReleaseUrl;
-    openUrl(url);
-  }
-
   async function downloadAndInstallUpdate() {
     if (!isTauriRuntime() || isDownloadingUpdate.value) return;
     if (!canDownloadAndInstallUpdate(updateInfo.value, true)) {
-      openLatestRelease();
       return;
     }
     isDownloadingUpdate.value = true;
@@ -134,11 +127,9 @@ export function useAppUpdater() {
     downloadProgress,
     updateReady,
     hasUpdateAvailable,
-    latestReleaseUrl,
     openUrl,
     checkUpdates,
     formatUpdateError,
-    openLatestRelease,
     downloadAndInstallUpdate,
     restartApp,
   };

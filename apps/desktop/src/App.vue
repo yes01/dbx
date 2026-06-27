@@ -11,6 +11,7 @@ import EditorToolbar from "@/components/layout/EditorToolbar.vue";
 import ContentArea from "@/components/layout/ContentArea.vue";
 import AppDialogs from "@/components/layout/AppDialogs.vue";
 import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
+import StartupSplash from "@/components/layout/StartupSplash.vue";
 import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -98,15 +99,18 @@ const settingsStore = useSettingsStore();
 const savedSqlStore = useSavedSqlStore();
 const { message: toastMessage, visible: toastVisible, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode } = useTheme();
-const { checkingUpdates, updateInfo, updateCheckMessage, showUpdateDialog, isDownloadingUpdate, downloadProgress, updateReady, hasUpdateAvailable, openUrl, checkUpdates, openLatestRelease, downloadAndInstallUpdate, restartApp } = useAppUpdater();
+const { checkingUpdates, updateInfo, updateCheckMessage, showUpdateDialog, isDownloadingUpdate, downloadProgress, updateReady, hasUpdateAvailable, openUrl, checkUpdates, downloadAndInstallUpdate, restartApp } = useAppUpdater();
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const STARTUP_SPLASH_DURATION_MS = 3000;
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
 const needsAuth = ref(!isDesktop);
 const authenticated = ref(isDesktop);
 const setupRequired = ref(false);
+const showStartupSplash = ref(isDesktop);
+let startupSplashTimer: ReturnType<typeof setTimeout> | undefined;
 
 const showConnectionDialog = ref(false);
 const connectionDialogPrefill = ref<ConnectionDeepLinkDraft | null>(null);
@@ -1356,6 +1360,12 @@ watch(updateNotificationsEnabled, (enabled) => {
 onMounted(async () => {
   console.log("[STARTUP] onMounted begin");
   const mountStart = performance.now();
+  if (isDesktop) {
+    startupSplashTimer = setTimeout(() => {
+      showStartupSplash.value = false;
+      startupSplashTimer = undefined;
+    }, STARTUP_SPLASH_DURATION_MS);
+  }
   requestAnimationFrame(() => {
     aiPanelReady.value = true;
   });
@@ -1420,6 +1430,10 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  if (startupSplashTimer) {
+    clearTimeout(startupSplashTimer);
+    startupSplashTimer = undefined;
+  }
   cleanupTauriListeners();
   cleanupCloseActionPromptListener();
   if (updateCheckTimer) {
@@ -1666,7 +1680,6 @@ onUnmounted(() => {
           :is-downloading-update="isDownloadingUpdate"
           :download-progress="downloadProgress"
           :update-ready="updateReady"
-          @open-latest-release="openLatestRelease"
           @download-and-install="downloadAndInstallUpdate"
           @restart="restartApp"
         />
@@ -1731,6 +1744,9 @@ onUnmounted(() => {
       <DdlViewDialog v-if="queryEditorDdlTarget" v-model:open="showQueryEditorDdlDialog" :connection-id="queryEditorDdlTarget.connectionId" :database="queryEditorDdlTarget.database" :schema="queryEditorDdlTarget.schema" :table-name="queryEditorDdlTarget.tableName" :dialect="queryEditorDdlDialect" />
     </TooltipProvider>
   </div>
+  <Transition name="startup-splash">
+    <StartupSplash v-if="showStartupSplash" />
+  </Transition>
 </template>
 
 <style scoped>
