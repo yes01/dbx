@@ -13,7 +13,7 @@ export function LandingNav({
   active,
 }: {
   lang: 'en' | 'cn';
-  active?: 'home' | 'changelog' | 'community';
+  active?: 'home' | 'changelog' | 'community' | 'databases' | 'drivers';
 }) {
   const ref = useRef<HTMLElement>(null);
   const t = i18n[lang];

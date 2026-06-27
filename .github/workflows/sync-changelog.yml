@@ -25,6 +25,10 @@ jobs:
 
       - name: Upload to R2
         run: |
+          if [ -z "${R2_ACCOUNT_ID}" ] || [ -z "${R2_BUCKET_NAME}" ] || [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ]; then
+            echo "::notice::R2 secrets are not configured; skipping changelog upload."
+            exit 0
+          fi
           pip install awscli --quiet
           aws s3 cp releases-cn.json "s3://${R2_BUCKET_NAME}/changelog/releases-cn.json" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \

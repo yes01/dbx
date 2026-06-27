@@ -63,7 +63,7 @@ pub mod xlsx_export;
 pub const R2_CDN_BASE: &str = "https://dl.dbxio.com/";
 
 pub fn download_candidate_urls(github_url: &str, r2_path: &str) -> Vec<String> {
-    vec![format!("{R2_CDN_BASE}{r2_path}"), github_url.to_string()]
+    vec![github_url.to_string(), format!("{R2_CDN_BASE}{r2_path}")]
 }
 
 use std::pin::Pin;
@@ -108,15 +108,15 @@ mod tests {
     #[test]
     fn download_candidates_exclude_third_party_github_proxy() {
         let urls = download_candidate_urls(
-            "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+            "https://github.com/yes01/dbx/releases/latest/download/latest.json",
             "releases/latest/latest.json",
         );
 
         assert_eq!(
             urls,
             vec![
+                "https://github.com/yes01/dbx/releases/latest/download/latest.json",
                 "https://dl.dbxio.com/releases/latest/latest.json",
-                "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
             ]
         );
     }

@@ -223,7 +223,6 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Check R2 configuration
-        id: r2-config
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
@@ -231,14 +230,12 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           if [[ -z "${R2_ACCOUNT_ID}" || -z "${R2_BUCKET_NAME}" || -z "${R2_ACCESS_KEY_ID}" || -z "${R2_SECRET_ACCESS_KEY}" ]]; then
-            echo "::notice::R2 secrets are not configured; skipping R2 upload."
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "::error::R2 secrets are required to publish in-app updates for existing clients."
+            echo "::error::Configure R2_ACCOUNT_ID, R2_BUCKET_NAME, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY."
+            exit 1
           fi
 
       - name: Download release assets
-        if: steps.r2-config.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -250,7 +247,6 @@ jobs:
           ls -lh assets/
 
       - name: Upload to R2 (versioned)
-        if: steps.r2-config.outputs.enabled == 'true'
         run: |
           aws s3 sync ./assets "s3://${R2_BUCKET_NAME}/releases/${{ steps.version.outputs.tag }}/" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
@@ -261,7 +257,6 @@ jobs:
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
 
       - name: Upload to R2 (latest)
-        if: steps.r2-config.outputs.enabled == 'true'
         run: |
           aws s3 sync ./assets "s3://${R2_BUCKET_NAME}/releases/latest/" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \

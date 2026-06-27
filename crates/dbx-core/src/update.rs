@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-const LATEST_JSON_PATH: &str = "https://dl.dbxio.com/releases/latest/latest.json";
+const LATEST_JSON_PATH: &str = "https://github.com/yes01/dbx/releases/latest/download/latest.json";
 const LATEST_JSON_R2_PATH: &str = "releases/latest/latest.json";
 const RELEASE_URL_PREFIX: &str = "https://dl.dbxio.com/releases/latest/";
 
@@ -34,11 +34,31 @@ pub struct UpdateInfo {
 pub async fn fetch_latest_release() -> Result<TauriRelease, String> {
     let client = build_update_http_client()?;
 
-    let resp = crate::race_download(&client, LATEST_JSON_PATH, LATEST_JSON_R2_PATH, "dbx-update-checker")
-        .await
-        .map_err(|e| format!("Failed to check updates: {e}"))?;
+    let resp = fetch_latest_json(&client).await.map_err(|e| format!("Failed to check updates: {e}"))?;
 
     resp.json::<TauriRelease>().await.map_err(|e| format!("Failed to parse update response: {e}"))
+}
+
+async fn fetch_latest_json(client: &reqwest::Client) -> Result<reqwest::Response, String> {
+    let github = client
+        .get(LATEST_JSON_PATH)
+        .header(reqwest::header::USER_AGENT, "dbx-update-checker")
+        .send()
+        .await
+        .and_then(|r| r.error_for_status());
+
+    if let Ok(resp) = github {
+        return Ok(resp);
+    }
+
+    let cdn_url = format!("{}{}", crate::R2_CDN_BASE, LATEST_JSON_R2_PATH);
+    client
+        .get(&cdn_url)
+        .header(reqwest::header::USER_AGENT, "dbx-update-checker")
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("{e}"))
 }
 
 fn build_update_http_client() -> Result<reqwest::Client, String> {
