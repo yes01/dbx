@@ -3443,7 +3443,7 @@ watch(
               <div class="rounded-lg border bg-muted/20 p-4">
                 <div class="flex items-start justify-between gap-4">
                   <div class="min-w-0 space-y-1">
-                    <div class="text-lg font-semibold">DBX</div>
+                    <div class="text-lg font-semibold">TestTeam DBX</div>
                     <p class="text-sm text-muted-foreground">{{ t("settings.aboutDescription") }}</p>
                   </div>
                   <div v-if="displayedAppVersion" class="rounded-md border bg-background px-2 py-1 text-xs text-muted-foreground">
@@ -3496,7 +3496,7 @@ watch(
                   </div>
                   <div class="mt-1 text-sm text-primary">{{ t("settings.wechatGroupInvite") }}</div>
                 </button>
-                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://github.com/t8y2/dbx')">
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://github.com/yes01/dbx')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.project") }}
                   </div>
@@ -3505,7 +3505,7 @@ watch(
                     {{ t("settings.openSource") }}
                     <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
                   </div>
-                  <div class="mt-1 text-sm text-primary">github.com/t8y2/dbx</div>
+                  <div class="mt-1 text-sm text-primary">github.com/yes01/dbx</div>
                 </button>
                 <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://dbxio.com')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">

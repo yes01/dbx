@@ -1,6 +1,6 @@
 export default {
   app: {
-    name: "DBX",
+    name: "TestTeam DBX",
   },
   auth: {
     setupTitle: "設定存取密碼",

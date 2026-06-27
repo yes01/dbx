@@ -1,6 +1,6 @@
 export default {
   app: {
-    name: "DBX",
+    name: "TestTeam DBX",
   },
   auth: {
     setupTitle: "Configurar contraseña de acceso",

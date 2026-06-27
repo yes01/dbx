@@ -1,6 +1,6 @@
 export default {
   app: {
-    name: "DBX",
+    name: "TestTeam DBX",
   },
   auth: {
     setupTitle: "设置访问密码",
