@@ -98,12 +98,7 @@ const gridResult = computed<QueryResult>(() => {
   return { columns, rows, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
 
-async function gridSave(changes: {
-  dirtyRows: Map<number, Map<number, string | number | boolean | null>>;
-  deletedRows: Set<number>;
-  columns: string[];
-  rows: (string | number | boolean | null)[][];
-}) {
+async function gridSave(changes: { dirtyRows: Map<number, Map<number, string | number | boolean | null>>; deletedRows: Set<number>; columns: string[]; rows: (string | number | boolean | null)[][] }) {
   const cols = changes.columns;
   const idColIdx = cols.indexOf("_id");
   if (idColIdx < 0) throw new Error("No _id column");
@@ -130,13 +125,7 @@ async function gridSave(changes: {
         updated[col] = newVal;
       }
     }
-    await api.mongoUpdateDocument(
-      props.connectionId,
-      props.database,
-      props.collection,
-      String(id),
-      JSON.stringify(updated),
-    );
+    await api.mongoUpdateDocument(props.connectionId, props.database, props.collection, String(id), JSON.stringify(updated));
   }
 
   for (const rowIdx of changes.deletedRows) {
@@ -155,15 +144,7 @@ async function load() {
   try {
     const filter = filterInput.value.trim() || undefined;
     const sort = sortInput.value.trim() || undefined;
-    const result = await api.mongoFindDocuments(
-      props.connectionId,
-      props.database,
-      props.collection,
-      page.value * pageSize,
-      pageSize,
-      filter,
-      sort,
-    );
+    const result = await api.mongoFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize, pageSize, filter, sort);
     documents.value = result.documents.map(asRecord);
     total.value = result.total;
   } catch (e: unknown) {
@@ -214,9 +195,7 @@ function startNew() {
 function startEdit() {
   const doc = selectedDoc.value;
   if (!doc) return;
-  editFields.value = Object.entries(doc).map(([name, value]) =>
-    createEditNode(name, value, name === "_id", name === "_id"),
-  );
+  editFields.value = Object.entries(doc).map(([name, value]) => createEditNode(name, value, name === "_id", name === "_id"));
   isEditing.value = true;
   isNew.value = false;
 }
@@ -256,9 +235,7 @@ function createEditNode(keyName: string, value: unknown, readonlyKey: boolean, r
       valueText: "",
       readonlyKey,
       readonlyValue,
-      children: Object.entries(value as JsonRecord).map(([childName, child]) =>
-        createEditNode(childName, child, readonlyValue, readonlyValue),
-      ),
+      children: Object.entries(value as JsonRecord).map(([childName, child]) => createEditNode(childName, child, readonlyValue, readonlyValue)),
     };
   }
 
@@ -348,13 +325,7 @@ async function saveDoc() {
         error.value = "No _id field";
         return;
       }
-      await api.mongoUpdateDocument(
-        props.connectionId,
-        props.database,
-        props.collection,
-        String(id),
-        JSON.stringify(doc),
-      );
+      await api.mongoUpdateDocument(props.connectionId, props.database, props.collection, String(id), JSON.stringify(doc));
     }
     isEditing.value = false;
     isNew.value = false;
@@ -425,16 +396,13 @@ function docPreview(doc: JsonRecord): string {
 function highlightedJson(json: string): string {
   const escaped = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  return escaped.replace(
-    /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
-    (match) => {
-      let cls = "json-number";
-      if (match.startsWith('"')) cls = match.endsWith(":") ? "json-key" : "json-string";
-      else if (match === "true" || match === "false") cls = "json-boolean";
-      else if (match === "null") cls = "json-null";
-      return `<span class="${cls}">${match}</span>`;
-    },
-  );
+  return escaped.replace(/("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g, (match) => {
+    let cls = "json-number";
+    if (match.startsWith('"')) cls = match.endsWith(":") ? "json-key" : "json-string";
+    else if (match === "true" || match === "false") cls = "json-boolean";
+    else if (match === "null") cls = "json-null";
+    return `<span class="${cls}">${match}</span>`;
+  });
 }
 
 onMounted(load);
@@ -445,77 +413,36 @@ onMounted(load);
     <!-- Top toolbar: view toggle + document count + pagination + actions -->
     <div class="h-9 flex items-center gap-1 px-3 border-b shrink-0 text-xs text-muted-foreground">
       <div class="flex items-center border rounded-md overflow-hidden mr-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-5 w-5 rounded-none"
-          :class="{ 'bg-accent': viewMode === 'document' }"
-          :title="t('mongo.documentView')"
-          @click="viewMode = 'document'"
-        >
+        <Button variant="ghost" size="icon" class="h-5 w-5 rounded-none" :class="{ 'bg-accent': viewMode === 'document' }" :title="t('mongo.documentView')" @click="viewMode = 'document'">
           <Braces class="h-3 w-3" />
         </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-5 w-5 rounded-none"
-          :class="{ 'bg-accent': viewMode === 'table' }"
-          :title="t('mongo.tableView')"
-          @click="viewMode = 'table'"
-        >
+        <Button variant="ghost" size="icon" class="h-5 w-5 rounded-none" :class="{ 'bg-accent': viewMode === 'table' }" :title="t('mongo.tableView')" @click="viewMode = 'table'">
           <Table2 class="h-3 w-3" />
         </Button>
       </div>
 
       <span class="shrink-0 ml-1">{{ t("mongo.documents", { count: total }) }}</span>
 
-      <Button v-if="viewMode === 'document'" variant="ghost" size="icon" class="h-5 w-5" @click="startNew"
-        ><Plus class="h-3 w-3"
-      /></Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" @click="load"
-        ><RefreshCw class="h-3 w-3" :class="{ 'animate-spin': loading }"
-      /></Button>
+      <Button v-if="viewMode === 'document'" variant="ghost" size="icon" class="h-5 w-5" @click="startNew"><Plus class="h-3 w-3" /></Button>
+      <Button variant="ghost" size="icon" class="h-5 w-5" @click="load"><RefreshCw class="h-3 w-3" :class="{ 'animate-spin': loading }" /></Button>
 
       <div class="flex items-center gap-1 ml-1">
         <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="page <= 0" @click="prevPage">
           <ChevronLeft class="h-3 w-3" />
         </Button>
         <span>{{ page + 1 }} / {{ Math.max(1, Math.ceil(total / pageSize)) }}</span>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-5 w-5"
-          :disabled="(page + 1) * pageSize >= total"
-          @click="nextPage"
-        >
+        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="(page + 1) * pageSize >= total" @click="nextPage">
           <ChevronRight class="h-3 w-3" />
         </Button>
       </div>
     </div>
 
     <!-- Table view -->
-    <DataGrid
-      v-if="viewMode === 'table'"
-      class="flex-1 min-h-0"
-      :result="gridResult"
-      context="results"
-      editable
-      :custom-save="gridSave"
-      @sort="onSort"
-      @reload="load"
-    >
+    <DataGrid v-if="viewMode === 'table'" class="flex-1 min-h-0" :result="gridResult" context="results" editable :custom-save="gridSave" @sort="onSort" @reload="load">
       <template #search-bar>
         <div class="flex-1 flex items-center gap-1 px-2 py-0.5 border-l min-w-0">
           <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">find</span>
-          <input
-            v-model="filterInput"
-            autocapitalize="off"
-            autocorrect="off"
-            spellcheck="false"
-            class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono"
-            placeholder="{}"
-            @keydown.enter="applyFilter"
-          />
+          <input v-model="filterInput" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono" placeholder="{}" @keydown.enter="applyFilter" />
           <button
             v-if="filterInput.trim()"
             class="text-muted-foreground hover:text-foreground shrink-0"
@@ -529,15 +456,7 @@ onMounted(load);
         </div>
         <div class="flex items-center gap-1 px-2 py-0.5 border-l border-r min-w-0" style="flex: 0.6">
           <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">sort</span>
-          <input
-            v-model="sortInput"
-            autocapitalize="off"
-            autocorrect="off"
-            spellcheck="false"
-            class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono"
-            placeholder="{}"
-            @keydown.enter="applyFilter"
-          />
+          <input v-model="sortInput" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono" placeholder="{}" @keydown.enter="applyFilter" />
           <button
             v-if="sortInput.trim()"
             class="text-muted-foreground hover:text-foreground shrink-0"
@@ -558,20 +477,9 @@ onMounted(load);
       <Pane :size="30" :min-size="15" :max-size="50">
         <div class="h-full flex flex-col overflow-hidden">
           <div class="flex-1 overflow-y-auto">
-            <div
-              v-for="(doc, idx) in documents"
-              :key="idx"
-              class="px-3 py-1.5 border-b text-xs font-mono cursor-pointer hover:bg-accent/50 flex items-center gap-2 group"
-              :class="{ 'bg-accent': selectedIdx === idx }"
-              @click="selectDoc(idx)"
-            >
+            <div v-for="(doc, idx) in documents" :key="idx" class="px-3 py-1.5 border-b text-xs font-mono cursor-pointer hover:bg-accent/50 flex items-center gap-2 group" :class="{ 'bg-accent': selectedIdx === idx }" @click="selectDoc(idx)">
               <span class="truncate flex-1">{{ docPreview(doc) }}</span>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive shrink-0"
-                @click.stop="requestDeleteDoc(idx)"
-              >
+              <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive shrink-0" @click.stop="requestDeleteDoc(idx)">
                 <Trash2 class="w-3 h-3" />
               </Button>
             </div>
@@ -589,51 +497,28 @@ onMounted(load);
             <div class="h-9 flex items-center gap-2 px-4 border-b bg-muted/30 shrink-0">
               <Badge variant="secondary" class="text-xs">{{ isNew ? "New" : selectedDoc?._id }}</Badge>
               <span class="flex-1" />
-              <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" @click="startEdit">{{
-                t("mongo.edit")
-              }}</Button>
+              <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" @click="startEdit">{{ t("mongo.edit") }}</Button>
               <template v-if="isEditing">
-                <Button variant="ghost" size="sm" class="h-6 text-xs" @click="addField">
-                  <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }}
-                </Button>
-                <Button variant="ghost" size="sm" class="h-6 text-xs" @click="cancelEdit">{{
-                  t("grid.discard")
-                }}</Button>
-                <Button size="sm" class="h-6 text-xs" @click="saveDoc"
-                  ><Save class="w-3 h-3 mr-1" />{{ t("grid.save") }}</Button
-                >
+                <Button variant="ghost" size="sm" class="h-6 text-xs" @click="addField"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
+                <Button variant="ghost" size="sm" class="h-6 text-xs" @click="cancelEdit">{{ t("grid.discard") }}</Button>
+                <Button size="sm" class="h-6 text-xs" @click="saveDoc"><Save class="w-3 h-3 mr-1" />{{ t("grid.save") }}</Button>
               </template>
             </div>
 
             <div v-if="isEditing" class="flex-1 overflow-auto bg-muted/10">
-              <div
-                class="json-edit min-w-fit p-5 font-mono text-[13px] leading-6"
-                :style="{ '--mongo-key-width': editKeyWidth }"
-              >
+              <div class="json-edit min-w-fit p-5 font-mono text-[13px] leading-6" :style="{ '--mongo-key-width': editKeyWidth }">
                 <div class="json-edit-brace">{</div>
 
-                <JsonEditNode
-                  v-for="(field, idx) in editFields"
-                  :key="field.key"
-                  :node="field"
-                  parent-kind="root"
-                  :removable="!field.readonlyValue"
-                  @remove="requestRemoveField(idx)"
-                />
+                <JsonEditNode v-for="(field, idx) in editFields" :key="field.key" :node="field" parent-kind="root" :removable="!field.readonlyValue" @remove="requestRemoveField(idx)" />
 
-                <Button variant="ghost" size="sm" class="json-edit-add" @click="addField">
-                  <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }}
-                </Button>
+                <Button variant="ghost" size="sm" class="json-edit-add" @click="addField"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
 
                 <div class="json-edit-brace">}</div>
               </div>
             </div>
 
             <div v-else class="flex-1 overflow-auto bg-muted/10">
-              <pre
-                class="json-viewer min-w-fit p-5 font-mono text-[13px] leading-6"
-                v-html="highlightedJson(editJson)"
-              />
+              <pre class="json-viewer min-w-fit p-5 font-mono text-[13px] leading-6" v-html="highlightedJson(editJson)" />
             </div>
           </template>
           <div v-else class="h-full flex items-center justify-center text-muted-foreground text-sm">
@@ -643,13 +528,7 @@ onMounted(load);
           <div v-if="error" class="px-3 py-1.5 border-t bg-destructive/10 text-destructive text-xs shrink-0">
             {{ error }}
           </div>
-          <DangerConfirmDialog
-            v-model:open="showDeleteConfirm"
-            :message="t('dangerDialog.deleteMessage')"
-            :details="deleteDetails"
-            :confirm-label="t('dangerDialog.deleteConfirm')"
-            @confirm="confirmDelete"
-          />
+          <DangerConfirmDialog v-model:open="showDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details="deleteDetails" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDelete" />
         </div>
       </Pane>
     </Splitpanes>

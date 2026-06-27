@@ -32,15 +32,7 @@ export function vscodeSelectionLayer() {
         const rects = Array.from(range.getClientRects());
         for (const rect of rects) {
           if (rect.width <= 0 || rect.height <= 0) continue;
-          markers.push(
-            new RectangleMarker(
-              "cm-vscodeSelection",
-              rect.left - base.left,
-              rect.top - base.top,
-              rect.width,
-              rect.height,
-            ),
-          );
+          markers.push(new RectangleMarker("cm-vscodeSelection", rect.left - base.left, rect.top - base.top, rect.width, rect.height));
         }
         range.detach();
       }
