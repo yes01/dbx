@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DBX",
-  "version": "0.5.39",
-  "identifier": "com.dbx.app",
+  "productName": "TestTeam DBX",
+  "version": "0.6.0",
+  "identifier": "com.testteam.dbx",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "DBX",
+        "title": "TestTeam DBX",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
@@ -52,7 +52,8 @@
       }
     ],
     "macOS": {
-      "entitlements": "Entitlements.plist"
+      "entitlements": "Entitlements.plist",
+      "signingIdentity": "-"
     },
     "windows": {
       "nsis": {
@@ -70,7 +71,9 @@
     },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkxNEYyMzE3QkJCNkM3REYKUldUZng3YTdGeU5Qa1NnTUZCRVhJVkxsOWZKQWFPVCtacUgySlNlcjRDU2RmZElCQnphd25pYUMK",
-      "endpoints": ["https://dl.dbxio.com/releases/latest/latest.json", "https://github.com/t8y2/dbx/releases/latest/download/latest.json"]
+      "endpoints": [
+        "https://dl.dbxio.com/releases/latest/latest.json"
+      ]
     }
   }
 }
