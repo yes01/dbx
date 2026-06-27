@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, h } from "vue";
 import { useI18n } from "vue-i18n";
-import { DatabaseZap, FilePlus2, Loader2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown } from "@lucide/vue";
+import { DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, Package, FileDown } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -102,15 +102,6 @@ const collapsibleRightItemDefs = computed(() => {
     disabled: boolean;
   }
   const items: ItemDef[] = [];
-  if (toolbarItems.value.checkUpdates) {
-    items.push({
-      key: "checkUpdates",
-      label: t("updates.check"),
-      icon: CloudDownload,
-      action: () => emit("check-updates"),
-      disabled: checkingUpdates.value,
-    });
-  }
   items.push({
     key: "exportProgress",
     label: t("exportProgress.tooltip"),
@@ -326,9 +317,6 @@ const collapsedItems = computed(() => {
 function isRightItemVisible(key: string) {
   return !overflowedRightKeys.value.has(key);
 }
-
-// Track checking updates state for the overflow menu disabled state
-const checkingUpdates = computed(() => props.checkingUpdates);
 </script>
 
 <template>
@@ -402,19 +390,6 @@ const checkingUpdates = computed(() => props.checkingUpdates);
 
     <!-- Right-side items wrapped in overflow-aware container -->
     <div ref="rightWrapper" class="flex items-center gap-1 overflow-hidden">
-      <template v-if="toolbarItems.checkUpdates">
-        <Tooltip>
-          <TooltipTrigger as-child>
-            <Button v-show="isRightItemVisible('checkUpdates')" variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :disabled="checkingUpdates" @click="emit('check-updates')">
-              <Loader2 v-if="checkingUpdates" class="h-4 w-4 animate-spin" />
-              <CloudDownload v-else class="h-4 w-4" />
-              <span v-if="hasUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{{ t("updates.check") }}</TooltipContent>
-        </Tooltip>
-      </template>
-
       <div v-show="isRightItemVisible('exportProgress')" class="contents">
         <ExportProgressPopover />
       </div>
