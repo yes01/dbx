@@ -12,7 +12,7 @@ permissions:
 
 env:
   APP_NAME: dbx
-  PRODUCT_NAME: DBX
+  PRODUCT_NAME: TestTeam DBX
   REPO_OWNER: t8y2
 
 jobs:
@@ -105,19 +105,19 @@ jobs:
 
             url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT___#{version}_#{arch}.dmg",
                 verified: "github.com/__OWNER__/__APP__/"
-            name "DBX"
+            name "TestTeam DBX"
             desc "Database management tool"
             homepage "https://dbxio.com/"
 
             depends_on macos: :big_sur
 
-            app "DBX.app"
+            app "TestTeam DBX.app"
 
             zap trash: [
-              "~/Library/Application Support/com.dbx.app",
-              "~/Library/Caches/com.dbx.app",
-              "~/Library/Logs/com.dbx.app",
-              "~/Library/Preferences/com.dbx.app.plist",
+              "~/Library/Application Support/com.testteam.dbx",
+              "~/Library/Caches/com.testteam.dbx",
+              "~/Library/Logs/com.testteam.dbx",
+              "~/Library/Preferences/com.testteam.dbx.plist",
             ]
           end
           RUBY_EOF

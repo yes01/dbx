@@ -123,9 +123,9 @@ jobs:
           TAG: ${{ steps.release-tag.outputs.tag }}
         run: |
           VERSION="${TAG#v}"
-          DMG_PATH="target/${{ matrix.target }}/release/bundle/dmg/DBX_${VERSION}_aarch64.dmg"
+          DMG_PATH="target/${{ matrix.target }}/release/bundle/dmg/TestTeam DBX_${VERSION}_aarch64.dmg"
           node scripts/build-macos-dmg.mjs \
-            "target/${{ matrix.target }}/release/bundle/macos/DBX.app" \
+            "target/${{ matrix.target }}/release/bundle/macos/TestTeam DBX.app" \
             "$DMG_PATH"
           gh release upload "${TAG}" "$DMG_PATH" --repo "${GITHUB_REPOSITORY}" --clobber
 
