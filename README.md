@@ -1,32 +1,28 @@
 # TestTeam DBX
 
-TestTeam DBX is an internal database management tool maintained for TestTeam workflows.
+TestTeam 内部数据库管理工具，基于 Tauri + Vue 构建的跨平台桌面应用。
 
-## Scope
+## 功能
 
-- Desktop database connection management and query execution
-- Data browsing, import, export, comparison, and transfer utilities
-- Local AI and MCP-assisted database workflows where enabled by internal policy
-- Driver and JDBC plugin management through internal distribution channels
+- 多数据库连接管理（MySQL、PostgreSQL、SQLite、MongoDB、Redis 等）
+- SQL 查询编辑与执行
+- 数据浏览、导入导出、结构对比与数据迁移
+- AI 辅助 SQL 生成
+- JDBC 驱动管理
+- MCP Server 集成
 
-## Internal Use
-
-This repository is maintained as an internal tool. Public community links, external issue guidance, contributor badges, and release promotion content have been removed from the product-facing materials.
-
-For support, release packages, security reports, and operational questions, use the TestTeam internal channels.
-
-## Development
+## 开发
 
 ```bash
 pnpm install
-pnpm dev
-pnpm typecheck
-pnpm test
+pnpm dev          # 启动 Web 开发服务
+pnpm tauri dev    # 启动桌面应用开发
+pnpm typecheck    # 类型检查
+pnpm test         # 运行测试
 ```
 
-Desktop packaging still uses Tauri:
+## 构建
 
 ```bash
-pnpm tauri build
+pnpm tauri build  # 构建桌面安装包
 ```
-
