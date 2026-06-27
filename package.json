@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "vite --config apps/desktop/vite.config.ts",
+    "dev:desktop": "node scripts/dev-desktop.mjs",
     "dev:tauri": "tauri dev",
     "dev:web": "vite --config apps/desktop/vite.config.ts --port 5173 --mode web",
     "dev:backend": "RUST_LOG=${RUST_LOG:-info} DBX_PASSWORD=${DBX_PASSWORD:-test} cargo watch -x 'run -p dbx-web'",
