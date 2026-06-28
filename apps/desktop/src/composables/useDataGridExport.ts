@@ -11,6 +11,8 @@ import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, ty
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { uuid } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { expandNestedJsonStringsForCopy } from "@/lib/jsonCopyValue";
+import { buildMongoCopyInsertDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongoDocumentValues";
 import type { DatabaseType, QueryResult } from "@/types/database";
 import type { QueryResultExportRequest } from "@/lib/api";
 
@@ -30,6 +32,7 @@ export interface UseDataGridExportOptions {
   displayItems: ComputedRef<RowItem[]>;
   sql: ComputedRef<string | undefined>;
   tableMeta: ComputedRef<DataGridTableMeta | undefined>;
+  copyInsertTargetLabel?: ComputedRef<string | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   connectionId: ComputedRef<string | undefined>;
   database: ComputedRef<string | undefined>;
@@ -97,6 +100,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     displayItems,
     sql,
     tableMeta,
+    copyInsertTargetLabel,
     sourceColumns,
     databaseType,
     connectionId,
@@ -183,6 +187,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       databaseType: databaseType.value ?? null,
       schema: tableMeta.value?.schema ?? null,
       tableName: tableMeta.value?.tableName ?? null,
+      copyInsertTargetLabel: copyInsertTargetLabel?.value ?? null,
       columns: columns.value,
       sourceColumns: sourceColumns.value ?? null,
       excludePrimaryKeys,
@@ -229,14 +234,23 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
 
     try {
-      const statement = await buildDataGridCopyInsertStatement({
-        databaseType: databaseType.value,
-        tableMeta: tableMeta.value,
-        columns: columns.value,
-        sourceColumns: sourceColumns.value,
-        rows: rows.map((item) => item.data),
-        excludePrimaryKeys,
-      });
+      const statement =
+        databaseType.value === "mongodb"
+          ? buildMongoCopyInsertStatement({
+              collection: copyInsertTargetLabel?.value || tableMeta.value?.tableName || "collection",
+              columns: columns.value,
+              sourceColumns: sourceColumns.value,
+              rows: rows.map((item) => item.data),
+              excludePrimaryKeys,
+            })
+          : await buildDataGridCopyInsertStatement({
+              databaseType: databaseType.value,
+              tableMeta: tableMeta.value,
+              columns: columns.value,
+              sourceColumns: sourceColumns.value,
+              rows: rows.map((item) => item.data),
+              excludePrimaryKeys,
+            });
       const latest = insertCopyCache(excludePrimaryKeys);
       if (latest.key !== key) return;
       setInsertCopyCache(excludePrimaryKeys, {
@@ -387,7 +401,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function copyRowsAsJson(items: RowItem[]) {
     if (items.length === 0) return;
     const value = items.length === 1 ? rowToJsonObject(items[0]) : items.map(rowToJsonObject);
-    await copyText(JSON.stringify(value, null, 2));
+    const copyValue = options.databaseType.value === "mongodb" ? expandNestedJsonStringsForCopy(value) : value;
+    await copyText(JSON.stringify(copyValue, null, 2));
   }
 
   // --- Cell/row copy ---
@@ -1053,6 +1068,16 @@ async function saveTextFile(content: string, defaultFileName: string, filterName
   URL.revokeObjectURL(url);
 }
 
+function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: CellValue[][]; excludePrimaryKeys?: boolean }): string | undefined {
+  const saveColumns = effectiveColumns(options.sourceColumns, options.columns);
+  const columnIndexes = saveColumns.map((column, index) => ({ column, index })).filter((item): item is { column: string; index: number } => !!item.column);
+  if (columnIndexes.length === 0 || options.rows.length === 0) return undefined;
+  const documentColumns = columnIndexes.map((item) => item.column);
+  const documents = options.rows.map((row) => buildMongoCopyInsertDocument(columnIndexes.map((item) => row[item.index]) as MongoInputValue[], documentColumns, { excludePrimaryKeys: options.excludePrimaryKeys }));
+  const collection = `db.getCollection(${JSON.stringify(options.collection)})`;
+  if (documents.length === 1) return `${collection}.insert(${formatMongoShellLiteral(documents[0])});`;
+  return `${collection}.insertMany(${formatMongoShellLiteral(documents)});`;
+}
 function effectiveColumns(sourceColumns: Array<string | undefined> | undefined, columns: string[]): Array<string | undefined> {
   if (!sourceColumns || sourceColumns.length !== columns.length) return columns;
   return sourceColumns;
