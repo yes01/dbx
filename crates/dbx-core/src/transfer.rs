@@ -1996,6 +1996,7 @@ async fn find_mongo_documents_for_transfer(
         offset,
         batch_size as i64,
         None,
+        None,
         Some(r#"{"_id":1}"#),
     )
     .await
