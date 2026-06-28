@@ -3596,6 +3596,13 @@ function treeItemMenuItems(): ContextMenuItem[] {
         icon: ListFilter,
       });
     }
+    if (canConfigureVisibleSchemas.value) {
+      items.push({
+        label: t("visibleSchemas.title"),
+        action: openVisibleSchemasDialog,
+        icon: ListFilter,
+      });
+    }
     items.push({ label: t("contextMenu.editConnection"), action: editConnection, icon: Pencil });
     if (revealConnectionFilePath.value) {
       items.push({
