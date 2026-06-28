@@ -248,6 +248,7 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
                     primary_key,
                     row.get(primary_key_indexes[index]).unwrap_or(&Value::Null),
                     column_info_for(column_info, primary_key),
+                    false,
                 )
             })
             .collect::<Vec<_>>()
@@ -567,7 +568,7 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
                 Some(format!(
                     "{} = {}",
                     quote_ident(options.database_type, column),
-                    format_grid_sql_literal(value, options.database_type, column_info_for(column_info, column))
+                    format_grid_save_sql_literal(value, options.database_type, column_info_for(column_info, column))
                 ))
             })
             .collect::<Vec<_>>()
@@ -630,7 +631,7 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
         let values = insert_pairs
             .iter()
             .map(|(column, value)| {
-                format_grid_sql_literal(value, options.database_type, column_info_for(column_info, column))
+                format_grid_save_sql_literal(value, options.database_type, column_info_for(column_info, column))
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -661,7 +662,7 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
     let mut statements = Vec::new();
 
     for row in &options.new_rows {
-        let where_clause = build_row_where(options.database_type, &save_columns, row, column_info);
+        let where_clause = build_save_row_where(options.database_type, &save_columns, row, column_info);
         if !where_clause.is_empty() {
             statements
                 .push(data_grid_statement(options.database_type, format!("DELETE FROM {table} WHERE {where_clause}")));
@@ -753,7 +754,13 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
             column_info,
         )];
         predicates.extend(writable_changes.iter().map(|((_, value), column)| {
-            build_column_predicate(options.database_type, column, value, column_info_for(column_info, column))
+            build_save_column_predicate(
+                options.database_type,
+                column,
+                value,
+                column_info_for(column_info, column),
+                true,
+            )
         }));
         statements.push(data_grid_statement(
             options.database_type,
@@ -858,6 +865,13 @@ pub fn format_grid_sql_literal(
         let escaped = text.replace('\\', "\\\\").replace('\'', "''");
         return format!("ST_GeomFromText('{}')", escaped);
     }
+    if is_oracle_temporal_literal_database(database_type) {
+        if let Some(literal) =
+            format_oracle_temporal_literal(&text, column_info.map(|column| column.data_type.as_str()))
+        {
+            return literal;
+        }
+    }
     let literal_text = if database_type == Some(DatabaseType::Tdengine) {
         format_tdengine_timestamp_literal_text(&text)
     } else if is_mysql_datetime_literal_database(database_type)
@@ -872,6 +886,82 @@ pub fn format_grid_sql_literal(
         format!("N{escaped}")
     } else {
         escaped
+    }
+}
+
+fn format_grid_save_sql_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> String {
+    if empty_string_saves_as_null(value, column_info) {
+        "NULL".to_string()
+    } else {
+        format_grid_sql_literal(value, database_type, column_info)
+    }
+}
+
+fn empty_string_saves_as_null(value: &Value, column_info: Option<&DataGridColumnInfo>) -> bool {
+    value.as_str() == Some("")
+        && column_info.is_some_and(|column| column.is_nullable && !is_textual_column_type(&column.data_type))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OracleTemporalKind {
+    Date,
+    Timestamp,
+    TimestampWithTimeZone,
+}
+
+fn is_oracle_temporal_literal_database(database_type: Option<DatabaseType>) -> bool {
+    matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
+}
+
+fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
+    let kind = oracle_temporal_column_kind(data_type?)?;
+    let parts = regex_like_rfc3339(text)?;
+    let fraction = parts.fraction.unwrap_or_default();
+    let datetime = format!("{} {}{}", parts.date, parts.time, fraction);
+    match kind {
+        OracleTemporalKind::Date => Some(format!("TO_DATE('{} {}', 'YYYY-MM-DD HH24:MI:SS')", parts.date, parts.time)),
+        OracleTemporalKind::Timestamp => {
+            let mask = oracle_timestamp_format_mask(datetime.contains('.'));
+            Some(format!("TO_TIMESTAMP('{datetime}', '{mask}')"))
+        }
+        OracleTemporalKind::TimestampWithTimeZone => {
+            let zone = oracle_timezone_suffix(&parts.zone);
+            let mask = oracle_timestamp_format_mask(datetime.contains('.'));
+            Some(format!("TO_TIMESTAMP_TZ('{datetime} {zone}', '{mask} TZH:TZM')"))
+        }
+    }
+}
+
+fn oracle_temporal_column_kind(data_type: &str) -> Option<OracleTemporalKind> {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ' ']).next().unwrap_or("");
+    match base {
+        "date" => Some(OracleTemporalKind::Date),
+        "timestamp" if lower.contains("with time zone") || lower.contains("with local time zone") => {
+            Some(OracleTemporalKind::TimestampWithTimeZone)
+        }
+        "timestamp" => Some(OracleTemporalKind::Timestamp),
+        _ => None,
+    }
+}
+
+fn oracle_timestamp_format_mask(has_fraction: bool) -> &'static str {
+    if has_fraction {
+        "YYYY-MM-DD HH24:MI:SS.FF"
+    } else {
+        "YYYY-MM-DD HH24:MI:SS"
+    }
+}
+
+fn oracle_timezone_suffix(zone: &str) -> String {
+    if zone.eq_ignore_ascii_case("z") {
+        "+00:00".to_string()
+    } else {
+        zone.to_string()
     }
 }
 
@@ -994,6 +1084,7 @@ struct Rfc3339Parts {
     date: String,
     time: String,
     fraction: Option<String>,
+    zone: String,
 }
 
 fn regex_like_rfc3339(text: &str) -> Option<Rfc3339Parts> {
@@ -1021,7 +1112,7 @@ fn regex_like_rfc3339(text: &str) -> Option<Rfc3339Parts> {
         (None, rest)
     };
     if zone == "Z" || zone == "z" || is_timezone_offset(zone) {
-        Some(Rfc3339Parts { date: date.to_string(), time: time.to_string(), fraction })
+        Some(Rfc3339Parts { date: date.to_string(), time: time.to_string(), fraction, zone: zone.to_string() })
     } else {
         None
     }
@@ -1138,7 +1229,7 @@ fn build_primary_key_where(
                         .unwrap_or(usize::MAX),
                 )
                 .unwrap_or(&Value::Null);
-            build_column_predicate(database_type, primary_key, value, column_info_for(column_info, primary_key))
+            build_column_predicate(database_type, primary_key, value, column_info_for(column_info, primary_key), false)
         })
         .collect::<Vec<_>>()
         .join(" AND ")
@@ -1163,6 +1254,33 @@ fn build_row_where(
                 column,
                 row.get(index).unwrap_or(&Value::Null),
                 column_info_for(column_info, column),
+                true,
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+fn build_save_row_where(
+    database_type: Option<DatabaseType>,
+    columns: &[Option<String>],
+    row: &[Value],
+    column_info: &[DataGridColumnInfo],
+) -> String {
+    columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            let column = column.as_deref()?;
+            if is_oracle_row_id(database_type, Some(column)) {
+                return None;
+            }
+            Some(build_save_column_predicate(
+                database_type,
+                column,
+                row.get(index).unwrap_or(&Value::Null),
+                column_info_for(column_info, column),
+                true,
             ))
         })
         .collect::<Vec<_>>()
@@ -1174,14 +1292,32 @@ fn build_column_predicate(
     column: &str,
     value: &Value,
     column_info: Option<&DataGridColumnInfo>,
+    use_binary_text_comparison: bool,
 ) -> String {
     let ident = predicate_ident(database_type, column);
     if value.is_null() {
         format!("{ident} IS NULL")
-    } else if uses_mysql_binary_text_predicate(database_type, value, column_info) {
+    } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
         format!("BINARY {ident} = {}", format_grid_sql_literal(value, database_type, column_info))
     } else {
         format!("{ident} = {}", format_grid_sql_literal(value, database_type, column_info))
+    }
+}
+
+fn build_save_column_predicate(
+    database_type: Option<DatabaseType>,
+    column: &str,
+    value: &Value,
+    column_info: Option<&DataGridColumnInfo>,
+    use_binary_text_comparison: bool,
+) -> String {
+    let ident = predicate_ident(database_type, column);
+    if value.is_null() || empty_string_saves_as_null(value, column_info) {
+        format!("{ident} IS NULL")
+    } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
+        format!("BINARY {ident} = {}", format_grid_save_sql_literal(value, database_type, column_info))
+    } else {
+        format!("{ident} = {}", format_grid_save_sql_literal(value, database_type, column_info))
     }
 }
 
@@ -1220,10 +1356,29 @@ fn uses_mysql_binary_text_predicate(
 }
 
 fn is_textual_column_type(data_type: &str) -> bool {
-    let lower = data_type.to_ascii_lowercase();
-    lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| {
-        matches!(token, "char" | "varchar" | "text" | "tinytext" | "mediumtext" | "longtext" | "enum" | "set")
-    })
+    let lower = data_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("").trim();
+    matches!(
+        base,
+        "char"
+            | "character"
+            | "varchar"
+            | "varchar2"
+            | "nvarchar"
+            | "nvarchar2"
+            | "nchar"
+            | "string"
+            | "text"
+            | "tinytext"
+            | "mediumtext"
+            | "longtext"
+            | "ntext"
+            | "clob"
+            | "nclob"
+            | "enum"
+            | "set"
+    ) || lower.starts_with("character varying")
+        || lower.starts_with("national character varying")
 }
 
 fn is_oracle_row_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
@@ -1754,6 +1909,58 @@ mod tests {
     }
 
     #[test]
+    fn saves_empty_nullable_mysql_numeric_cell_as_null() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: DataGridTableMeta {
+                schema: None,
+                table_name: "employees".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int(11)", false, None), column("age", "int(11)", true, None)]),
+            },
+            columns: vec!["id".to_string(), "age".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(2), json!(36)]],
+            dirty_rows: vec![(0, vec![(1, json!(""))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `employees` SET `age` = NULL WHERE `id` = 2;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE `employees` SET `age` = 36 WHERE `id` = 2 AND `age` IS NULL;"]
+        );
+    }
+
+    #[test]
+    fn keeps_empty_nullable_mysql_text_cell_as_empty_string() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: DataGridTableMeta {
+                schema: None,
+                table_name: "employees".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int(11)", false, None), column("name", "varchar(50)", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(2), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!(""))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `employees` SET `name` = '' WHERE `id` = 2;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE `employees` SET `name` = 'Ada' WHERE `id` = 2 AND BINARY `name` = '';"]
+        );
+    }
+
+    #[test]
     fn prepares_sqlserver_save_statements() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::SqlServer),
@@ -2059,7 +2266,31 @@ mod tests {
     }
 
     #[test]
-    fn mysql_text_predicates_use_binary_comparison_for_width_sensitive_edits() {
+    fn mysql_primary_key_text_predicates_do_not_use_binary_comparison() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            table_meta: DataGridTableMeta {
+                schema: None,
+                table_name: "school".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "varchar(32)", true, None), column("age", "varchar(8)", false, None)]),
+            },
+            columns: vec!["id".to_string(), "age".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("0001492305e412e88086bd582d2678e0"), json!("17")]],
+            dirty_rows: vec![(0, vec![(1, json!("18"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE `school` SET `age` = '18' WHERE `id` = '0001492305e412e88086bd582d2678e0';"]
+        );
+    }
+
+    #[test]
+    fn mysql_row_text_predicates_use_binary_comparison_for_width_sensitive_edits() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Mysql),
             table_meta: DataGridTableMeta {

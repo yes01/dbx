@@ -441,6 +441,7 @@ export type {
   KvKeyMetadata,
   KvKeySummary,
   KvListPrefixResponse,
+  KvListPrefixOptions,
   KvGetResponse,
   KvWriteMode,
   KvCreateMode,

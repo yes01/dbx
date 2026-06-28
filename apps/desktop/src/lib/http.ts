@@ -57,6 +57,7 @@ import type {
   RedisNodeEndpoint,
   KvValue,
   KvListPrefixResponse,
+  KvListPrefixOptions,
   KvGetResponse,
   KvPutOptions,
   KvPutResponse,
@@ -1143,7 +1144,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
     es.onmessage = (e) => {
       const progress: TransferProgress = JSON.parse(e.data);
       onProgress(progress);
-      if (progress.status === "done" || progress.status === "cancelled") {
+      if (progress.status === "done" || progress.status === "error" || progress.status === "cancelled") {
         es.close();
         resolve();
       }
@@ -1597,8 +1598,8 @@ export async function etcdDelete(connectionId: string, key: string): Promise<KvD
 // ZooKeeper
 // ---------------------------------------------------------------------------
 
-export async function zookeeperListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null): Promise<KvListPrefixResponse> {
-  return post("/api/zookeeper/list-prefix", { connectionId, prefix, limit, continuation });
+export async function zookeeperListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: KvListPrefixOptions | null): Promise<KvListPrefixResponse> {
+  return post("/api/zookeeper/list-prefix", { connectionId, prefix, limit, continuation, recursive: options?.recursive ?? null });
 }
 
 export async function zookeeperGet(connectionId: string, key: string): Promise<KvGetResponse> {

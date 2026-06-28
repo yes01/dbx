@@ -33,6 +33,7 @@ import {
   createForeignKeyDrafts,
   createIndexDrafts,
   createTriggerDrafts,
+  dataTypeLengthInputValue,
   generateIndexName,
   generateUniqueIndexName,
   getColumnEditorControls,
@@ -1442,7 +1443,12 @@ watch(activeTab, (tab) => {
                     <Input v-else :model-value="splitDataType(column.dataType).baseType" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
                   <td v-if="columnEditorControls.length" :class="structureCellClass">
-                    <Input :model-value="splitDataType(column.dataType).params" :class="structureMonoControlClass" :disabled="isColumnLengthDisabled(column)" @update:model-value="column.dataType = combineDataTypeForDatabase(databaseType, splitDataType(column.dataType).baseType, String($event))" />
+                    <Input
+                      :model-value="dataTypeLengthInputValue(databaseType, column.dataType)"
+                      :class="structureMonoControlClass"
+                      :disabled="isColumnLengthDisabled(column)"
+                      @update:model-value="column.dataType = combineDataTypeForDatabase(databaseType, splitDataType(column.dataType).baseType, String($event))"
+                    />
                   </td>
                   <td v-if="columnEditorControls.nullable" :class="structureCellClass">
                     <label class="flex items-center gap-1.5">
