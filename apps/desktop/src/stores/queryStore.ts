@@ -1590,7 +1590,6 @@ export const useQueryStore = defineStore("query", () => {
           current.queryAnalysis = undefined;
           current.querySourceColumns = undefined;
           current.queryEditabilityReason = undefined;
-          current.mongoEditTarget = undefined;
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;

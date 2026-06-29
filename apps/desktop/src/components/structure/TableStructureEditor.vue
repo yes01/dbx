@@ -1469,7 +1469,6 @@ function unregisterStructureEditorShortcuts() {
 onMounted(() => {
   resetState();
   registerStructureEditorShortcuts();
-  void loadDynamicDataTypeOptions();
   if (props.draft?.initialized) {
     restoreDraft(props.draft);
   } else if (isCreateMode.value) {
@@ -1481,7 +1480,6 @@ onMounted(() => {
 
 onActivated(() => {
   registerStructureEditorShortcuts();
-  void loadDynamicDataTypeOptions();
   if (props.draft?.initialized && !draftHydrated) {
     restoreDraft(props.draft);
   }
