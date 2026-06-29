@@ -135,13 +135,14 @@ pub enum AgentMethod {
     FetchTableReadPage,
     CloseTableReadSession,
     GetExplainInfo,
+    ExecuteBatch,
     ExecuteTransaction,
     Disconnect,
     Shutdown,
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::Handshake,
         Self::Connect,
         Self::TestConnection,
@@ -165,6 +166,7 @@ impl AgentMethod {
         Self::FetchTableReadPage,
         Self::CloseTableReadSession,
         Self::GetExplainInfo,
+        Self::ExecuteBatch,
         Self::ExecuteTransaction,
         Self::Disconnect,
         Self::Shutdown,
@@ -195,6 +197,7 @@ impl AgentMethod {
             Self::FetchTableReadPage => "fetch_table_read_page",
             Self::CloseTableReadSession => "close_table_read_session",
             Self::GetExplainInfo => "get_explain_info",
+            Self::ExecuteBatch => "execute_batch",
             Self::ExecuteTransaction => "execute_transaction",
             Self::Disconnect => "disconnect",
             Self::Shutdown => "shutdown",
@@ -234,16 +237,18 @@ pub enum MongoAgentMethod {
     ListDatabases,
     ListCollections,
     FindDocuments,
+    ServerVersion,
     InsertDocument,
     UpdateDocument,
     DeleteDocument,
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
+        Self::ServerVersion,
         Self::InsertDocument,
         Self::UpdateDocument,
         Self::DeleteDocument,
@@ -254,6 +259,7 @@ impl MongoAgentMethod {
             Self::ListDatabases => "list_databases",
             Self::ListCollections => "list_collections",
             Self::FindDocuments => "find_documents",
+            Self::ServerVersion => "server_version",
             Self::InsertDocument => "insert_document",
             Self::UpdateDocument => "update_document",
             Self::DeleteDocument => "delete_document",
@@ -755,6 +761,24 @@ impl AgentDriverClient {
             .await
     }
 
+    pub async fn execute_batch<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: Option<&str>,
+        statements: &[String],
+        schema: Option<&str>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let mut params = serde_json::Map::new();
+        params.insert("statements".to_string(), serde_json::json!(statements));
+        if let Some(database) = database {
+            params.insert("database".to_string(), serde_json::json!(database));
+        }
+        if let Some(schema) = schema {
+            params.insert("schema".to_string(), serde_json::json!(schema));
+        }
+        self.call_method_with_timeout(AgentMethod::ExecuteBatch, Value::Object(params), timeout_duration).await
+    }
+
     pub async fn execute_query_page<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -886,6 +910,13 @@ impl AgentDriverClient {
         params: Value,
     ) -> Result<T, String> {
         self.call_mongo_method(MongoAgentMethod::FindDocuments, params).await
+    }
+
+    pub async fn mongo_server_version<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::ServerVersion, mongo_database_params(database)).await
     }
 
     pub async fn mongo_insert_document<T: DeserializeOwned + Send + 'static>(
@@ -1375,6 +1406,7 @@ mod tests {
         assert_eq!(MongoAgentMethod::ListDatabases.as_str(), "list_databases");
         assert_eq!(MongoAgentMethod::ListCollections.as_str(), "list_collections");
         assert_eq!(MongoAgentMethod::FindDocuments.as_str(), "find_documents");
+        assert_eq!(MongoAgentMethod::ServerVersion.as_str(), "server_version");
         assert_eq!(MongoAgentMethod::InsertDocument.as_str(), "insert_document");
         assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
         assert_eq!(MongoAgentMethod::DeleteDocument.as_str(), "delete_document");
@@ -1402,6 +1434,7 @@ mod tests {
         let _list_triggers = AgentDriverClient::list_triggers::<serde_json::Value>;
         let _get_table_ddl = AgentDriverClient::get_table_ddl::<serde_json::Value>;
         let _execute_query = AgentDriverClient::execute_query::<serde_json::Value>;
+        let _execute_batch = AgentDriverClient::execute_batch::<serde_json::Value>;
         let _execute_query_page = AgentDriverClient::execute_query_page::<serde_json::Value>;
         let _fetch_query_page = AgentDriverClient::fetch_query_page::<serde_json::Value>;
         let _close_query_session = AgentDriverClient::close_query_session::<serde_json::Value>;
@@ -1413,6 +1446,7 @@ mod tests {
         let _mongo_list_databases = AgentDriverClient::mongo_list_databases::<serde_json::Value>;
         let _mongo_list_collections = AgentDriverClient::mongo_list_collections::<serde_json::Value>;
         let _mongo_find_documents = AgentDriverClient::mongo_find_documents::<serde_json::Value>;
+        let _mongo_server_version = AgentDriverClient::mongo_server_version::<serde_json::Value>;
         let _mongo_insert_document = AgentDriverClient::mongo_insert_document::<serde_json::Value>;
         let _mongo_update_document = AgentDriverClient::mongo_update_document::<serde_json::Value>;
         let _mongo_delete_document = AgentDriverClient::mongo_delete_document::<serde_json::Value>;

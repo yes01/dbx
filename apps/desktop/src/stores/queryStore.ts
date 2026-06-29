@@ -14,14 +14,16 @@ import {
   mongoCountToQueryResult,
   mongoDocumentsToQueryResult,
   mongoIndexesToQueryResult,
-  mongoWriteToQueryResult,
   mongoUseToQueryResult,
+  mongoVersionToQueryResult,
+  mongoWriteToQueryResult,
   parseMongoAggregateCommand,
   parseMongoCountDocumentsCommand,
   parseMongoFindCommand,
   parseMongoGetIndexesCommand,
   parseMongoWriteCommand,
   parseMongoUseCommand,
+  parseMongoVersionCommand,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongoShellCommand";
 import { redisCommandResultToQueryResult } from "@/lib/redisQueryResult";
@@ -50,6 +52,10 @@ const ACTIVE_TAB_KEY = "dbx-active-tab";
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
+
+function cloneTabDraft<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
 
 interface BuildQueryResultExportRequestOptions {
   exportId: string;
@@ -880,6 +886,7 @@ export const useQueryStore = defineStore("query", () => {
       nacosNamespace: original.nacosNamespace,
       nacosNamespaceName: original.nacosNamespaceName,
       structureTableName: original.structureTableName,
+      structureDraft: original.structureDraft ? cloneTabDraft(original.structureDraft) : undefined,
       objectBrowser: original.objectBrowser ? { ...original.objectBrowser } : undefined,
       objectSource: original.objectSource ? { ...original.objectSource } : undefined,
       tableMeta: original.tableMeta ? { ...original.tableMeta, columns: [...original.tableMeta.columns], primaryKeys: [...original.tableMeta.primaryKeys] } : undefined,
@@ -1541,7 +1548,7 @@ export const useQueryStore = defineStore("query", () => {
       if (mongoFind) {
         await connStore.ensureConnected(tab.connectionId);
         console.info("[DBX][executeTabSql:mongo-find:start]", { traceId, collection: mongoFind.collection });
-        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoFind.collection, mongoFind.skip, mongoFind.limit, mongoFind.filter, mongoFind.sort, executionId);
+        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoFind.collection, mongoFind.skip, mongoFind.limit, mongoFind.filter, mongoFind.projection, mongoFind.sort, executionId);
         console.info("[DBX][executeTabSql:mongo-find:done]", {
           traceId,
           rowCount: result.documents.length,
@@ -1564,11 +1571,38 @@ export const useQueryStore = defineStore("query", () => {
         }
         return;
       }
+      const mongoVersion = conn?.db_type === "mongodb" ? parseMongoVersionCommand(sql) : null;
+      if (mongoVersion) {
+        await connStore.ensureConnected(tab.connectionId);
+        console.info("[DBX][executeTabSql:mongo-version:start]", { traceId });
+        const version = await api.mongoServerVersion(tab.connectionId, tab.database, executionId);
+        console.info("[DBX][executeTabSql:mongo-version:done]", {
+          traceId,
+          version,
+          elapsed: elapsed(),
+        });
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.executionId === executionId) {
+          current.results = undefined;
+          current.activeResultIndex = undefined;
+          current.result = markQueryResultRowsRaw(mongoVersionToQueryResult(version, performance.now() - startedAt));
+          touchResult(current);
+          current.queryAnalysis = undefined;
+          current.querySourceColumns = undefined;
+          current.queryEditabilityReason = undefined;
+          current.mongoEditTarget = undefined;
+          current.tableMeta = undefined;
+          current.resultBaseSql = options?.resultBaseSql ?? sql;
+          current.resultSortedSql = options?.resultSortedSql;
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+        }
+        return;
+      }
       const mongoCount = conn?.db_type === "mongodb" ? parseMongoCountDocumentsCommand(sql) : null;
       if (mongoCount) {
         await connStore.ensureConnected(tab.connectionId);
         console.info("[DBX][executeTabSql:mongo-count:start]", { traceId, collection: mongoCount.collection });
-        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoCount.collection, 0, 1, mongoCount.filter, undefined, executionId);
+        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoCount.collection, 0, 1, mongoCount.filter, undefined, undefined, executionId);
         console.info("[DBX][executeTabSql:mongo-count:done]", {
           traceId,
           total: result.total,

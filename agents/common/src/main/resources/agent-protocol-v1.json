@@ -66,6 +66,7 @@
     "list_databases",
     "list_collections",
     "find_documents",
+    "server_version",
     "insert_document",
     "update_document",
     "delete_document"

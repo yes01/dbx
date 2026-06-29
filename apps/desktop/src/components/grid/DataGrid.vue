@@ -116,13 +116,14 @@ import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDet
 import { applyColumnFormatter, buildColumnFormatterKey, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit } from "@/lib/columnFormatter";
 import { temporalCellEditorKind, type TemporalCellEditorKind } from "@/lib/dataGridTemporalEditor";
 import { isEnumColumn, enumValuesForColumn } from "@/lib/dataGridEnumEditor";
-import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isToggleTransposeShortcut } from "@/lib/keyboardShortcuts";
+import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGridScrollGutter";
 import { canGoNextDataGridPage } from "@/lib/dataGridPagination";
 import { dataGridScrollPosition, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/canvasDataGridRenderer";
 import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGridSaveUi";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editorThemes";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, combineWhereInputs, filterModeNeedsValue, parseFilterValue } from "@/lib/dataGridColumnFilter";
 import { clampSearchSplitWidth } from "@/lib/dataGridSearchSplit";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/paginationPageSize";
@@ -149,8 +150,10 @@ import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberD
 import { caretPositionInsideInsertedSqlSingleQuotes, insertedSqlSingleQuoteAtCaret } from "@/lib/sqlQuoteCaret";
 import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { isMacOS } from "@/lib/platform";
+import { formatShortcut } from "@/lib/shortcutRegistry";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
+const FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-shown";
 
 const { t } = useI18n();
 const slots = useSlots();
@@ -223,6 +226,7 @@ const dataGridCreatedAt = performance.now();
 const dataGridElapsed = () => `${Math.round(performance.now() - dataGridCreatedAt)}ms`;
 const isMac = isMacOS();
 const shortcutMod = isMac ? "Cmd" : "Ctrl";
+const saveShortcutLabel = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.saveSql));
 const DATA_GRID_COMPACT_TOPBAR_WIDTH = 900;
 
 const emit = defineEmits<{
@@ -1692,7 +1696,7 @@ const visibleColumnTypes = computed(() =>
   visibleColumnIndexes.value.map((index) => {
     const resultColumn = props.result.columns[index]?.toLocaleLowerCase();
     const sourceColumn = props.sourceColumns?.[index]?.toLocaleLowerCase();
-    return (sourceColumn ? tableColumnTypesByName.value.get(sourceColumn) : undefined) || (resultColumn ? tableColumnTypesByName.value.get(resultColumn) : undefined);
+    return (sourceColumn ? tableColumnTypesByName.value.get(sourceColumn) : undefined) || (resultColumn ? tableColumnTypesByName.value.get(resultColumn) : undefined) || props.result.column_types?.[index];
   }),
 );
 const visibleColumnCount = computed(() => visibleColumnIndexes.value.length);
@@ -3677,8 +3681,12 @@ const detailTemporalEditorKind = computed(() => {
 // CodeMirror-based cell detail editors
 const detailsEditorContainer = ref<HTMLElement>();
 const valueEditorContainer = ref<HTMLElement>();
+const sideJsonPreviewContainer = ref<HTMLElement>();
+const dialogJsonPreviewContainer = ref<HTMLElement>();
 let detailsDetailEditor: UseCellDetailEditorReturn | null = null;
 let valueDetailEditor: UseCellDetailEditorReturn | null = null;
+let sideJsonPreviewEditor: UseCellDetailEditorReturn | null = null;
+let dialogJsonPreviewEditor: UseCellDetailEditorReturn | null = null;
 
 const editorThemeAccessor = () => settingsStore.editorSettings.theme;
 const editorAppAppearance = () => (isDark.value ? "dark" : "light") as import("@/lib/appTheme").AppThemeAppearance;
@@ -3738,6 +3746,54 @@ watch(valueEditorContainer, async (el) => {
   }
 });
 
+watch(sideJsonPreviewContainer, async (el) => {
+  if (el && !sideJsonPreviewEditor) {
+    sideJsonPreviewEditor = useCellDetailEditor({
+      language: "json",
+      readOnly: true,
+      editorTheme: editorThemeAccessor,
+      appAppearance: editorAppAppearance,
+      fontSize: editorFontSize,
+      fontFamily: editorFontFamily,
+    });
+    await sideJsonPreviewEditor.create(el, activeCellDetail.value?.formattedJson ?? "", "json");
+  } else if (!el && sideJsonPreviewEditor) {
+    sideJsonPreviewEditor.destroy();
+    sideJsonPreviewEditor = null;
+  }
+});
+
+watch(dialogJsonPreviewContainer, async (el) => {
+  if (el && !dialogJsonPreviewEditor) {
+    dialogJsonPreviewEditor = useCellDetailEditor({
+      language: "json",
+      readOnly: true,
+      editorTheme: editorThemeAccessor,
+      appAppearance: editorAppAppearance,
+      fontSize: editorFontSize,
+      fontFamily: editorFontFamily,
+    });
+    await dialogJsonPreviewEditor.create(el, dialogCellDetail.value?.formattedJson ?? "", "json");
+  } else if (!el && dialogJsonPreviewEditor) {
+    dialogJsonPreviewEditor.destroy();
+    dialogJsonPreviewEditor = null;
+  }
+});
+
+watch(
+  () => activeCellDetail.value?.formattedJson ?? "",
+  (value) => {
+    sideJsonPreviewEditor?.setValue(value, "json");
+  },
+);
+
+watch(
+  () => dialogCellDetail.value?.formattedJson ?? "",
+  (value) => {
+    dialogJsonPreviewEditor?.setValue(value, "json");
+  },
+);
+
 function resetDetailEdit() {
   isEditingDetail.value = false;
   detailEditValue.value = "";
@@ -3749,14 +3805,27 @@ function closeCellDetails() {
   detailCell.value = null;
 }
 
-function startDetailEdit() {
-  const detail = activeCellDetail.value;
-  if (!detail || !detail.isEditable) return;
-  detailEditValue.value = dataGridCellEditorText({
+function cellDetailEditText(detail: DataGridCellDetail): string {
+  if (sideDetailJsonView.value && detail.formattedJson) return detail.formattedJson;
+  return dataGridCellEditorText({
     value: detail.value,
     databaseType: props.databaseType,
     columnInfo: tableColumnForGridColumn(detail.colIndex),
   });
+}
+
+function warnFormattedJsonEditIfNeeded(detail: DataGridCellDetail, force = false) {
+  if (!force && (!sideDetailJsonView.value || !detail.formattedJson)) return;
+  if (safeLocalStorageGet(FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY) === "1") return;
+  toast(t("grid.formattedJsonEditWarning"), 10000);
+  safeLocalStorageSet(FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY, "1");
+}
+
+function startDetailEdit() {
+  const detail = activeCellDetail.value;
+  if (!detail || !detail.isEditable) return;
+  warnFormattedJsonEditIfNeeded(detail);
+  detailEditValue.value = cellDetailEditText(detail);
   isEditingDetail.value = true;
 }
 
@@ -3837,6 +3906,7 @@ function formatValueEditorJson() {
   if (!detail || !canFormatCellDetailJson(detailEditValue.value, detail.type)) return;
   detailEditValue.value = formatJsonText(detailEditValue.value) ?? detailEditValue.value;
   syncEditorFromDetailEdit();
+  warnFormattedJsonEditIfNeeded(detail, true);
 }
 
 function setDetailNull() {
@@ -4579,7 +4649,16 @@ function drawCanvasGrid() {
   });
 }
 
-watch(useCanvasGridRows, () => nextTick(attachCanvasResizeObserver), { immediate: true });
+watch(
+  [useCanvasGridRows, hasVisibleRows],
+  () => {
+    // When an empty table gets its first pending row, the canvas scroller is created by
+    // the v-if branch after the original mount-time observer attempt has already no-op'd.
+    // Reattach after that branch mounts so the canvas/overlay get real viewport dimensions.
+    nextTick(attachCanvasResizeObserver);
+  },
+  { immediate: true },
+);
 watch(showDataGridTopbar, () => nextTick(observeDataGridTopbarWidth), { immediate: true });
 watch(
   [
@@ -4723,6 +4802,7 @@ const {
   displayItems: visibleDisplayItems,
   sql: computed(() => props.sql),
   tableMeta: computed(() => (props.tableMeta ? { ...props.tableMeta } : undefined)),
+  copyInsertTargetLabel: computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel),
   databaseType: computed(() => props.databaseType),
   connectionId: computed(() => props.connectionId),
   database: computed(() => props.database),
@@ -5269,6 +5349,26 @@ function commitGridEdit() {
   nextTick(() => gridRef.value?.focus({ preventScroll: true }));
 }
 
+async function saveGridChangesFromShortcut() {
+  if (!saveToolbarState.value.showActions || saveToolbarState.value.actionsDisabled) return false;
+  await onToolbarCommit();
+  return true;
+}
+
+async function onCellEditKeydown(event: KeyboardEvent) {
+  if (isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) {
+    event.preventDefault();
+    event.stopPropagation();
+    commitEdit();
+    await nextTick();
+    if (await saveGridChangesFromShortcut()) {
+      gridRef.value?.focus({ preventScroll: true });
+    }
+    return;
+  }
+  onEditKeydown(event);
+}
+
 function undoGridChange(): boolean {
   if (editingCell.value || !canUndoPendingChange.value) return false;
   undoPendingChange();
@@ -5323,11 +5423,10 @@ async function onGridKeydown(event: KeyboardEvent) {
     }
     return;
   }
-  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "s") {
-    if (saveToolbarState.value.showActions && !saveToolbarState.value.actionsDisabled) {
+  if (isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) {
+    if (await saveGridChangesFromShortcut()) {
       event.preventDefault();
       event.stopPropagation();
-      await onToolbarCommit();
     }
     return;
   }
@@ -5512,11 +5611,14 @@ function copyDialogCellColumnName() {
   copyText(detail.column);
 }
 
-function openDialogCellInSidePanel() {
+async function openDialogCellInSidePanel() {
   const detail = dialogCellDetail.value;
   if (!detail) return;
   showCellDetails(detail.rowNumber - 1, detail.colIndex);
   cellDetailDialogOpen.value = false;
+  await nextTick();
+  sideDetailJsonView.value = cellDetailJsonView.value && !!detail.formattedJson;
+  if (detail.isEditable) startDetailEdit();
 }
 
 function copyRowDetailJson() {
@@ -6993,7 +7095,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     autocapitalize="off"
                     autocorrect="off"
                     spellcheck="false"
-                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--where flex-1 h-5 min-w-0 text-xs bg-transparent outline-none"
+                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--where flex-1 h-6 min-w-0 bg-transparent outline-none"
                     :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
                     placeholder="WHERE"
                     @input="onWhereFilterInput"
@@ -7005,7 +7107,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="showWhereHistorySuggestions">
                     <ChevronDown class="w-3 h-3" />
                   </button>
-                  <span ref="whereMeasureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
+                  <span ref="whereMeasureRef" class="data-grid-topbar-condition-measure invisible absolute left-0 top-0 whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- WHERE suggestion dropdown -->
                   <Teleport to="body">
                     <div v-if="whereSuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="whereSuggestionStyle">
@@ -7056,7 +7158,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     autocapitalize="off"
                     autocorrect="off"
                     spellcheck="false"
-                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--order flex-1 h-5 min-w-0 text-xs bg-transparent outline-none"
+                    class="data-grid-topbar-condition-input data-grid-topbar-condition-input--order flex-1 h-6 min-w-0 bg-transparent outline-none"
                     :class="{ 'data-grid-topbar-condition-input--compact': compactDataGridToolbar }"
                     placeholder="ORDER BY"
                     @keydown="onOrderByKeydown"
@@ -7067,7 +7169,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <button class="text-muted-foreground hover:text-foreground shrink-0" type="button" @mousedown.prevent="showOrderByHistorySuggestions">
                     <ChevronDown class="w-3 h-3" />
                   </button>
-                  <span ref="orderByMeasureRef" class="invisible absolute left-0 top-0 text-xs whitespace-pre pointer-events-none" aria-hidden="true" />
+                  <span ref="orderByMeasureRef" class="data-grid-topbar-condition-measure invisible absolute left-0 top-0 whitespace-pre pointer-events-none" aria-hidden="true" />
                   <!-- ORDER BY suggestion dropdown -->
                   <Teleport to="body">
                     <div v-if="orderBySuggestions.length > 0" class="fixed z-50 min-w-[180px] rounded-md border bg-popover text-popover-foreground shadow-md" :style="orderBySuggestionStyle">
@@ -7199,7 +7301,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t(saveActionMode.labelKey, { count: pendingChangeCount }) }}</span>
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom" class="max-w-sm"> {{ t(saveActionMode.tooltipKey, { count: pendingChangeCount }) }} ({{ shortcutMod }}+S) </TooltipContent>
+                  <TooltipContent side="bottom" class="max-w-sm"> {{ t(saveActionMode.tooltipKey, { count: pendingChangeCount }) }} ({{ saveShortcutLabel }}) </TooltipContent>
                 </Tooltip>
                 <Tooltip>
                   <TooltipTrigger as-child>
@@ -7377,7 +7479,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           @click.stop
                           @focus="onCellEditTextareaInput"
                           @input="onCellEditTextareaInput"
-                          @keydown.stop="onEditKeydown"
+                          @keydown.stop="onCellEditKeydown"
                           @paste.stop="onCellEditTextareaPaste"
                         />
                         <input
@@ -7391,7 +7493,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           @blur="commitEditFromBlur"
                           @click.stop
                           @input="onCellEditTextareaInput"
-                          @keydown.stop="onEditKeydown"
+                          @keydown.stop="onCellEditKeydown"
                           @paste.stop="onCellEditTextareaPaste"
                         />
                       </template>
@@ -7817,7 +7919,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @click.stop
                         @focus="onCellEditTextareaInput"
                         @input="onCellEditTextareaInput"
-                        @keydown.stop="onEditKeydown"
+                        @keydown.stop="onCellEditKeydown"
                         @paste.stop="onCellEditTextareaPaste"
                       />
                       <input
@@ -7831,7 +7933,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @blur="commitEditFromBlur"
                         @click.stop
                         @input="onCellEditTextareaInput"
-                        @keydown.stop="onEditKeydown"
+                        @keydown.stop="onCellEditKeydown"
                         @paste.stop="onCellEditTextareaPaste"
                       />
                     </div>
@@ -7949,7 +8051,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           @click.stop
                           @focus="onCellEditTextareaInput"
                           @input="onCellEditTextareaInput"
-                          @keydown.stop="onEditKeydown"
+                          @keydown.stop="onCellEditKeydown"
                           @paste.stop="onCellEditTextareaPaste"
                         />
                         <input
@@ -7963,7 +8065,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           @blur="commitEditFromBlur"
                           @click.stop
                           @input="onCellEditTextareaInput"
-                          @keydown.stop="onEditKeydown"
+                          @keydown.stop="onCellEditKeydown"
                           @paste.stop="onCellEditTextareaPaste"
                         />
                       </template>
@@ -8341,9 +8443,21 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         </Button>
                       </div>
                     </template>
-                    <pre v-else class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50" :class="{ 'cursor-text': activeCellDetail.isEditable }" @dblclick="startDetailEdit">{{
-                      sideDetailJsonView && activeCellDetail.formattedJson ? activeCellDetail.formattedJson : activeCellDetail.rawValuePreview
-                    }}</pre>
+                    <div
+                      v-else-if="sideDetailJsonView && activeCellDetail.formattedJson"
+                      ref="sideJsonPreviewContainer"
+                      data-cell-detail-editor-root
+                      class="overflow-hidden rounded border bg-muted/20 p-2"
+                      :class="[{ 'cursor-text': activeCellDetail.isEditable }, cellDetailPanelIsBottom ? 'min-h-0 flex-1' : 'h-72 max-h-[42vh]']"
+                      @dblclick.capture="startDetailEdit"
+                    />
+                    <pre
+                      v-else
+                      class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
+                      :class="[{ 'cursor-text': activeCellDetail.isEditable }, cellDetailPanelIsBottom ? 'min-h-0 flex-1' : '']"
+                      @dblclick="startDetailEdit"
+                      >{{ activeCellDetail.rawValuePreview }}</pre
+                    >
                     <div v-if="activeCellDetail.isValuePreviewTruncated && !sideDetailJsonView" class="text-[11px] text-muted-foreground">
                       {{
                         t("grid.largeValuePreviewHint", {
@@ -8619,9 +8733,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <a v-if="dialogCellDetail.imagePreviewUrl" :href="dialogCellDetail.imagePreviewUrl" role="button" class="block max-h-72 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(dialogCellDetail.imagePreviewUrl, dialogCellDetail.column)">
               <img :src="dialogCellDetail.imagePreviewUrl" :alt="dialogCellDetail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-72 w-full object-contain" />
             </a>
-            <pre class="max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': dialogCellDetail.value === null }">{{
-              cellDetailJsonView && dialogCellDetail.formattedJson ? dialogCellDetail.formattedJson : dialogCellDetail.rawValuePreview
-            }}</pre>
+            <div v-if="cellDetailJsonView && dialogCellDetail.formattedJson" ref="dialogJsonPreviewContainer" data-cell-detail-editor-root class="h-[44vh] min-h-60 overflow-hidden rounded border bg-muted/20 p-3" />
+            <pre v-else class="max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': dialogCellDetail.value === null }">{{ dialogCellDetail.rawValuePreview }}</pre>
             <div v-if="dialogCellDetail.isValuePreviewTruncated && !cellDetailJsonView" class="text-[11px] text-muted-foreground">
               {{ t("grid.largeValuePreviewHint", { count: dialogCellDetail.rawValuePreview.length }) }}
             </div>
@@ -8957,6 +9070,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   max-width: 0;
   opacity: 0;
   transform: translateX(-4px);
+}
+
+.data-grid-topbar-condition-input,
+.data-grid-topbar-condition-measure {
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
 }
 
 .data-grid-topbar-condition-input::placeholder {

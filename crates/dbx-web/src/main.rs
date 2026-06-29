@@ -32,6 +32,73 @@ fn web_body_limit_bytes() -> usize {
     mb.saturating_mul(1024 * 1024)
 }
 
+fn web_agent_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    web_agent_dir_from_env(data_dir, std::env::var("DBX_AGENT_DIR").ok())
+}
+
+fn web_agent_dir_from_env(data_dir: &std::path::Path, agent_dir: Option<String>) -> std::path::PathBuf {
+    agent_dir.map(std::path::PathBuf::from).unwrap_or_else(|| data_dir.join("agents"))
+}
+
+fn normalize_public_base_path(value: Option<String>) -> String {
+    let trimmed = value
+        .unwrap_or_else(|| "/".to_string())
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("/")
+        .trim()
+        .trim_matches('/')
+        .to_string();
+    if trimmed.chars().any(|ch| ch.is_ascii_control() || ch.is_ascii_whitespace() || matches!(ch, ';' | ',')) {
+        panic!("DBX_PUBLIC_BASE_PATH contains invalid characters");
+    }
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_public_base_path, web_agent_dir_from_env};
+
+    #[test]
+    fn normalize_public_base_path_defaults_to_root() {
+        assert_eq!(normalize_public_base_path(None), "/");
+        assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
+        assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
+    }
+
+    #[test]
+    fn normalize_public_base_path_trims_and_preserves_segments() {
+        assert_eq!(normalize_public_base_path(Some("dbx".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/dbx/".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/tools/dbx/?v=1".to_string())), "/tools/dbx");
+    }
+
+    #[test]
+    #[should_panic(expected = "DBX_PUBLIC_BASE_PATH contains invalid characters")]
+    fn normalize_public_base_path_rejects_invalid_characters() {
+        normalize_public_base_path(Some("/dbx admin".to_string()));
+    }
+
+    #[test]
+    fn web_agent_dir_defaults_under_data_dir() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(web_agent_dir_from_env(&data_dir, None), data_dir.join("agents"));
+    }
+
+    #[test]
+    fn web_agent_dir_uses_explicit_env_override() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(
+            web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
+            std::path::PathBuf::from("/custom/agents")
+        );
+    }
+}
+
 #[cfg(feature = "mq-admin")]
 fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
@@ -104,9 +171,10 @@ async fn main() {
         let db_path = data_dir.join("dbx.db");
         let storage = Storage::open(&db_path).await.expect("Failed to open storage");
         storage.migrate_from_json(&data_dir).await.expect("Failed to migrate JSON data");
-        Arc::new(AppState::new_with_plugin_dir_and_app_version(
+        Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
             storage,
             data_dir.join("plugins"),
+            web_agent_dir(&data_dir),
             env!("CARGO_PKG_VERSION"),
         ))
     };
@@ -364,6 +432,7 @@ async fn main() {
         .route("/mongo/drop-collection", post(routes::mongo::drop_collection))
         .route("/document-store/find-documents", post(routes::mongo::document_find_documents))
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
+        .route("/mongo/server-version", post(routes::mongo::server_version))
         .route("/mongo/aggregate-documents", post(routes::mongo::aggregate_documents))
         .route("/mongo/insert-document", post(routes::mongo::insert_document))
         .route("/mongo/insert-documents", post(routes::mongo::insert_documents))
