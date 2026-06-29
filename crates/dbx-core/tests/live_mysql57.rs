@@ -35,6 +35,33 @@ async fn live_mysql_compatible_limited_text_protocol_query_succeeds() {
 }
 
 #[tokio::test]
+#[ignore = "requires a remote OceanBase MySQL-compatible endpoint"]
+async fn live_oceanbase_mysql_setup_applies_query_timeout() {
+    let url = std::env::var("DBX_LIVE_OCEANBASE_MYSQL_URL").expect("DBX_LIVE_OCEANBASE_MYSQL_URL");
+    let setup = vec!["SET ob_query_timeout = 30000000".to_string()];
+
+    let pool = dbx_core::db::mysql::connect_bare_with_pool_limit_and_setup(
+        &url,
+        std::time::Duration::from_secs(10),
+        1,
+        &setup,
+    )
+    .await
+    .unwrap();
+    let result = dbx_core::db::mysql::execute_query_with_max_rows(
+        &pool,
+        "SELECT @@ob_query_timeout",
+        true,
+        Some(10),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.rows, vec![vec![serde_json::json!("30000000")]]);
+}
+
+#[tokio::test]
 #[ignore = "requires a remote MySQL endpoint"]
 async fn live_mysql_call_procedure_returns_select_result_set() {
     let url = std::env::var("DBX_LIVE_MYSQL_PROCEDURE_URL").expect("DBX_LIVE_MYSQL_PROCEDURE_URL");
@@ -92,33 +119,6 @@ END
 
     assert_eq!(result.columns, vec!["id", "NAME"]);
     assert_eq!(result.rows, vec![vec![serde_json::json!("1"), serde_json::json!("测试数据001")]]);
-}
-
-#[tokio::test]
-#[ignore = "requires a remote OceanBase MySQL-compatible endpoint"]
-async fn live_oceanbase_mysql_setup_applies_query_timeout() {
-    let url = std::env::var("DBX_LIVE_OCEANBASE_MYSQL_URL").expect("DBX_LIVE_OCEANBASE_MYSQL_URL");
-    let setup = vec!["SET ob_query_timeout = 30000000".to_string()];
-
-    let pool = dbx_core::db::mysql::connect_bare_with_pool_limit_and_setup(
-        &url,
-        std::time::Duration::from_secs(10),
-        1,
-        &setup,
-    )
-    .await
-    .unwrap();
-    let result = dbx_core::db::mysql::execute_query_with_max_rows(
-        &pool,
-        "SELECT @@ob_query_timeout",
-        true,
-        Some(10),
-        Default::default(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(result.rows, vec![vec![serde_json::json!("30000000")]]);
 }
 
 #[tokio::test]

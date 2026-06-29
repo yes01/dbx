@@ -23,6 +23,7 @@ use crate::types::{
 use super::file_validator::validate_file_path;
 
 pub type MySqlPool = mysql_async::Pool;
+const MYSQL_TCP_KEEPALIVE_MS: u32 = 30_000;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MySqlQueryDialect {
@@ -398,15 +399,35 @@ pub async fn connect_with_ca_cert_pool_limit_and_idle(
     max_connections: usize,
     idle_timeout_secs: Option<u64>,
 ) -> Result<MySqlPool, String> {
+    connect_with_ca_cert_pool_limit_idle_and_setup(
+        url,
+        ca_cert_path,
+        fallback_timeout,
+        max_connections,
+        idle_timeout_secs,
+        &[],
+    )
+    .await
+}
+
+pub async fn connect_with_ca_cert_pool_limit_idle_and_setup(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    fallback_timeout: Duration,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    extra_setup_queries: &[String],
+) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool = create_pool(url, ca_cert_path, max_connections, idle_timeout_secs)?;
+    let pool = create_pool(url, ca_cert_path, max_connections, idle_timeout_secs, extra_setup_queries)?;
     let result = verify_pool_connection(&pool, timeout).await;
 
     if let Err(ref e) = result {
         if mysql_error_should_retry_without_ssl(e) {
             if let Some(fallback_url) = ssl_fallback_url(url) {
                 log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
-                let fallback_pool = create_pool(&fallback_url, None, max_connections, idle_timeout_secs)?;
+                let fallback_pool =
+                    create_pool(&fallback_url, None, max_connections, idle_timeout_secs, extra_setup_queries)?;
                 return match verify_pool_connection(&fallback_pool, timeout).await {
                     Ok(()) => Ok(fallback_pool),
                     Err(e) => Err(e),
@@ -429,6 +450,7 @@ fn create_pool(
     ca_cert_path: Option<&str>,
     max_connections: usize,
     idle_timeout_secs: Option<u64>,
+    extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let opts =
@@ -448,8 +470,8 @@ fn create_pool(
         .stmt_cache_size(0)
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
-        .tcp_keepalive(Some(30u32))
-        .setup(mysql_setup_queries(url));
+        .tcp_keepalive(Some(MYSQL_TCP_KEEPALIVE_MS))
+        .setup(mysql_setup_queries(url, extra_setup_queries));
     if let Some(ssl_opts) = mysql_ssl_opts(base_ssl_opts, url, ca_cert_path, &tls_url.files)? {
         builder = builder.ssl_opts(ssl_opts);
     }
@@ -553,7 +575,7 @@ fn mysql_ssl_opts(
     Ok(Some(ssl_opts))
 }
 
-fn mysql_setup_queries(url: &str) -> Vec<String> {
+fn mysql_setup_queries(url: &str, extra_setup_queries: &[String]) -> Vec<String> {
     let charset = mysql_connection_charset(url).unwrap_or("utf8mb4");
     let catalog = mysql_connection_catalog(url);
     let database = mysql_connection_database(url);
@@ -577,6 +599,7 @@ fn mysql_setup_queries(url: &str) -> Vec<String> {
     if let Some(catalog) = catalog.as_deref() {
         queries.push(format!("SET catalog = {}", quote_identifier(catalog)));
     }
+    queries.extend(extra_setup_queries.iter().cloned());
     queries
 }
 
@@ -1010,8 +1033,17 @@ pub async fn connect_bare_with_pool_limit(
     fallback_timeout: Duration,
     max_connections: usize,
 ) -> Result<MySqlPool, String> {
+    connect_bare_with_pool_limit_and_setup(url, fallback_timeout, max_connections, &[]).await
+}
+
+pub async fn connect_bare_with_pool_limit_and_setup(
+    url: &str,
+    fallback_timeout: Duration,
+    max_connections: usize,
+    extra_setup_queries: &[String],
+) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool = create_pool(url, None, max_connections, None)?;
+    let pool = create_pool(url, None, max_connections, None, extra_setup_queries)?;
     verify_pool_connection(&pool, timeout).await.map(|_| pool)
 }
 
@@ -3156,21 +3188,21 @@ mod tests {
 
     #[test]
     fn mysql_setup_queries_select_requested_database_before_session_init() {
-        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4");
+        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4", &[]);
 
         assert_eq!(queries, vec!["USE `app`", "SET NAMES utf8mb4"]);
     }
 
     #[test]
     fn mysql_setup_queries_skip_use_when_database_missing() {
-        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306?charset=utf8mb4");
+        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306?charset=utf8mb4", &[]);
 
         assert_eq!(queries, vec!["SET NAMES utf8mb4"]);
     }
 
     #[test]
     fn mysql_setup_queries_decode_database_name_from_url() {
-        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/db%2Fname?charset=utf8mb4");
+        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/db%2Fname?charset=utf8mb4", &[]);
 
         assert_eq!(queries, vec!["USE `db/name`", "SET NAMES utf8mb4"]);
     }
@@ -3326,29 +3358,39 @@ mod tests {
 
     #[test]
     fn mysql_setup_queries_default_to_utf8mb4() {
-        assert_eq!(mysql_setup_queries("mysql://host:3306/db"), vec!["USE `db`", "SET NAMES utf8mb4"]);
+        assert_eq!(mysql_setup_queries("mysql://host:3306/db", &[]), vec!["USE `db`", "SET NAMES utf8mb4"]);
     }
 
     #[test]
     fn mysql_setup_queries_use_safe_custom_charset() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?ssl-mode=preferred&charset=gbk"),
+            mysql_setup_queries("mysql://host:3306/db?ssl-mode=preferred&charset=gbk", &[]),
             vec!["USE `db`", "SET NAMES gbk"]
         );
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4;DROP TABLE users"),
+            mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4;DROP TABLE users", &[]),
             vec!["USE `db`", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_include_extra_setup_queries() {
+        let extra = vec!["SET ob_query_timeout = 30000000".to_string()];
+
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db", &extra),
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET ob_query_timeout = 30000000"]
         );
     }
 
     #[test]
     fn mysql_setup_queries_apply_explicit_time_zone() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&charset=utf8mb4"),
+            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&charset=utf8mb4", &[]),
             vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
         );
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?time-zone=Asia%2FShanghai"),
+            mysql_setup_queries("mysql://host:3306/db?time-zone=Asia%2FShanghai", &[]),
             vec!["USE `db`", "SET time_zone = 'Asia/Shanghai'", "SET NAMES utf8mb4"]
         );
     }
@@ -3356,11 +3398,11 @@ mod tests {
     #[test]
     fn mysql_setup_queries_apply_jdbc_time_zone_aliases() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?serverTimezone=GMT%2B8"),
+            mysql_setup_queries("mysql://host:3306/db?serverTimezone=GMT%2B8", &[]),
             vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
         );
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=UTC"),
+            mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=UTC", &[]),
             vec!["USE `db`", "SET time_zone = '+00:00'", "SET NAMES utf8mb4"]
         );
     }
@@ -3368,11 +3410,11 @@ mod tests {
     #[test]
     fn mysql_setup_queries_apply_go_loc_when_no_explicit_time_zone_exists() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?loc=Asia%2FShanghai"),
+            mysql_setup_queries("mysql://host:3306/db?loc=Asia%2FShanghai", &[]),
             vec!["USE `db`", "SET time_zone = 'Asia/Shanghai'", "SET NAMES utf8mb4"]
         );
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&loc=UTC"),
+            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&loc=UTC", &[]),
             vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
         );
     }
@@ -3380,7 +3422,7 @@ mod tests {
     #[test]
     fn mysql_setup_queries_ignore_unsafe_time_zone_values() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00%27%3BDROP%20TABLE%20users"),
+            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00%27%3BDROP%20TABLE%20users", &[]),
             vec!["USE `db`", "SET NAMES utf8mb4"]
         );
     }
@@ -3390,7 +3432,7 @@ mod tests {
         // `SET catalog` is pushed last so mysql_async's back-to-front setup
         // execution (Vec::pop) runs it before `USE <database>`.
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/clip?catalog=paimon_catalog"),
+            mysql_setup_queries("mysql://host:3306/clip?catalog=paimon_catalog", &[]),
             vec!["USE `clip`", "SET NAMES utf8mb4", "SET catalog = `paimon_catalog`"]
         );
     }
@@ -3398,7 +3440,7 @@ mod tests {
     #[test]
     fn mysql_setup_queries_switch_catalog_without_database() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/?catalog=paimon_catalog"),
+            mysql_setup_queries("mysql://host:3306/?catalog=paimon_catalog", &[]),
             vec!["SET NAMES utf8mb4", "SET catalog = `paimon_catalog`"]
         );
     }
@@ -3406,13 +3448,16 @@ mod tests {
     #[test]
     fn mysql_setup_queries_decodes_catalog_parameter() {
         assert_eq!(
-            mysql_setup_queries("mysql://host:3306/db?catalog=my%5Fcatalog"),
+            mysql_setup_queries("mysql://host:3306/db?catalog=my%5Fcatalog", &[]),
             vec!["USE `db`", "SET NAMES utf8mb4", "SET catalog = `my_catalog`"]
         );
     }
 
     #[test]
     fn mysql_setup_queries_omits_catalog_when_absent() {
-        assert_eq!(mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4"), vec!["USE `db`", "SET NAMES utf8mb4"]);
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4", &[]),
+            vec!["USE `db`", "SET NAMES utf8mb4"]
+        );
     }
 }
