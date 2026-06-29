@@ -1,5 +1,6 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sqlCompletion";
 import { getSqlCompletionContext } from "@/lib/sqlCompletion";
+import { executableStatementRanges, type SqlTextRange } from "@/lib/sqlStatementRanges";
 import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
 
 export interface SqlSemanticDiagnostic {
@@ -11,6 +12,27 @@ export interface SqlSemanticDiagnostic {
 export interface SqlSemanticDiagnosticSchema {
   tables: SqlCompletionTable[];
   columnsByTable: Map<string, SqlCompletionColumn[]>;
+}
+
+export interface SqlSemanticDiagnosticVisibleRange {
+  from: number;
+  to: number;
+}
+
+export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRanges: readonly SqlSemanticDiagnosticVisibleRange[], databaseType?: DatabaseType): SqlTextRange[] {
+  const statements = executableStatementRanges(sql, databaseType);
+  if (statements.length === 0 || visibleRanges.length === 0) return [];
+
+  const selected: SqlTextRange[] = [];
+  const seen = new Set<string>();
+  for (const statement of statements) {
+    if (!visibleRanges.some((visibleRange) => rangesIntersect(statement, visibleRange))) continue;
+    const key = `${statement.from}:${statement.to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    selected.push({ from: statement.from, to: statement.to, sql: sql.slice(statement.from, statement.to) });
+  }
+  return selected;
 }
 
 export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, schema: SqlSemanticDiagnosticSchema): SqlSemanticDiagnostic[] {
@@ -87,6 +109,12 @@ export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, opt
   return true;
 }
 
+export function isSqlSemanticDiagnosticInputContext(sql: string, cursor: number, options: { databaseType?: DatabaseType } = {}): boolean {
+  if (options.databaseType === "mongodb" || options.databaseType === "elasticsearch" || options.databaseType === "qdrant" || options.databaseType === "milvus" || options.databaseType === "weaviate" || options.databaseType === "chromadb" || options.databaseType === "redis") return false;
+  const context = getSqlCompletionContext(sql, cursor);
+  return context.suggestTables || context.exclusiveTableSuggestions || context.exclusiveColumnSuggestions || !!context.qualifier;
+}
+
 function resolveColumnTable(column: SqlColumnReference, tables: SqlTableReference[], knownTables: Map<string, SqlTableReference>): SqlTableReference | null {
   if (column.qualifier) {
     return knownTables.get(normalizeName(column.qualifier)) ?? null;
@@ -104,6 +132,10 @@ function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, S
     if (columns && columns.length > 0) return columns;
   }
   return null;
+}
+
+function rangesIntersect(left: SqlSemanticDiagnosticVisibleRange, right: SqlSemanticDiagnosticVisibleRange): boolean {
+  return left.from < right.to && right.from < left.to;
 }
 
 function normalizeName(value: string): string {
