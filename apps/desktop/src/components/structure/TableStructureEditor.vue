@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, Loader2, Maximize2, Plus, RefreshCw, Save, Settings, SlidersHorizontal, Trash2, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Settings, SlidersHorizontal, Trash2, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -412,6 +412,7 @@ watch(
 watch(localStructureDensity, (density, previousDensity) => {
   if (density === previousDensity) return;
   applyStructureDensityWidths(density);
+  persistStructureDensity(density);
 });
 
 function onColResize(e: MouseEvent, col: number) {
@@ -843,6 +844,17 @@ function removeNewColumn(column: EditableStructureColumn) {
   columns.value = columns.value.filter((item) => item.id !== column.id);
 }
 
+type ColumnDragState = {
+  columnId: string;
+  sourceIndex: number;
+  insertionIndex: number | null;
+};
+
+const columnDragState = ref<ColumnDragState | null>(null);
+let columnDragPreviousBodyUserSelect = "";
+let columnDragPreviousBodyCursor = "";
+let columnDragTracking = false;
+
 function canMoveColumn(index: number, direction: -1 | 1): boolean {
   if (loading.value || saving.value) return false;
   if (!Number.isInteger(index) || (direction !== -1 && direction !== 1)) return false;
@@ -857,6 +869,28 @@ function canMoveColumn(index: number, direction: -1 | 1): boolean {
 
 const canShowColumnMoveControls = computed(() => isCreateMode.value || structureCapabilities.value.reorderColumn);
 
+function canDragColumn(index: number): boolean {
+  if (loading.value || saving.value) return false;
+  if (!Number.isInteger(index) || index < 0 || index >= columns.value.length) return false;
+  const column = columns.value[index];
+  if (!column || column.markedForDrop) return false;
+  if (!column.original) return true;
+  return canShowColumnMoveControls.value;
+}
+
+function canDropColumnAt(sourceIndex: number, insertionIndex: number): boolean {
+  if (!canDragColumn(sourceIndex)) return false;
+  if (!Number.isInteger(insertionIndex) || insertionIndex < 0 || insertionIndex > columns.value.length) return false;
+  if (insertionIndex === sourceIndex || insertionIndex === sourceIndex + 1) return false;
+  const sourceColumn = columns.value[sourceIndex];
+  if (!sourceColumn) return false;
+  const crossedColumns = insertionIndex < sourceIndex ? columns.value.slice(insertionIndex, sourceIndex) : columns.value.slice(sourceIndex + 1, insertionIndex);
+  if (crossedColumns.some((column) => column.markedForDrop)) return false;
+  if (canShowColumnMoveControls.value) return true;
+  if (sourceColumn.original) return false;
+  return crossedColumns.every((column) => !column.original);
+}
+
 function moveColumn(index: number, direction: -1 | 1) {
   if (!canMoveColumn(index, direction)) return;
   const targetIndex = index + direction;
@@ -865,6 +899,150 @@ function moveColumn(index: number, direction: -1 | 1) {
   if (!column) return;
   nextColumns.splice(targetIndex, 0, column);
   columns.value = nextColumns;
+}
+
+function moveColumnTo(index: number, insertionIndex: number) {
+  if (!canDropColumnAt(index, insertionIndex)) return;
+  const nextColumns = [...columns.value];
+  const [column] = nextColumns.splice(index, 1);
+  if (!column) return;
+  const adjustedInsertionIndex = insertionIndex > index ? insertionIndex - 1 : insertionIndex;
+  nextColumns.splice(adjustedInsertionIndex, 0, column);
+  columns.value = nextColumns;
+}
+
+function onColumnDragPointerDown(index: number, event: PointerEvent) {
+  if (event.button !== 0 || !canDragColumn(index)) return;
+  const column = columns.value[index];
+  if (!column) return;
+  event.preventDefault();
+  event.stopPropagation();
+  columnDragState.value = {
+    columnId: column.id,
+    sourceIndex: index,
+    insertionIndex: null,
+  };
+  columnDragPreviousBodyUserSelect = document.body.style.userSelect;
+  columnDragPreviousBodyCursor = document.body.style.cursor;
+  columnDragTracking = true;
+  document.body.style.userSelect = "none";
+  document.body.style.cursor = "grabbing";
+  updateColumnDragInsertion(event.clientY);
+  window.addEventListener("pointermove", onColumnDragPointerMove, true);
+  window.addEventListener("pointerup", onColumnDragPointerUp, true);
+  window.addEventListener("pointercancel", onColumnDragPointerCancel, true);
+}
+
+function onColumnDragPointerMove(event: PointerEvent) {
+  if (!columnDragState.value) return;
+  event.preventDefault();
+  updateColumnDragInsertion(event.clientY);
+}
+
+function onColumnDragPointerUp(event: PointerEvent) {
+  event.preventDefault();
+  const state = columnDragState.value;
+  stopColumnDragTracking();
+  if (state && state.insertionIndex !== null && canDropColumnAt(state.sourceIndex, state.insertionIndex)) {
+    moveColumnTo(state.sourceIndex, state.insertionIndex);
+  }
+  columnDragState.value = null;
+}
+
+function onColumnDragPointerCancel() {
+  stopColumnDragTracking();
+  columnDragState.value = null;
+}
+
+function stopColumnDragTracking() {
+  if (!columnDragTracking) return;
+  columnDragTracking = false;
+  window.removeEventListener("pointermove", onColumnDragPointerMove, true);
+  window.removeEventListener("pointerup", onColumnDragPointerUp, true);
+  window.removeEventListener("pointercancel", onColumnDragPointerCancel, true);
+  document.body.style.userSelect = columnDragPreviousBodyUserSelect;
+  document.body.style.cursor = columnDragPreviousBodyCursor;
+}
+
+function updateColumnDragInsertion(clientY: number) {
+  const state = columnDragState.value;
+  if (!state) return;
+  const insertionIndex = columnDragInsertionIndexFromPoint(clientY);
+  state.insertionIndex = insertionIndex !== null && canDropColumnAt(state.sourceIndex, insertionIndex) ? insertionIndex : null;
+}
+
+function columnDragInsertionIndexFromPoint(clientY: number): number | null {
+  const rows = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-column-row-index]") ?? []);
+  if (!rows.length) return null;
+  const firstRect = rows[0].getBoundingClientRect();
+  if (clientY < firstRect.top) return 0;
+  for (const row of rows) {
+    const rowIndex = Number(row.dataset.columnRowIndex);
+    if (!Number.isInteger(rowIndex)) continue;
+    const rect = row.getBoundingClientRect();
+    if (clientY <= rect.bottom) {
+      return clientY > rect.top + rect.height / 2 ? rowIndex + 1 : rowIndex;
+    }
+  }
+  return rows.length;
+}
+
+function onColumnDragStart(index: number, event: DragEvent) {
+  if (!canDragColumn(index)) {
+    event.preventDefault();
+    return;
+  }
+  const column = columns.value[index];
+  if (!column) return;
+  columnDragState.value = {
+    columnId: column.id,
+    sourceIndex: index,
+    insertionIndex: null,
+  };
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", column.name || column.id);
+  }
+}
+
+function onColumnDragOver(index: number, event: DragEvent) {
+  const state = columnDragState.value;
+  if (!state || columns.value[index]?.markedForDrop) return;
+  const insertionIndex = columnDragInsertionIndex(index, event);
+  if (!canDropColumnAt(state.sourceIndex, insertionIndex)) return;
+  event.preventDefault();
+  state.insertionIndex = insertionIndex;
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
+function onColumnDrop(index: number, event: DragEvent) {
+  const state = columnDragState.value;
+  if (!state) return;
+  event.preventDefault();
+  moveColumnTo(state.sourceIndex, columnDragInsertionIndex(index, event));
+  columnDragState.value = null;
+}
+
+function onColumnDragEnd() {
+  columnDragState.value = null;
+}
+
+function columnRowClass(column: EditableStructureColumn, index: number) {
+  const dragState = columnDragState.value;
+  return {
+    "bg-destructive/5 opacity-60": column.markedForDrop,
+    "opacity-55": dragState?.columnId === column.id,
+    "bg-primary/5": dragState && (dragState.insertionIndex === index || dragState.insertionIndex === index + 1),
+    "[&>td]:border-t-2 [&>td]:border-t-primary": dragState?.insertionIndex === index,
+    "[&>td]:border-b-2 [&>td]:border-b-primary": dragState?.insertionIndex === index + 1,
+  };
+}
+
+function columnDragInsertionIndex(index: number, event: DragEvent): number {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return index;
+  const rect = target.getBoundingClientRect();
+  return event.clientY > rect.top + rect.height / 2 ? index + 1 : index;
 }
 
 function toggleDropColumn(column: EditableStructureColumn) {
@@ -1232,6 +1410,7 @@ onActivated(() => {
 });
 onDeactivated(unregisterStructureEditorShortcuts);
 onBeforeUnmount(() => {
+  stopColumnDragTracking();
   unregisterStructureEditorShortcuts();
   clearSqlPreviewState();
   persistStructureDensity();
@@ -1417,7 +1596,7 @@ watch(activeTab, (tab) => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(column, index) in columns" :key="column.id" :class="column.markedForDrop ? 'bg-destructive/5 opacity-60' : ''" :data-new-column-row="!column.original ? 'true' : undefined">
+                <tr v-for="(column, index) in columns" :key="column.id" :class="columnRowClass(column, index)" :data-new-column-row="!column.original ? 'true' : undefined" :data-column-row-index="index" @dragover="onColumnDragOver(index, $event)" @drop="onColumnDrop(index, $event)">
                   <td :class="[structureCellClass, 'text-muted-foreground']">
                     <div class="flex items-center gap-1">
                       <span>{{ index + 1 }}</span>
@@ -1643,6 +1822,22 @@ watch(activeTab, (tab) => {
                   </td>
                   <td :class="structureLastCellClass">
                     <div class="flex min-w-0 items-center justify-start gap-0.5 overflow-hidden">
+                      <Button
+                        v-if="canShowColumnMoveControls || !column.original"
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        :class="[structureActionButtonClass, canDragColumn(index) ? 'cursor-grab active:cursor-grabbing' : 'cursor-not-allowed']"
+                        :disabled="!canDragColumn(index)"
+                        :title="t('column.dragColumnToReorder')"
+                        :aria-label="t('column.dragColumnToReorder')"
+                        :draggable="canDragColumn(index)"
+                        @pointerdown="onColumnDragPointerDown(index, $event)"
+                        @dragstart="onColumnDragStart(index, $event)"
+                        @dragend="onColumnDragEnd"
+                      >
+                        <ListChevronsUpDown :class="structureIconClass" />
+                      </Button>
                       <template v-if="canShowColumnMoveControls || !column.original">
                         <Button type="button" variant="ghost" size="icon" :class="structureActionButtonClass" :disabled="!canMoveColumn(index, -1)" :title="t('structureEditor.moveColumnUp')" :aria-label="t('structureEditor.moveColumnUp')" @click.stop.prevent="moveColumn(index, -1)">
                           <ChevronUp :class="structureIconClass" />
