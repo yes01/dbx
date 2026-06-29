@@ -26,6 +26,7 @@ import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/li
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
 import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import type { TableStructureEditorDraft } from "@/types/database";
 import {
   buildStructureTargetLabel,
   combineDataTypeForDatabase,
@@ -77,9 +78,11 @@ const props = defineProps<{
   database: string;
   schema?: string;
   tableName: string;
+  draft?: TableStructureEditorDraft;
 }>();
 
 const emit = defineEmits<{
+  "update:draft": [draft: TableStructureEditorDraft | undefined];
   saved: [commentChanged: boolean];
   close: [];
   openSettings: [initialTab?: string, initialSection?: string];
@@ -593,6 +596,54 @@ let sqlPreviewDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 let deferredSqlPreviewRefresh = false;
 let keydownListenerRegistered = false;
 let skipNextRefreshVersion = false;
+let restoringDraft = false;
+let syncingDraft = false;
+let draftHydrated = false;
+
+function cloneDraftValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function createCurrentDraft(initialized = true): TableStructureEditorDraft {
+  return {
+    activeTab: activeTab.value as TableStructureEditorDraft["activeTab"],
+    newTableName: newTableName.value,
+    tableComment: tableComment.value,
+    originalTableComment: originalTableComment.value,
+    columns: cloneDraftValue(columns.value),
+    indexes: cloneDraftValue(indexes.value),
+    foreignKeys: cloneDraftValue(foreignKeys.value),
+    triggers: cloneDraftValue(triggers.value),
+    initialized,
+  };
+}
+
+function syncDraftToParent() {
+  if (!draftHydrated) return;
+  if (restoringDraft || syncingDraft) return;
+  syncingDraft = true;
+  emit("update:draft", createCurrentDraft());
+  syncingDraft = false;
+}
+
+function restoreDraft(draft: TableStructureEditorDraft) {
+  restoringDraft = true;
+  activeTab.value = draft.activeTab || "columns";
+  newTableName.value = draft.newTableName || "";
+  tableComment.value = draft.tableComment || "";
+  originalTableComment.value = draft.originalTableComment || "";
+  columns.value = cloneDraftValue(draft.columns || []);
+  indexes.value = cloneDraftValue(draft.indexes || []);
+  foreignKeys.value = cloneDraftValue(draft.foreignKeys || []);
+  triggers.value = cloneDraftValue(draft.triggers || []);
+  restoringDraft = false;
+  draftHydrated = true;
+}
+
+function markDraftHydratedAndSync() {
+  draftHydrated = true;
+  syncDraftToParent();
+}
 
 function hasPendingStructureChanges(): boolean {
   if (isCreateMode.value) {
@@ -674,6 +725,11 @@ const canApply = computed(
   () => !loading.value && !saving.value && !postSaveRefreshing.value && !secondaryMetadataLoading.value && !sqlPreviewLoading.value && pendingStatements.value.length > 0 && warnings.value.length === 0 && !!props.connectionId && (isCreateMode.value ? !!newTableName.value.trim() : !!props.tableName),
 );
 
+function clearDraft() {
+  draftHydrated = false;
+  emit("update:draft", undefined);
+}
+
 function resetState() {
   activeTab.value = "columns";
   loading.value = false;
@@ -697,6 +753,12 @@ function resetState() {
   originalTableComment.value = "";
 }
 
+async function reloadStructureFromDatabase() {
+  if (isCreateMode.value) return;
+  draftHydrated = false;
+  await loadStructure(false, FULL_STRUCTURE_REFRESH_SCOPE, true, { blockSecondaryMetadata: true });
+}
+
 function setSecondaryMetadataLoading(scope: StructureRefreshScope, value: boolean) {
   if (scope.indexes && tableMetadataCapabilities.value.indexes) indexesLoading.value = value;
   if (scope.foreignKeys && tableMetadataCapabilities.value.foreignKeys) foreignKeysLoading.value = value;
@@ -717,7 +779,7 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
   }
 }
 
-async function loadStructure(silent = false, scope: StructureRefreshScope = FULL_STRUCTURE_REFRESH_SCOPE, showErrors = true, options: { blockSecondaryMetadata?: boolean } = {}) {
+async function loadStructure(silent = false, scope: StructureRefreshScope = FULL_STRUCTURE_REFRESH_SCOPE, showErrors = true, options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean } = {}) {
   const connectionId = props.connectionId;
   const database = props.database;
   const schema = metadataSchema.value;
@@ -728,6 +790,7 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
   setSecondaryMetadataLoading(scope, true);
   errorMessage.value = "";
   let secondaryMetadataScheduled = false;
+  let loadedSuccessfully = false;
   try {
     await store.ensureConnected(connectionId);
 
@@ -776,6 +839,7 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
     if (options.blockSecondaryMetadata) {
       await secondaryMetadataPromise;
     }
+    loadedSuccessfully = true;
   } catch (e: any) {
     if (showErrors) {
       errorMessage.value = e?.message || String(e);
@@ -787,6 +851,9 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
       setSecondaryMetadataLoading(scope, false);
     }
     if (!silent) loading.value = false;
+    if (!options.preserveDraft && loadedSuccessfully && requestId === structureLoadRequestId) {
+      markDraftHydratedAndSync();
+    }
   }
 }
 
@@ -1333,6 +1400,7 @@ async function applyChanges() {
     ddlFetched.value = false;
     ddlContent.value = "";
     if (isCreateMode.value) {
+      clearDraft();
       emit("saved", tableComment.value !== originalTableComment.value);
       emit("close");
     } else {
@@ -1401,12 +1469,22 @@ function unregisterStructureEditorShortcuts() {
 onMounted(() => {
   resetState();
   registerStructureEditorShortcuts();
-  void loadStructure();
+  void loadDynamicDataTypeOptions();
+  if (props.draft?.initialized) {
+    restoreDraft(props.draft);
+  } else if (isCreateMode.value) {
+    markDraftHydratedAndSync();
+  } else {
+    void loadStructure(false, FULL_STRUCTURE_REFRESH_SCOPE, true, { blockSecondaryMetadata: true });
+  }
 });
 
 onActivated(() => {
   registerStructureEditorShortcuts();
-  if (!isCreateMode.value) void loadStructure(true);
+  void loadDynamicDataTypeOptions();
+  if (props.draft?.initialized && !draftHydrated) {
+    restoreDraft(props.draft);
+  }
 });
 onDeactivated(unregisterStructureEditorShortcuts);
 onBeforeUnmount(() => {
@@ -1439,9 +1517,14 @@ watch(
   [isCreateMode, databaseType, () => props.schema, () => props.tableName, newTableName, tableComment, columns, indexes, foreignKeys, triggers],
   () => {
     scheduleSqlPreviewRefresh();
+    syncDraftToParent();
   },
   { deep: true, immediate: true },
 );
+
+watch(activeTab, () => {
+  syncDraftToParent();
+});
 
 watch(secondaryMetadataLoading, (value) => {
   if (value || !deferredSqlPreviewRefresh) return;
@@ -1476,7 +1559,7 @@ watch(activeTab, (tab) => {
       <Database :class="[structureIconClass, 'text-muted-foreground']" />
       <span class="min-w-0 flex-1 truncate font-medium">{{ targetLabel || t("editor.noDatabase") }}</span>
       <Badge variant="outline">{{ connection?.driver_label || databaseType }}</Badge>
-      <Button v-if="!isCreateMode" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="loading || saving" @click="loadStructure()">
+      <Button v-if="!isCreateMode" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="loading || saving" @click="reloadStructureFromDatabase">
         <RefreshCw :class="structureIconClass" />
         {{ t("structureEditor.refresh") }}
       </Button>
