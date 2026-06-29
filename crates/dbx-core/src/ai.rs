@@ -344,6 +344,17 @@ pub fn stream_data_payload(line: &str) -> Option<&str> {
     None
 }
 
+fn drain_next_stream_line(buffer: &mut Vec<u8>) -> Result<Option<String>, String> {
+    let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') else {
+        return Ok(None);
+    };
+    let mut line = buffer.drain(..=pos).collect::<Vec<u8>>();
+    if line.last() == Some(&b'\n') {
+        line.pop();
+    }
+    String::from_utf8(line).map(Some).map_err(|e| format!("AI stream returned invalid UTF-8: {e}"))
+}
+
 pub fn claude_stream_text(event: &serde_json::Value) -> Option<&str> {
     if event["type"] == "content_block_delta" {
         return event["delta"]["text"].as_str();
@@ -841,15 +852,12 @@ async fn measure_first_stream_chunk(
     is_claude: bool,
     is_gemini: bool,
 ) -> Result<(u64, String), String> {
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     while let Some(chunk) = byte_stream.next().await {
         let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
-        buf.push_str(&String::from_utf8_lossy(&chunk));
+        buf.extend_from_slice(&chunk);
 
-        while let Some(pos) = buf.find('\n') {
-            let line = buf[..pos].to_string();
-            buf = buf[pos + 1..].to_string();
-
+        while let Some(line) = drain_next_stream_line(&mut buf)? {
             let Some(data) = stream_data_payload(&line) else { continue };
             if data == "[DONE]" {
                 // stream finished without content — not a real failure but rare
@@ -1150,20 +1158,17 @@ async fn stream_claude(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
 
     loop {
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
                 let mut finished = false;
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if data == "[DONE]" {
                         finished = true;
@@ -1237,20 +1242,17 @@ async fn stream_openai(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
 
     loop {
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
                 let mut finished = false;
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if data == "[DONE]" {
                         finished = true;
@@ -1324,20 +1326,17 @@ async fn stream_responses_api(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
 
     loop {
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
                 let mut finished = false;
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if data == "[DONE]" {
                         finished = true;
@@ -1414,19 +1413,16 @@ async fn stream_gemini(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
 
     loop {
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                         let text = gemini_text(&event);
@@ -1612,7 +1608,7 @@ async fn stream_claude_with_tools(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     // Track the current content block index and type for tool_use blocks
     let mut current_block_index: Option<u32> = None;
     let mut current_block_type: Option<String> = None;
@@ -1623,13 +1619,10 @@ async fn stream_claude_with_tools(
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
                 let mut finished = false;
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if data == "[DONE]" {
                         finished = true;
@@ -1789,7 +1782,7 @@ async fn stream_openai_with_tools(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     let mut token_usage: Option<TokenUsage> = None;
 
     loop {
@@ -1797,13 +1790,10 @@ async fn stream_openai_with_tools(
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
                 let mut finished = false;
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if data == "[DONE]" {
                         finished = true;
@@ -1947,7 +1937,7 @@ async fn stream_gemini_with_tools(
     }
 
     let mut byte_stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     let mut tool_call_idx: u32 = 0;
     let mut token_usage: Option<TokenUsage> = None;
 
@@ -1956,12 +1946,9 @@ async fn stream_gemini_with_tools(
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
 
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].to_string();
-                    buf = buf[pos + 1..].to_string();
-
+                while let Some(line) = drain_next_stream_line(&mut buf)? {
                     let Some(data) = stream_data_payload(&line) else { continue };
                     if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                         // Token usage (overwrite each chunk, keep last value)
@@ -2117,11 +2104,33 @@ pub fn load_config(path: &Path) -> Result<Option<AiConfig>, String> {
 mod tests {
     use super::{
         add_temperature_if_supported_for_config, build_ai_http_client, claude_headers, claude_system_prompt,
-        gemini_text, is_kimi_model, openai_response_text, openai_stream_reasoning, openai_stream_text,
-        parse_model_list_response, resolve_endpoint, resolve_model_list_endpoint, responses_max_output_tokens,
-        responses_text, supports_temperature, temperature_value, validate_config, AiApiStyle, AiAuthMethod, AiConfig,
-        AiModelInfo, AiProvider, AiReasoningLevel, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        drain_next_stream_line, gemini_text, is_kimi_model, openai_response_text, openai_stream_reasoning,
+        openai_stream_text, parse_model_list_response, resolve_endpoint, resolve_model_list_endpoint,
+        responses_max_output_tokens, responses_text, stream_data_payload, supports_temperature, temperature_value,
+        validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiModelInfo, AiProvider, AiReasoningLevel, AUTHORIZATION,
+        CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
+
+    #[test]
+    fn stream_line_decoder_preserves_split_multibyte_utf8() {
+        let text = "\u{8bf4}\u{660e}";
+        let json = serde_json::json!({ "delta": text }).to_string();
+        let line = format!("data: {json}\n");
+        let bytes = line.as_bytes();
+        let split = bytes.iter().position(|byte| *byte >= 0x80).unwrap() + 1;
+        let mut buffer = Vec::new();
+
+        buffer.extend_from_slice(&bytes[..split]);
+        assert_eq!(drain_next_stream_line(&mut buffer).unwrap(), None);
+
+        buffer.extend_from_slice(&bytes[split..]);
+        let decoded = drain_next_stream_line(&mut buffer).unwrap().unwrap();
+        let payload = stream_data_payload(&decoded).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(payload).unwrap();
+
+        assert_eq!(parsed["delta"].as_str(), Some(text));
+        assert!(!decoded.contains('\u{fffd}'));
+    }
 
     #[test]
     fn ai_config_proxy_fields_default_for_legacy_config() {
