@@ -116,7 +116,7 @@ import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDet
 import { applyColumnFormatter, buildColumnFormatterKey, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit } from "@/lib/columnFormatter";
 import { temporalCellEditorKind, type TemporalCellEditorKind } from "@/lib/dataGridTemporalEditor";
 import { isEnumColumn, enumValuesForColumn } from "@/lib/dataGridEnumEditor";
-import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isToggleTransposeShortcut } from "@/lib/keyboardShortcuts";
+import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGridScrollGutter";
 import { canGoNextDataGridPage } from "@/lib/dataGridPagination";
 import { dataGridScrollPosition, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGridInfiniteScroll";
@@ -150,6 +150,7 @@ import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberD
 import { caretPositionInsideInsertedSqlSingleQuotes, insertedSqlSingleQuoteAtCaret } from "@/lib/sqlQuoteCaret";
 import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { isMacOS } from "@/lib/platform";
+import { formatShortcut } from "@/lib/shortcutRegistry";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 const FORMATTED_JSON_EDIT_WARNING_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-shown";
@@ -225,6 +226,7 @@ const dataGridCreatedAt = performance.now();
 const dataGridElapsed = () => `${Math.round(performance.now() - dataGridCreatedAt)}ms`;
 const isMac = isMacOS();
 const shortcutMod = isMac ? "Cmd" : "Ctrl";
+const saveShortcutLabel = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.saveSql));
 const DATA_GRID_COMPACT_TOPBAR_WIDTH = 900;
 
 const emit = defineEmits<{
@@ -5347,6 +5349,26 @@ function commitGridEdit() {
   nextTick(() => gridRef.value?.focus({ preventScroll: true }));
 }
 
+async function saveGridChangesFromShortcut() {
+  if (!saveToolbarState.value.showActions || saveToolbarState.value.actionsDisabled) return false;
+  await onToolbarCommit();
+  return true;
+}
+
+async function onCellEditKeydown(event: KeyboardEvent) {
+  if (isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) {
+    event.preventDefault();
+    event.stopPropagation();
+    commitEdit();
+    await nextTick();
+    if (await saveGridChangesFromShortcut()) {
+      gridRef.value?.focus({ preventScroll: true });
+    }
+    return;
+  }
+  onEditKeydown(event);
+}
+
 function undoGridChange(): boolean {
   if (editingCell.value || !canUndoPendingChange.value) return false;
   undoPendingChange();
@@ -5401,11 +5423,10 @@ async function onGridKeydown(event: KeyboardEvent) {
     }
     return;
   }
-  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "s") {
-    if (saveToolbarState.value.showActions && !saveToolbarState.value.actionsDisabled) {
+  if (isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) {
+    if (await saveGridChangesFromShortcut()) {
       event.preventDefault();
       event.stopPropagation();
-      await onToolbarCommit();
     }
     return;
   }
@@ -7280,7 +7301,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       <span class="data-grid-topbar-action-label" :class="{ 'data-grid-topbar-action-label--compact': compactDataGridToolbar }">{{ t(saveActionMode.labelKey, { count: pendingChangeCount }) }}</span>
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom" class="max-w-sm"> {{ t(saveActionMode.tooltipKey, { count: pendingChangeCount }) }} ({{ shortcutMod }}+S) </TooltipContent>
+                  <TooltipContent side="bottom" class="max-w-sm"> {{ t(saveActionMode.tooltipKey, { count: pendingChangeCount }) }} ({{ saveShortcutLabel }}) </TooltipContent>
                 </Tooltip>
                 <Tooltip>
                   <TooltipTrigger as-child>
@@ -7458,7 +7479,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           @click.stop
                           @focus="onCellEditTextareaInput"
                           @input="onCellEditTextareaInput"
-                          @keydown.stop="onEditKeydown"
+                          @keydown.stop="onCellEditKeydown"
                           @paste.stop="onCellEditTextareaPaste"
                         />
                         <input
@@ -7472,7 +7493,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           @blur="commitEditFromBlur"
                           @click.stop
                           @input="onCellEditTextareaInput"
-                          @keydown.stop="onEditKeydown"
+                          @keydown.stop="onCellEditKeydown"
                           @paste.stop="onCellEditTextareaPaste"
                         />
                       </template>
@@ -7898,7 +7919,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @click.stop
                         @focus="onCellEditTextareaInput"
                         @input="onCellEditTextareaInput"
-                        @keydown.stop="onEditKeydown"
+                        @keydown.stop="onCellEditKeydown"
                         @paste.stop="onCellEditTextareaPaste"
                       />
                       <input
@@ -7912,7 +7933,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @blur="commitEditFromBlur"
                         @click.stop
                         @input="onCellEditTextareaInput"
-                        @keydown.stop="onEditKeydown"
+                        @keydown.stop="onCellEditKeydown"
                         @paste.stop="onCellEditTextareaPaste"
                       />
                     </div>
@@ -8030,7 +8051,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           @click.stop
                           @focus="onCellEditTextareaInput"
                           @input="onCellEditTextareaInput"
-                          @keydown.stop="onEditKeydown"
+                          @keydown.stop="onCellEditKeydown"
                           @paste.stop="onCellEditTextareaPaste"
                         />
                         <input
@@ -8044,7 +8065,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           @blur="commitEditFromBlur"
                           @click.stop
                           @input="onCellEditTextareaInput"
-                          @keydown.stop="onEditKeydown"
+                          @keydown.stop="onCellEditKeydown"
                           @paste.stop="onCellEditTextareaPaste"
                         />
                       </template>
