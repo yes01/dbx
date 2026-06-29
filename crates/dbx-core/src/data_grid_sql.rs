@@ -874,6 +874,12 @@ pub fn format_grid_sql_literal(
     }
     let literal_text = if database_type == Some(DatabaseType::Tdengine) {
         format_tdengine_timestamp_literal_text(&text)
+    } else if database_type == Some(DatabaseType::SqlServer) {
+        crate::sqlserver_temporal::normalize_sqlserver_temporal_literal(
+            &text,
+            column_info.map(|column| column.data_type.as_str()),
+        )
+        .unwrap_or(text)
     } else if is_mysql_datetime_literal_database(database_type)
         && column_info.map(|column| is_temporal_column_type(&column.data_type)).unwrap_or(true)
     {
@@ -1890,6 +1896,102 @@ mod tests {
         assert_eq!(
             format_grid_sql_literal(&json!("2026-05-12T00:00:00.123456Z"), Some(DatabaseType::Mysql), None),
             "'2026-05-12 00:00:00.123456'"
+        );
+    }
+
+    #[test]
+    fn formats_sqlserver_datetime_copy_literals_with_supported_precision() {
+        let datetime = column("date1", "datetime", true, None);
+        let datetime2 = column("date2", "datetime2(7)", true, None);
+        let raw_text = column("note", "nvarchar(64)", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.896666666"),
+                Some(DatabaseType::SqlServer),
+                Some(&datetime)
+            ),
+            "N'2026-06-29 10:11:12.897'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.8966666"),
+                Some(DatabaseType::SqlServer),
+                Some(&datetime2)
+            ),
+            "N'2026-06-29 10:11:12.8966666'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.896666666"),
+                Some(DatabaseType::SqlServer),
+                Some(&raw_text)
+            ),
+            "N'2026-06-29 10:11:12.896666666'"
+        );
+    }
+
+    #[test]
+    fn formats_oracle_temporal_literals_without_nls_parsing() {
+        let timestamp = column("created_at", "TIMESTAMP(6)", true, None);
+        let timestamp_tz = column("recorded_at", "TIMESTAMP(6) WITH TIME ZONE", true, None);
+        let timestamp_ltz = column("local_recorded_at", "TIMESTAMP(6) WITH LOCAL TIME ZONE", true, None);
+        let date = column("event_day", "DATE", true, None);
+        let text = column("raw_text", "VARCHAR2(64)", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2022-08-25T09:58:43.123456+08:00"),
+                Some(DatabaseType::Oracle),
+                Some(&timestamp_tz)
+            ),
+            "TO_TIMESTAMP_TZ('2022-08-25 09:58:43.123456 +08:00', 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&timestamp_ltz)),
+            "TO_TIMESTAMP_TZ('2022-08-25 09:58:43 +00:00', 'YYYY-MM-DD HH24:MI:SS TZH:TZM')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&date)),
+            "TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&text)),
+            "'2022-08-25T09:58:43Z'"
+        );
+    }
+
+    #[test]
+    fn prepares_oracle_timestamp_insert_from_iso_grid_value() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            table_meta: DataGridTableMeta {
+                schema: Some("APP".to_string()),
+                table_name: "EVENTS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("ID", "NUMBER", false, None),
+                    column("CREATED_AT", "TIMESTAMP(6)", true, None),
+                ]),
+            },
+            columns: vec!["ID".to_string(), "CREATED_AT".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(1), json!("2022-08-25T09:58:43Z")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_AT\") VALUES (1, TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'));"
+            ]
         );
     }
 
