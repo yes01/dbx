@@ -1834,6 +1834,50 @@ pub async fn execute_statements(
     let start = std::time::Instant::now();
     let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
 
+    let agent_client = {
+        let conns = state.connections.read().await;
+        match conns.get(&pool_key) {
+            Some(PoolKind::Agent(client)) => Some(client.clone()),
+            _ => None,
+        }
+    };
+    if let Some(client) = agent_client {
+        check_read_only_for_connection_multi(state, &pool_key, statements).await?;
+        let db_type = connection_database_type_for_pool_key(state, &pool_key).await;
+        let execution_schema = schema_for_execution_context(db_type, schema);
+        let rewritten_statements;
+        let statements = if matches!(db_type, Some(DatabaseType::Iris)) {
+            rewritten_statements =
+                statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
+            rewritten_statements.as_slice()
+        } else {
+            statements
+        };
+        let mut client = client.lock().await;
+        let database = if database.trim().is_empty() { None } else { Some(database) };
+        let timeout_duration = timeout_secs.map(Duration::from_secs);
+        let result: Result<db::QueryResult, String> =
+            client.execute_batch(database, statements, execution_schema, timeout_duration).await;
+        match result {
+            Ok(result) => return Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result }),
+            Err(err) => {
+                if is_agent_execute_batch_unsupported(&err) {
+                    log::warn!(
+                        "Agent does not support execute_batch; falling back to statement-by-statement execution"
+                    );
+                } else {
+                    match pool_error_action(connection_database_type(state, connection_id).await, &err) {
+                        PoolErrorAction::ReconnectAndRetry | PoolErrorAction::Discard => {
+                            let _ = state.remove_pool_by_key(&pool_key).await;
+                        }
+                        PoolErrorAction::Keep => {}
+                    }
+                    return Err(err);
+                }
+            }
+        }
+    }
+
     for (i, sql) in statements.iter().enumerate() {
         match do_execute(
             state,
@@ -1882,6 +1926,11 @@ pub async fn execute_statements(
         session_id: None,
         has_more: false,
     })
+}
+
+fn is_agent_execute_batch_unsupported(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("execute_batch") && (lower.contains("unknown method") || lower.contains("method not found"))
 }
 
 /// Execute multiple SQL statements within a single transaction.
@@ -2358,6 +2407,19 @@ mod tests {
             one_time: false,
             read_only: false,
         }
+    }
+
+    #[test]
+    fn agent_execute_batch_unsupported_detects_case_insensitive_method_errors() {
+        assert!(is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_batch"));
+        assert!(is_agent_execute_batch_unsupported("Agent RPC error (-1): Unknown method: execute_batch"));
+        assert!(is_agent_execute_batch_unsupported("Agent RPC error (-32601): Method not found: execute_batch"));
+    }
+
+    #[test]
+    fn agent_execute_batch_unsupported_ignores_unrelated_errors() {
+        assert!(!is_agent_execute_batch_unsupported("ORA-00955: name is already used by an existing object"));
+        assert!(!is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_query"));
     }
 
     #[tokio::test]
