@@ -169,7 +169,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function updateCopyKey(): string {
-    const rows = updateEligibleRows().map((item) => item.id);
+    const rows = copyStatementRowsKey(updateEligibleRows());
     return JSON.stringify({
       databaseType: databaseType.value ?? null,
       schema: tableMeta.value?.schema ?? null,
@@ -182,7 +182,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function insertCopyKey(excludePrimaryKeys: boolean): string {
-    const rows = insertEligibleRows().map((item) => item.id);
+    const rows = copyStatementRowsKey(insertEligibleRows());
     return JSON.stringify({
       databaseType: databaseType.value ?? null,
       schema: tableMeta.value?.schema ?? null,
@@ -193,6 +193,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       excludePrimaryKeys,
       rows,
     });
+  }
+
+  function copyStatementRowsKey(rows: RowItem[]): Array<{ id: number; data: CellValue[] }> {
+    // Prepared copy SQL depends on current cell values; edited rows keep the same id while their data changes.
+    return rows.map((item) => ({ id: item.id, data: item.data }));
   }
 
   function insertCopyCache(excludePrimaryKeys: boolean): CopyStatementCache {
