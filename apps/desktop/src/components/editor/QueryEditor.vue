@@ -186,6 +186,8 @@ let codeMirrorSnippetCompletion: typeof import("@codemirror/autocomplete").snipp
 let codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").completionStatus | null = null;
 let codeMirrorAcceptCompletion: typeof import("@codemirror/autocomplete").acceptCompletion | null = null;
 let codeMirrorStartCompletion: typeof import("@codemirror/autocomplete").startCompletion | null = null;
+let codeMirrorInsertCompletionText: typeof import("@codemirror/autocomplete").insertCompletionText | null = null;
+let codeMirrorNextSnippetField: typeof import("@codemirror/autocomplete").nextSnippetField | null = null;
 let codeMirrorIndentMore: typeof import("@codemirror/commands").indentMore | null = null;
 let codeMirrorIndentLess: typeof import("@codemirror/commands").indentLess | null = null;
 let codeMirrorCopyLineDown: typeof import("@codemirror/commands").copyLineDown | null = null;
@@ -601,12 +603,21 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       ]),
     ) ?? [],
     codeMirrorKeymap.of(
-      binding(shortcuts.acceptCompletion, (view) => codeMirrorAcceptCompletion?.(view) ?? false).map((item) => ({
+      binding(shortcuts.acceptCompletion, acceptCompletionOrNextSnippetField).map((item) => ({
         ...item,
         preventDefault: false,
       })),
     ),
   ];
+}
+
+function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
+  if (codeMirrorCompletionStatus?.(view.state) && (codeMirrorAcceptCompletion?.(view) ?? false)) {
+    return true;
+  }
+  // Table/column completions can happen inside a CodeMirror snippet field. When
+  // the completion popup is gone, Tab should continue through the snippet fields.
+  return codeMirrorNextSnippetField?.(view) ?? false;
 }
 
 function wordWrapExtension() {
@@ -1224,10 +1235,14 @@ function completionOptionForItem(item: QueryCompletionItem) {
     apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
       record();
       const insert = item.apply ?? item.label;
-      view.dispatch({
-        changes: { from, to, insert },
-        selection: { anchor: from + insert.length },
-      });
+      if (codeMirrorInsertCompletionText) {
+        view.dispatch(codeMirrorInsertCompletionText(view.state, insert, from, to));
+      } else {
+        view.dispatch({
+          changes: { from, to, insert },
+          selection: { anchor: from + insert.length },
+        });
+      }
     },
   };
 }
@@ -1886,7 +1901,7 @@ onMounted(async () => {
     { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, Decoration, tooltips, gutter, GutterMarker, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
     { EditorState, Compartment, Prec, StateEffect, StateField },
     langSql,
-    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap },
+    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, history, defaultKeymap, historyKeymap },
     { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap },
     { searchKeymap },
@@ -1907,6 +1922,8 @@ onMounted(async () => {
   codeMirrorCompletionStatus = completionStatus;
   codeMirrorAcceptCompletion = acceptCompletion;
   codeMirrorStartCompletion = startCompletion;
+  codeMirrorInsertCompletionText = insertCompletionText;
+  codeMirrorNextSnippetField = nextSnippetField;
   codeMirrorIndentMore = indentMore;
   codeMirrorIndentLess = indentLess;
   codeMirrorCopyLineDown = copyLineDown;
