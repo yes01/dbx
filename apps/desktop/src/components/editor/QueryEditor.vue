@@ -13,11 +13,21 @@ import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverr
 import { buildExecutionCandidates, executableStatementRanges, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sqlStatementRanges";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
 import { formatMongoShellText } from "@/lib/mongoFormatter";
-import { useConnectionStore } from "@/stores/connectionStore";
+import { useConnectionStore, COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
-import { buildSqlCompletionItemsFromContext, getSqlFunctionSignatureHelp, getSqlCompletionContext, getSqlCompletionResultValidFor, isSqlLikeCompletionStatement, recordCompletionSelection, shouldAutoOpenSqlCompletion, extractCteDefinitions } from "@/lib/sqlCompletion";
+import {
+  buildSqlCompletionItemsFromContext,
+  getSqlFunctionSignatureHelp,
+  getSqlCompletionContext,
+  getSqlCompletionResultValidFor,
+  isSqlCompletionSuppressedContext,
+  isSqlLikeCompletionStatement,
+  recordCompletionSelection,
+  shouldAutoOpenSqlCompletion,
+  extractCteDefinitions,
+} from "@/lib/sqlCompletion";
 import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionItem } from "@/lib/elasticsearchCompletion";
 import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongoCompletion";
 import { extractIdentifierAt, isSqlKeyword, matchTable } from "@/lib/sqlNavigation";
@@ -144,6 +154,8 @@ const completionTranslations = computed(() => ({
   functionDescriptions: Object.fromEntries(SQL_FUNCTION_NAMES.map((name) => [name, t(`editor.completion.functionDescriptions.${name}`)])) as Record<string, string>,
 }));
 const MAX_COMPLETION_TABLES = 200;
+const PRESTO_ON_DEMAND_TABLE_COMPLETION_MIN_PREFIX = 2;
+const PRESTO_ON_DEMAND_TABLE_COMPLETION_LIMIT = 20;
 const MAX_JOIN_FK_PREFETCH_TABLES = 24;
 const liveFontSize = ref(settingsStore.editorSettings.fontSize);
 const gestureStartFontSize = ref(settingsStore.editorSettings.fontSize);
@@ -186,6 +198,8 @@ let codeMirrorSnippetCompletion: typeof import("@codemirror/autocomplete").snipp
 let codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").completionStatus | null = null;
 let codeMirrorAcceptCompletion: typeof import("@codemirror/autocomplete").acceptCompletion | null = null;
 let codeMirrorStartCompletion: typeof import("@codemirror/autocomplete").startCompletion | null = null;
+let codeMirrorInsertCompletionText: typeof import("@codemirror/autocomplete").insertCompletionText | null = null;
+let codeMirrorNextSnippetField: typeof import("@codemirror/autocomplete").nextSnippetField | null = null;
 let codeMirrorIndentMore: typeof import("@codemirror/commands").indentMore | null = null;
 let codeMirrorIndentLess: typeof import("@codemirror/commands").indentLess | null = null;
 let codeMirrorCopyLineDown: typeof import("@codemirror/commands").copyLineDown | null = null;
@@ -211,6 +225,8 @@ let editorIsActive = true;
 let tableReferenceDropListenerRegistered = false;
 let imeCompositionActive = false;
 let pendingImeModelEmit = false;
+let editorScrollbarPointerCleanup: (() => void) | null = null;
+const EDITOR_SCROLLBAR_POINTER_GUTTER_PX = 18;
 const tableNavigationHoverClass = "query-editor--table-navigation-hover";
 
 function editorThemeAppearance() {
@@ -330,15 +346,20 @@ function handleTab(view: EditorViewType): boolean {
   return true;
 }
 
-function requestExecute(options: { forceCurrent?: boolean } = {}) {
+interface RequestExecuteOptions {
+  forceCurrent?: boolean;
+  ignoreSelection?: boolean;
+}
+
+function requestExecute(options: RequestExecuteOptions = {}) {
   const currentView = view.value;
   if (!currentView) return false;
   return requestExecuteFromView(currentView, currentView.state.selection.main.head, options);
 }
 
-function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, options: { forceCurrent?: boolean } = {}) {
+function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, options: RequestExecuteOptions = {}) {
   const selection = currentView.state.selection.main;
-  if (!selection.empty) {
+  if (!options.ignoreSelection && !selection.empty) {
     // Has manual selection → execute directly, skip picker.
     emit("execute", sqlExecutionSnapshotFromView(currentView));
     return true;
@@ -469,6 +490,33 @@ function clearTableNavigationHoverOnModifierRelease(event: KeyboardEvent) {
   if (!event.metaKey && !event.ctrlKey) clearTableNavigationHover();
 }
 
+function isEditorScrollbarPointerEvent(currentView: EditorViewType, event: MouseEvent) {
+  if (event.button !== 0) return false;
+  const scrollDOM = currentView.scrollDOM;
+  const rect = scrollDOM.getBoundingClientRect();
+  const hasVerticalScrollbar = scrollDOM.scrollHeight > scrollDOM.clientHeight + 1;
+  const hasHorizontalScrollbar = scrollDOM.scrollWidth > scrollDOM.clientWidth + 1;
+  const verticalGutter = Math.max(scrollDOM.offsetWidth - scrollDOM.clientWidth, EDITOR_SCROLLBAR_POINTER_GUTTER_PX);
+  const horizontalGutter = Math.max(scrollDOM.offsetHeight - scrollDOM.clientHeight, EDITOR_SCROLLBAR_POINTER_GUTTER_PX);
+  const inVerticalScrollbar = hasVerticalScrollbar && event.clientX >= rect.right - verticalGutter && event.clientX <= rect.right;
+  const inHorizontalScrollbar = hasHorizontalScrollbar && event.clientY >= rect.bottom - horizontalGutter && event.clientY <= rect.bottom;
+  return inVerticalScrollbar || inHorizontalScrollbar;
+}
+
+function registerEditorScrollbarPointerGuard(currentView: EditorViewType) {
+  editorScrollbarPointerCleanup?.();
+  const onPointerDown = (event: MouseEvent) => {
+    if (!isEditorScrollbarPointerEvent(currentView, event)) return;
+    clearTableNavigationHover();
+    event.stopPropagation();
+  };
+  currentView.scrollDOM.addEventListener("mousedown", onPointerDown, true);
+  editorScrollbarPointerCleanup = () => {
+    currentView.scrollDOM.removeEventListener("mousedown", onPointerDown, true);
+    editorScrollbarPointerCleanup = null;
+  };
+}
+
 function executeFromContextMenu() {
   if (!canExecuteContextSql.value) return;
   requestExecute();
@@ -518,7 +566,7 @@ function executeSqlStatementFromGutter(currentView: EditorViewType, line: { from
   if (!statementRange) return false;
   event.preventDefault();
   event.stopPropagation();
-  emit("execute", statementRange.sql);
+  requestExecuteFromView(currentView, line.from, { ignoreSelection: true });
   currentView.focus();
   return true;
 }
@@ -601,12 +649,21 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       ]),
     ) ?? [],
     codeMirrorKeymap.of(
-      binding(shortcuts.acceptCompletion, (view) => codeMirrorAcceptCompletion?.(view) ?? false).map((item) => ({
+      binding(shortcuts.acceptCompletion, acceptCompletionOrNextSnippetField).map((item) => ({
         ...item,
         preventDefault: false,
       })),
     ),
   ];
+}
+
+function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
+  if (codeMirrorCompletionStatus?.(view.state) && (codeMirrorAcceptCompletion?.(view) ?? false)) {
+    return true;
+  }
+  // Table/column completions can happen inside a CodeMirror snippet field. When
+  // the completion popup is gone, Tab should continue through the snippet fields.
+  return codeMirrorNextSnippetField?.(view) ?? false;
 }
 
 function wordWrapExtension() {
@@ -667,6 +724,12 @@ function usesOnDemandOnlyCompletionColumns(): boolean {
   return usesOnDemandOnlyEditorColumnMetadata(props.databaseType);
 }
 
+function allowsOnDemandQualifiedTableCompletion(prefix: string): boolean {
+  if (!usesLocalOnlyCompletionMetadata()) return false;
+  if (props.databaseType !== "prestosql" && props.databaseType !== "trino") return false;
+  return prefix.trim().length >= PRESTO_ON_DEMAND_TABLE_COMPLETION_MIN_PREFIX;
+}
+
 function completionMetadataTarget(table: { name: string; schema?: string | null }): { database: string; schema?: string } | null {
   if (props.database == null) return null;
   if (supportsDatabaseQualifierCompletion() && table.schema) {
@@ -723,7 +786,9 @@ async function ensureForeignKeysForTables(tables: Array<{ name: string; schema?:
     seen.add(key);
     return true;
   });
-  await Promise.all(uniqueTables.map((table) => ensureForeignKeysForTable(table)));
+  for (let index = 0; index < uniqueTables.length; index += COMPLETION_METADATA_CONCURRENCY) {
+    await Promise.all(uniqueTables.slice(index, index + COMPLETION_METADATA_CONCURRENCY).map((table) => ensureForeignKeysForTable(table)));
+  }
 }
 
 function createHoverDom(title: string, detail: string, rows: string[] = []) {
@@ -1224,10 +1289,14 @@ function completionOptionForItem(item: QueryCompletionItem) {
     apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
       record();
       const insert = item.apply ?? item.label;
-      view.dispatch({
-        changes: { from, to, insert },
-        selection: { anchor: from + insert.length },
-      });
+      if (codeMirrorInsertCompletionText) {
+        view.dispatch(codeMirrorInsertCompletionText(view.state, insert, from, to));
+      } else {
+        view.dispatch({
+          changes: { from, to, insert },
+          selection: { anchor: from + insert.length },
+        });
+      }
     },
   };
 }
@@ -1342,6 +1411,7 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
   const epoch = ++completionEpoch;
 
   try {
+    if (isSqlCompletionSuppressedContext(fullDoc, position)) return null;
     if (!explicit && !shouldAutoOpenSqlCompletion(fullDoc, position)) return null;
 
     const completionContext = getSqlCompletionContext(fullDoc, position);
@@ -1706,9 +1776,12 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
   // If qualifier didn't match any table names, try it as a schema name
   let qualifierIsSchema = false;
   if (completionContext.qualifier && !qualifierDatabase && !isReferencedTableQualifier(completionContext) && tables.length === 0 && (completionContext.suggestTables || completionContext.exclusiveColumnSuggestions)) {
-    const schemaTables = localOnlyMetadata
-      ? connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier)
-      : await listCompletionTablesWithLatencyBudget(props.connectionId!, props.database!, completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier);
+    let schemaTables = connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier);
+    if (!localOnlyMetadata) {
+      schemaTables = await listCompletionTablesWithLatencyBudget(props.connectionId!, props.database!, completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier);
+    } else if (schemaTables.length === 0 && allowsOnDemandQualifiedTableCompletion(completionContext.prefix)) {
+      schemaTables = await listCompletionTablesWithLatencyBudget(props.connectionId!, props.database!, completionContext.prefix, PRESTO_ON_DEMAND_TABLE_COMPLETION_LIMIT, completionContext.qualifier);
+    }
     if (schemaTables.length > 0) {
       tables = schemaTables;
       qualifierIsSchema = true;
@@ -1760,7 +1833,8 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     }
   }
 
-  const shouldFetchColumnsForCompletion = !onDemandOnlyColumns || completionContext.suggestColumns || completionContext.exclusiveColumnSuggestions || !!completionContext.insertTable;
+  const isTableNameCompletionContext = completionContext.suggestTables || completionContext.exclusiveTableSuggestions;
+  const shouldFetchColumnsForCompletion = !onDemandOnlyColumns || ((completionContext.suggestColumns || completionContext.exclusiveColumnSuggestions) && !isTableNameCompletionContext) || !!completionContext.insertTable;
   if (shouldFetchColumnsForCompletion) {
     await Promise.all(
       refs.map(async (refTable) => {
@@ -1886,7 +1960,7 @@ onMounted(async () => {
     { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, Decoration, tooltips, gutter, GutterMarker, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
     { EditorState, Compartment, Prec, StateEffect, StateField },
     langSql,
-    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap },
+    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, history, defaultKeymap, historyKeymap },
     { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap },
     { searchKeymap },
@@ -1907,6 +1981,8 @@ onMounted(async () => {
   codeMirrorCompletionStatus = completionStatus;
   codeMirrorAcceptCompletion = acceptCompletion;
   codeMirrorStartCompletion = startCompletion;
+  codeMirrorInsertCompletionText = insertCompletionText;
+  codeMirrorNextSnippetField = nextSnippetField;
   codeMirrorIndentMore = indentMore;
   codeMirrorIndentLess = indentLess;
   codeMirrorCopyLineDown = copyLineDown;
@@ -2338,6 +2414,7 @@ onMounted(async () => {
   });
 
   view.value = new EditorView({ state, parent: editorRef.value });
+  registerEditorScrollbarPointerGuard(view.value);
   view.value.scrollDOM.addEventListener("scroll", scheduleEditorViewportEmit, { passive: true });
   restoreEditorViewport();
   syncContextMenuState(view.value);
@@ -2509,6 +2586,7 @@ onBeforeUnmount(() => {
     cancelAnimationFrame(viewportRestoreFrame);
     viewportRestoreFrame = null;
   }
+  editorScrollbarPointerCleanup?.();
   view.value?.scrollDOM.removeEventListener("scroll", scheduleEditorViewportEmit);
   window.removeEventListener("keyup", clearTableNavigationHoverOnModifierRelease);
   window.removeEventListener("blur", clearTableNavigationHover);

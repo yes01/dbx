@@ -58,6 +58,7 @@
     "fetch_table_read_page",
     "close_table_read_session",
     "get_explain_info",
+    "execute_batch",
     "execute_transaction",
     "disconnect",
     "shutdown"
@@ -69,7 +70,9 @@
     "server_version",
     "insert_document",
     "update_document",
-    "delete_document"
+    "update_documents",
+    "delete_document",
+    "delete_documents"
   ],
   "kvMethods": [
     "kv_list_prefix",

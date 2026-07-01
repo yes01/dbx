@@ -714,16 +714,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 </Button>
                 <Popover v-if="activeOutputView === 'result' && activeTab.result">
                   <PopoverTrigger as-child>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
-                      :class="{
-                        'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose,
-                      }"
-                      :title="t('grid.viewOptions')"
-                      :aria-label="t('grid.viewOptions')"
-                    >
+                    <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                       <Wrench class="h-4 w-4" />
                     </Button>
                   </PopoverTrigger>
@@ -962,16 +953,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
           </DropdownMenu>
           <Popover v-if="activeTab.result?.columns.length">
             <PopoverTrigger as-child>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
-                :class="{
-                  'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose,
-                }"
-                :title="t('grid.viewOptions')"
-                :aria-label="t('grid.viewOptions')"
-              >
+              <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                 <Wrench class="h-4 w-4" />
               </Button>
             </PopoverTrigger>
@@ -1105,15 +1087,17 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 
     <!-- Objects mode: virtualized database object browser -->
     <template v-else-if="activeTab.mode === 'objects' && activeConnection">
-      <ObjectBrowser
-        ref="objectBrowserRef"
-        :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"
-        :connection="activeConnection"
-        :database="activeTab.database"
-        :schema="activeTab.objectBrowser?.schema"
-        @open-table="emit('openObjectTable', $event)"
-        @schema-change="emit('objectSchemaChange', $event)"
-      />
+      <div class="min-w-0 flex-1 min-h-0">
+        <ObjectBrowser
+          ref="objectBrowserRef"
+          :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"
+          :connection="activeConnection"
+          :database="activeTab.database"
+          :schema="activeTab.objectBrowser?.schema"
+          @open-table="emit('openObjectTable', $event)"
+          @schema-change="emit('objectSchemaChange', $event)"
+        />
+      </div>
     </template>
 
     <!-- Structure mode: table structure editor -->

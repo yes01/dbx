@@ -169,7 +169,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function updateCopyKey(): string {
-    const rows = updateEligibleRows().map((item) => item.id);
+    const rows = copyStatementRowsKey(updateEligibleRows());
     return JSON.stringify({
       databaseType: databaseType.value ?? null,
       schema: tableMeta.value?.schema ?? null,
@@ -182,7 +182,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function insertCopyKey(excludePrimaryKeys: boolean): string {
-    const rows = insertEligibleRows().map((item) => item.id);
+    const rows = copyStatementRowsKey(insertEligibleRows());
     return JSON.stringify({
       databaseType: databaseType.value ?? null,
       schema: tableMeta.value?.schema ?? null,
@@ -193,6 +193,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       excludePrimaryKeys,
       rows,
     });
+  }
+
+  function copyStatementRowsKey(rows: RowItem[]): Array<{ id: number; data: CellValue[] }> {
+    // Prepared copy SQL depends on current cell values; edited rows keep the same id while their data changes.
+    return rows.map((item) => ({ id: item.id, data: item.data }));
   }
 
   function insertCopyCache(excludePrimaryKeys: boolean): CopyStatementCache {
@@ -1066,6 +1071,45 @@ async function saveTextFile(content: string, defaultFileName: string, filterName
   a.download = defaultFileName;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+export function defaultDataGridExportFileName(baseName: string | undefined, fallbackBaseNameOrExtension: string, extensionOrOptions?: string | { page?: boolean; allResults?: boolean }, maybeOptions: { page?: boolean; allResults?: boolean } = {}): string {
+  const legacySignature = typeof extensionOrOptions !== "string";
+  const fallbackBaseName = legacySignature ? "export" : fallbackBaseNameOrExtension;
+  const extension = legacySignature ? fallbackBaseNameOrExtension : extensionOrOptions;
+  const options = legacySignature ? (extensionOrOptions ?? {}) : maybeOptions;
+  const sanitizedBaseName = sanitizeExportBaseName(baseName || "") || sanitizeExportBaseName(fallbackBaseName) || "export";
+  const suffix = options.allResults ? "results" : options.page ? "page" : "";
+  return [sanitizedBaseName, suffix, compactLocalTimestamp()].filter(Boolean).join("_") + `.${extension}`;
+}
+
+function sanitizeExportBaseName(value: string): string {
+  return replaceControlCharacters(
+    value
+      .trim()
+      .replace(/\.[sS][qQ][lL]$/, "")
+      .replace(/[<>:"/\\|?*]/g, "_"),
+    "_",
+  )
+    .replace(/\s+/g, " ")
+    .replace(/[._\s-]+$/g, "")
+    .slice(0, 120);
+}
+
+function replaceControlCharacters(value: string, replacement: string): string {
+  return Array.from(value)
+    .map((char) => (char.charCodeAt(0) < 32 ? replacement : char))
+    .join("");
+}
+
+function compactLocalTimestamp(date = new Date()): string {
+  const yy = String(date.getFullYear() % 100).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const second = String(date.getSeconds()).padStart(2, "0");
+  return `${yy}${month}${day}${hour}${minute}${second}`;
 }
 
 function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: CellValue[][]; excludePrimaryKeys?: boolean }): string | undefined {

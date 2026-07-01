@@ -66,6 +66,8 @@ import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, 
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sqlFormatterConfig";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/tableColumnTemplates";
+import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, type McpLaunchConfig } from "@/lib/mcpConfigTemplates";
+import { isWindows } from "@/lib/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/tableStructureEditorState";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/utils";
@@ -1085,48 +1087,19 @@ const mcpEnvEntries = computed(() => {
   return entries;
 });
 
-const mcpClaudeRecommendedConfig = computed(() => {
-  const config: Record<string, unknown> = {
-    mcpServers: {
-      dbx: {
-        command: "dbx-mcp-server",
-      } as Record<string, unknown>,
-    },
+const mcpLaunchConfig = computed<McpLaunchConfig | undefined>(() => {
+  if (!isWindows() || !mcpStatus.value?.script_path) return undefined;
+  return {
+    command: mcpStatus.value.node_path || "node",
+    args: [mcpStatus.value.script_path],
   };
-  if (mcpEnvEntries.value.length > 0) {
-    const env = Object.fromEntries(mcpEnvEntries.value);
-    ((config.mcpServers as Record<string, any>).dbx as Record<string, unknown>).env = env;
-  }
-  return JSON.stringify(config, null, 2);
 });
 
-const mcpCodexRecommendedConfig = computed(() => {
-  const lines = ["[mcp_servers.dbx]", 'command = "dbx-mcp-server"'];
-  if (mcpEnvEntries.value.length > 0) {
-    lines.push("");
-    lines.push("[mcp_servers.dbx.env]");
-    for (const [key, value] of mcpEnvEntries.value) {
-      lines.push(`${key} = "${value}"`);
-    }
-  }
-  return lines.join("\n");
-});
+const mcpClaudeRecommendedConfig = computed(() => buildMcpJsonConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
 
-const mcpOpenCodeRecommendedConfig = computed(() => {
-  const config: Record<string, unknown> = {
-    mcp: {
-      dbx: {
-        type: "local",
-        command: ["dbx-mcp-server"],
-      } as Record<string, unknown>,
-    },
-  };
-  if (mcpEnvEntries.value.length > 0) {
-    const env = Object.fromEntries(mcpEnvEntries.value);
-    ((config.mcp as Record<string, unknown>).dbx as Record<string, unknown>).environment = env;
-  }
-  return JSON.stringify(config, null, 2);
-});
+const mcpCodexRecommendedConfig = computed(() => buildMcpCodexConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
+
+const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
 
 const mcpStatusTone = computed<"ok" | "warning" | "muted">(() => {
   if (!mcpStatus.value) return "muted";

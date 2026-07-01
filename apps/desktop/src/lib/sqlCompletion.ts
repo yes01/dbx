@@ -421,7 +421,47 @@ const MANTICORESEARCH_SQL_KEYWORDS = ["FACET", "MATCH", "SHOW", "SHOW META", "SH
 
 const SQLITE_SQL_KEYWORDS = ["AUTOINCREMENT", "INTEGER", "BLOB", "BOOLEAN", "WITHOUT ROWID", "VACUUM", "PRAGMA", "JSON_EXTRACT", "JSON_SET", "STRFTIME"];
 
-const SQLSERVER_SQL_KEYWORDS = ["TOP", "IDENTITY", "UNIQUEIDENTIFIER", "NVARCHAR", "DATETIME2", "DATETIMEOFFSET", "BIT", "GO", "MERGE", "OUTPUT", "TRY_CAST", "TRY_CONVERT", "OPENJSON", "JSON_VALUE", "JSON_QUERY"];
+const SQLSERVER_SQL_KEYWORDS = [
+  "TOP",
+  "IDENTITY",
+  "IDENTITY_INSERT",
+  "UNIQUEIDENTIFIER",
+  "NVARCHAR",
+  "DATETIME2",
+  "DATETIMEOFFSET",
+  "BIT",
+  "GO",
+  "MERGE",
+  "OUTPUT",
+  "TRY_CAST",
+  "TRY_CONVERT",
+  "OPENJSON",
+  "JSON_VALUE",
+  "JSON_QUERY",
+  "NOCOUNT",
+  "XACT_ABORT",
+  "ANSI_NULLS",
+  "ANSI_PADDING",
+  "ANSI_WARNINGS",
+  "ANSI_DEFAULTS",
+  "ARITHABORT",
+  "ARITHIGNORE",
+  "QUOTED_IDENTIFIER",
+  "IMPLICIT_TRANSACTIONS",
+  "TRANSACTION ISOLATION LEVEL",
+  "DATEFIRST",
+  "DATEFORMAT",
+  "DEADLOCK_PRIORITY",
+  "LOCK_TIMEOUT",
+  "ROWCOUNT",
+  "TEXTSIZE",
+  "STATISTICS IO",
+  "STATISTICS TIME",
+  "STATISTICS XML",
+  "SHOWPLAN_ALL",
+  "SHOWPLAN_TEXT",
+  "SHOWPLAN_XML",
+];
 
 const DATABASE_SQL_KEYWORDS: Partial<Record<DatabaseType, string[]>> = {
   mysql: MYSQL_SQL_KEYWORDS,
@@ -1088,6 +1128,7 @@ export interface SqlCompletionContext {
   nonAggregatedSelectColumns: string[];
   comparisonLeftColumn?: string;
   onStar: boolean;
+  selectListColumnContext: boolean;
   preferredKeywords: string[];
   updateTarget?: { table: string; schema?: string };
   deleteTarget?: { table: string; schema?: string };
@@ -1144,6 +1185,7 @@ export function buildSqlCompletionItems(
     autoAliasTables?: boolean;
   },
 ): SqlCompletionItem[] {
+  if (isSqlCompletionSuppressedContext(sql, cursor)) return [];
   const context = getSqlCompletionContext(sql, cursor);
   return buildSqlCompletionItemsFromContext(context, input);
 }
@@ -1213,6 +1255,7 @@ class SqlCompletionProvider {
 
     if (!context.exclusiveTableSuggestions && context.suggestColumns) {
       this.items.push(...buildColumnItems(context, this.input.columnsByTable, this.dialect));
+      this.items.push(...buildSelectAllColumnItems(context, this.input.columnsByTable, this.t, this.dialect));
     }
 
     if (context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
@@ -1248,7 +1291,7 @@ class SqlCompletionProvider {
 }
 
 export function shouldAutoOpenSqlCompletion(sql: string, cursor: number): boolean {
-  if (isSqlCommentContext(sql, cursor)) return false;
+  if (isSqlCompletionSuppressedContext(sql, cursor)) return false;
   const previousChar = sql[cursor - 1];
   if (!previousChar) return false;
   if (/\bon\s+$/i.test(sql.slice(0, cursor))) return true;
@@ -1261,7 +1304,21 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number): boolea
   return /[\w$.@]/.test(previousChar);
 }
 
+export function isSqlCompletionSuppressedContext(sql: string, cursor: number): boolean {
+  const context = getSqlLexicalContext(sql, cursor);
+  return context.inLineComment || context.inBlockComment || context.inStringLiteral;
+}
+
+export function isSqlStringLiteralContext(sql: string, cursor: number): boolean {
+  return getSqlLexicalContext(sql, cursor).inStringLiteral;
+}
+
 export function isSqlCommentContext(sql: string, cursor: number): boolean {
+  const context = getSqlLexicalContext(sql, cursor);
+  return context.inLineComment || context.inBlockComment;
+}
+
+function getSqlLexicalContext(sql: string, cursor: number): { inLineComment: boolean; inBlockComment: boolean; inStringLiteral: boolean } {
   const end = Math.max(0, Math.min(cursor, sql.length));
   let inSingleQuote = false;
   let inDoubleQuote = false;
@@ -1334,7 +1391,14 @@ export function isSqlCommentContext(sql: string, cursor: number): boolean {
     }
   }
 
-  return inLineComment || inBlockComment;
+  // Only single-quoted text is a value literal here. Double quotes, backticks,
+  // and brackets delimit identifiers in common SQL dialects, so they must not
+  // suppress identifier completion.
+  return {
+    inLineComment,
+    inBlockComment,
+    inStringLiteral: inSingleQuote,
+  };
 }
 
 export function isSqlLikeCompletionStatement(sql: string, cursor: number): boolean {
@@ -1550,7 +1614,8 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
   const exclusiveColumnSuggestions = !!qualifier && !exclusiveTableSuggestions && !insertInfo;
 
   // Check if we're in a context where columns are expected
-  const inColumnContext = isInColumnContext(beforeCursor) || !!insertInfo;
+  const selectListColumnContext = isInSelectListContext(beforeCursor);
+  const inColumnContext = selectListColumnContext || isInColumnContext(beforeCursor) || !!insertInfo;
   const inJoinConditionContext = isInJoinConditionContext(beforeCursor);
   const prioritizeSelectAliases = isInOrderOrGroupByContext(beforeCursor);
   const inCallRoutineContext = isCallRoutineContext(beforeCursor);
@@ -1598,6 +1663,7 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
     nonAggregatedSelectColumns: extractNonAggregatedSelectColumns(fullStatement),
     comparisonLeftColumn: detectComparisonLeftColumn(beforeCursor),
     onStar: detectOnStar(beforeCursor),
+    selectListColumnContext,
     preferredKeywords,
     updateTarget: updateInfo?.target,
     deleteTarget: deleteInfo?.target,
@@ -2567,6 +2633,92 @@ function buildStarExpansionItem(columnsByTable: Map<string, SqlCompletionColumn[
     apply: expansion,
     boost: 1900,
   };
+}
+
+function buildSelectAllColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, t?: SqlCompletionTranslations, dialect?: "mysql" | "postgres" | "sqlserver"): SqlCompletionItem[] {
+  if (!context.selectListColumnContext || context.statementKind !== "select" || context.onStar || context.referencedTables.length === 0) {
+    return [];
+  }
+
+  const items: SqlCompletionItem[] = [];
+  const emittedRefs = new Set<string>();
+  const targetRefs = referencedTablesForSelectAllColumns(context);
+  const shouldQualify = !!context.qualifier || context.referencedTables.length > 1;
+
+  for (const ref of targetRefs) {
+    const displayRef = context.qualifier || ref.alias || ref.name;
+    const refKey = `${displayRef}.${ref.schema ?? ""}.${ref.name}`.toLowerCase();
+    if (emittedRefs.has(refKey)) continue;
+    emittedRefs.add(refKey);
+
+    const columns = uniqueColumnsByName(columnsForSelectAllReferencedTable(ref, columnsByTable));
+    if (columns.length === 0) continue;
+
+    const label = `${displayRef}.*`;
+    if (!selectAllColumnItemMatchesPrefix(label, ref, columns, context.prefix)) continue;
+
+    const qualifier = context.qualifier || ref.alias || (shouldQualify ? quoteSqlIdentifier(ref.name, dialect) : undefined);
+    const expansion = buildSelectAllColumnExpansion(columns, qualifier, !!context.qualifier, dialect);
+    const countText = (t?.starExpansionColumns ?? "{count} columns").replace("{count}", String(columns.length));
+    items.push({
+      label,
+      type: "snippet" as const,
+      detail: `${countText}: ${expansion.length > 60 ? expansion.slice(0, 57) + "..." : expansion}`,
+      apply: expansion,
+      boost: 2400 + selectAllColumnItemPrefixBoost(label, ref, columns, context.prefix) - items.length,
+    });
+  }
+
+  return items;
+}
+
+function referencedTablesForSelectAllColumns(context: SqlCompletionContext): SqlCompletionReferencedTable[] {
+  if (!context.qualifier) return context.referencedTables;
+  const qualifier = context.qualifier;
+  const qualifierLower = qualifier.toLowerCase();
+  const qualifiedTarget = qualifiedTableTargetFromContext(context);
+  return context.referencedTables.filter((table) => referencedTableMatchesColumnQualifier(table, qualifier, qualifierLower, qualifiedTarget));
+}
+
+function buildSelectAllColumnExpansion(columns: SqlCompletionColumn[], qualifier: string | undefined, qualifierAlreadyTyped: boolean, dialect?: "mysql" | "postgres" | "sqlserver"): string {
+  return columns
+    .map((column, index) => {
+      const columnName = quoteSqlIdentifier(column.name, dialect);
+      if (!qualifier || (qualifierAlreadyTyped && index === 0)) return columnName;
+      return `${qualifier}.${columnName}`;
+    })
+    .join(", ");
+}
+
+function columnsForSelectAllReferencedTable(table: SqlCompletionReferencedTable, columnsByTable: Map<string, SqlCompletionColumn[]>): SqlCompletionColumn[] {
+  const columns = columnsForReferencedTable(table, columnsByTable);
+  if (columns.length > 0) return columns;
+  if (!table.columns || table.columns.length === 0) return [];
+  return table.columns.map((name) => ({ name, table: table.name, schema: table.schema }));
+}
+
+function uniqueColumnsByName(columns: SqlCompletionColumn[]): SqlCompletionColumn[] {
+  const seen = new Set<string>();
+  const unique: SqlCompletionColumn[] = [];
+  for (const column of columns) {
+    const key = normalizeIdentifierPart(column.name);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(column);
+  }
+  return unique;
+}
+
+function selectAllColumnItemMatchesPrefix(label: string, ref: SqlCompletionReferencedTable, columns: SqlCompletionColumn[], prefix: string): boolean {
+  if (!prefix) return true;
+  if (matchesPrefix(label, prefix) || matchesPrefix(ref.name, prefix) || (!!ref.alias && matchesPrefix(ref.alias, prefix))) return true;
+  return columns.some((column) => matchesPrefix(column.name, prefix));
+}
+
+function selectAllColumnItemPrefixBoost(label: string, ref: SqlCompletionReferencedTable, columns: SqlCompletionColumn[], prefix: string): number {
+  if (!prefix) return 0;
+  const scores = [computeBoost(label, prefix), computeBoost(ref.name, prefix), ref.alias ? computeBoost(ref.alias, prefix) : -1, ...columns.map((column) => computeBoost(column.name, prefix))];
+  return Math.min(Math.max(...scores, 0), 1000);
 }
 
 function buildComparisonValueItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, t?: SqlCompletionTranslations, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {

@@ -56,6 +56,7 @@ export interface AgentDriverInfo {
   installed: boolean;
   installed_version: string | null;
   update_available: boolean;
+  requires_java_runtime?: boolean;
   jre: string;
   jre_installed: boolean;
 }
@@ -1102,11 +1103,13 @@ export interface UpdateInfo {
 export interface McpServerStatus {
   installed: boolean;
   npm_available: boolean;
+  node_path: string | null;
   node_version: string | null;
   current_version: string | null;
   latest_version: string | null;
   update_available: boolean;
   bin_path: string | null;
+  script_path: string | null;
   install_command: string;
   update_command: string;
   error: string | null;
