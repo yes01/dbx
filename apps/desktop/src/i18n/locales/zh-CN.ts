@@ -398,6 +398,7 @@ export default {
     selectDatabaseRequired: "请先选择数据库",
     searchDatabase: "搜索数据库...",
     selectSchema: "选择模式",
+    searchSchema: "搜索模式...",
     setDefaultDatabase: "设为默认",
     defaultDatabase: "默认库",
     clearDatabase: "清除数据库选择",

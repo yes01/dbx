@@ -370,6 +370,7 @@ export default {
     selectDatabase: "選擇資料庫",
     searchDatabase: "搜尋資料庫……",
     selectSchema: "選擇 Schema",
+    searchSchema: "搜尋 Schema...",
     setDefaultDatabase: "設為預設",
     defaultDatabase: "預設資料庫",
     completion: {

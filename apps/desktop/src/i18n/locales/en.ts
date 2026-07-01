@@ -397,6 +397,7 @@ export default {
     selectDatabaseRequired: "Select a database first",
     searchDatabase: "Search databases...",
     selectSchema: "Select schema",
+    searchSchema: "Search schemas...",
     setDefaultDatabase: "Set Default",
     defaultDatabase: "Default",
     clearDatabase: "Clear database",

@@ -365,6 +365,7 @@ export default {
     selectDatabase: "Seleccionar base de datos",
     searchDatabase: "Buscar bases de datos...",
     selectSchema: "Seleccionar esquema",
+    searchSchema: "Buscar esquemas...",
     setDefaultDatabase: "Establecer como predeterminada",
     defaultDatabase: "Predeterminada",
     completion: {

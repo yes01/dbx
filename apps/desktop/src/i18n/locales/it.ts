@@ -370,6 +370,7 @@ export default {
     selectDatabase: "Seleziona database",
     searchDatabase: "Cerca database...",
     selectSchema: "Seleziona schema",
+    searchSchema: "Cerca schemi...",
     setDefaultDatabase: "Imposta Predefinito",
     defaultDatabase: "Predefinito",
     completion: {

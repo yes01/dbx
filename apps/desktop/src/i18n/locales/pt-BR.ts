@@ -370,6 +370,7 @@ export default {
     selectDatabase: "Selecionar banco de dados",
     searchDatabase: "Pesquisar bancos de dados...",
     selectSchema: "Selecionar schema",
+    searchSchema: "Pesquisar schemas...",
     setDefaultDatabase: "Definir Padrão",
     defaultDatabase: "Padrão",
     completion: {
