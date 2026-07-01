@@ -33,6 +33,7 @@ import { usesAgentCursorForQuery } from "@/lib/databaseDriverManifest";
 import { canUseKeylessRowPredicate, editableRowIdentifierColumns } from "@/lib/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
+import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
 import { quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionContext, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
@@ -1541,7 +1542,7 @@ export const useQueryStore = defineStore("query", () => {
         countSql = plan.countSql;
         useAgentResultSession = plan.useAgentResultSession;
       } else if (tab.mode === "data") {
-        pageLimit = options?.pagination?.limit ?? settingsStore.editorSettings.pageSize;
+        pageLimit = options?.pagination?.limit ?? tableOpenPageLimit();
         pageOffset = options?.pagination?.offset ?? 0;
       }
       const mongoFind = conn?.db_type === "mongodb" ? parseMongoFindCommand(sql) : null;
@@ -2176,14 +2177,13 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultEvicted = false;
     const sql = tab.lastExecutedSql ?? tab.sql;
     if (!sql?.trim()) return;
-    const settingsStore = useSettingsStore();
     await executeTabSql(tab.id, sql, {
       resultBaseSql: tab.resultBaseSql ?? sql,
       resultSortedSql: tab.resultSortedSql,
       pagination:
         tab.mode === "data"
           ? {
-              limit: tab.resultPageLimit ?? settingsStore.editorSettings.pageSize,
+              limit: tab.resultPageLimit ?? tableOpenPageLimit(),
               offset: tab.resultPageOffset ?? 0,
             }
           : undefined,
