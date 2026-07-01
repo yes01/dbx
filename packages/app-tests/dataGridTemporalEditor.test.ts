@@ -1,8 +1,9 @@
 import { strict as assert } from "node:assert";
-import test from "node:test";
+import { test } from "vitest";
 import {
   formatTemporalInputValue,
   parseTemporalInputValue,
+  stepTemporalInputValue,
   temporalCellEditorKind,
 } from "../../apps/desktop/src/lib/dataGridTemporalEditor.ts";
 
@@ -30,4 +31,23 @@ test("parses native temporal input values back to grid save strings", () => {
   assert.equal(parseTemporalInputValue("2026-05-19T08:30:45", "datetime"), "2026-05-19 08:30:45");
   assert.equal(parseTemporalInputValue("08:30", "time"), "08:30:00");
   assert.equal(parseTemporalInputValue("", "time"), null);
+});
+
+test("steps datetime date and time parts", () => {
+  assert.equal(stepTemporalInputValue("2025-07-01 13:41:49", "datetime", "day", 1), "2025-07-02 13:41:49");
+  assert.equal(stepTemporalInputValue("2025-07-01 13:41:49", "datetime", "month", 1), "2025-08-01 13:41:49");
+  assert.equal(stepTemporalInputValue("2025-07-01 13:41:49", "datetime", "hour", 1), "2025-07-01 14:41:49");
+  assert.equal(stepTemporalInputValue("2025-07-01 13:41:49", "datetime", "minute", -1), "2025-07-01 13:40:49");
+  assert.equal(stepTemporalInputValue("2025-07-01 13:41:49", "datetime", "second", 1), "2025-07-01 13:41:50");
+});
+
+test("clamps stepped dates to the target month", () => {
+  assert.equal(stepTemporalInputValue("2025-01-31", "date", "month", 1), "2025-02-28");
+  assert.equal(stepTemporalInputValue("2024-01-31", "date", "month", 1), "2024-02-29");
+});
+
+test("wraps stepped time values", () => {
+  assert.equal(stepTemporalInputValue("23:59:59", "time", "hour", 1), "00:59:59");
+  assert.equal(stepTemporalInputValue("23:59:59", "time", "minute", 1), "23:00:59");
+  assert.equal(stepTemporalInputValue("23:59:59", "time", "second", 1), "23:59:00");
 });
