@@ -246,7 +246,7 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 9] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
@@ -937,6 +937,13 @@ impl AgentDriverClient {
         params: Value,
     ) -> Result<T, String> {
         self.call_mongo_method(MongoAgentMethod::UpdateDocument, params).await
+    }
+
+    pub async fn mongo_update_documents<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::UpdateDocuments, params).await
     }
 
     pub async fn mongo_delete_document<T: DeserializeOwned + Send + 'static>(

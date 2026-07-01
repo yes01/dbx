@@ -547,7 +547,7 @@ const showExtendedProperties = computed(() => {
 });
 const extendedPropertiesColumnIndex = 8;
 const actionButtonGap = 2;
-const columnActionButtonCount = computed(() => (canShowColumnDragControls.value ? 2 : 1));
+const columnActionButtonCount = computed(() => (canShowColumnMoveControls.value ? 3 : 2));
 const columnActionsWidth = computed(() => {
   const metric = structureDensityMetric.value;
   const count = columnActionButtonCount.value;

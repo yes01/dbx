@@ -26,7 +26,7 @@ vi.mock("@/lib/tauriRuntime", () => ({ isTauriRuntime: () => false }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 
-const { useDataGridExport } = await import("../../apps/desktop/src/composables/useDataGridExport.ts");
+const { defaultDataGridExportFileName, useDataGridExport } = await import("../../apps/desktop/src/composables/useDataGridExport.ts");
 
 function installMemoryStorage() {
   const values = new Map<string, string>();

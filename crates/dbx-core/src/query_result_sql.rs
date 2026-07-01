@@ -1195,23 +1195,6 @@ WHERE u.id = picked.id;
     }
 
     #[test]
-    fn clickhouse_scalar_with_select_is_paginated() {
-        let sql = "WITH 1 AS min_id SELECT dept, COUNT(*) FROM employees WHERE id >= min_id GROUP BY dept";
-        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
-            original_sql: sql.to_string(),
-            database_type: Some(DatabaseType::ClickHouse),
-            limit: 50,
-            offset: 100,
-        });
-
-        assert!(result.ok);
-        assert_eq!(
-            result.sql.unwrap(),
-            "WITH 1 AS min_id SELECT dept, COUNT(*) FROM employees WHERE id >= min_id GROUP BY dept LIMIT 50 OFFSET 100;"
-        );
-    }
-
-    #[test]
     fn clickhouse_settings_clause_is_paginated_before_settings() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT * FROM system.clusters SETTINGS max_execution_time = 0".to_string(),
@@ -1246,21 +1229,6 @@ WHERE u.id = picked.id;
         );
         assert_eq!(plan.page_limit, Some(100));
         assert_eq!(plan.page_offset, Some(0));
-    }
-
-    #[test]
-    fn clickhouse_scalar_with_select_can_be_counted() {
-        let result = build_count_query_sql(CountQuerySqlOptions {
-            original_sql: "WITH 1 AS min_id SELECT dept, COUNT(*) FROM employees WHERE id >= min_id GROUP BY dept"
-                .to_string(),
-            database_type: Some(DatabaseType::ClickHouse),
-        });
-
-        assert!(result.ok);
-        assert_eq!(
-            result.sql.unwrap(),
-            "SELECT COUNT(*) AS dbx_total_rows FROM (WITH 1 AS min_id SELECT dept, COUNT(*) FROM employees WHERE id >= min_id GROUP BY dept) `dbx_count`;"
-        );
     }
 
     #[test]

@@ -1073,6 +1073,45 @@ async function saveTextFile(content: string, defaultFileName: string, filterName
   URL.revokeObjectURL(url);
 }
 
+export function defaultDataGridExportFileName(baseName: string | undefined, fallbackBaseNameOrExtension: string, extensionOrOptions?: string | { page?: boolean; allResults?: boolean }, maybeOptions: { page?: boolean; allResults?: boolean } = {}): string {
+  const legacySignature = typeof extensionOrOptions !== "string";
+  const fallbackBaseName = legacySignature ? "export" : fallbackBaseNameOrExtension;
+  const extension = legacySignature ? fallbackBaseNameOrExtension : extensionOrOptions;
+  const options = legacySignature ? (extensionOrOptions ?? {}) : maybeOptions;
+  const sanitizedBaseName = sanitizeExportBaseName(baseName || "") || sanitizeExportBaseName(fallbackBaseName) || "export";
+  const suffix = options.allResults ? "results" : options.page ? "page" : "";
+  return [sanitizedBaseName, suffix, compactLocalTimestamp()].filter(Boolean).join("_") + `.${extension}`;
+}
+
+function sanitizeExportBaseName(value: string): string {
+  return replaceControlCharacters(
+    value
+      .trim()
+      .replace(/\.[sS][qQ][lL]$/, "")
+      .replace(/[<>:"/\\|?*]/g, "_"),
+    "_",
+  )
+    .replace(/\s+/g, " ")
+    .replace(/[._\s-]+$/g, "")
+    .slice(0, 120);
+}
+
+function replaceControlCharacters(value: string, replacement: string): string {
+  return Array.from(value)
+    .map((char) => (char.charCodeAt(0) < 32 ? replacement : char))
+    .join("");
+}
+
+function compactLocalTimestamp(date = new Date()): string {
+  const yy = String(date.getFullYear() % 100).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const second = String(date.getSeconds()).padStart(2, "0");
+  return `${yy}${month}${day}${hour}${minute}${second}`;
+}
+
 function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: CellValue[][]; excludePrimaryKeys?: boolean }): string | undefined {
   const saveColumns = effectiveColumns(options.sourceColumns, options.columns);
   const columnIndexes = saveColumns.map((column, index) => ({ column, index })).filter((item): item is { column: string; index: number } => !!item.column);

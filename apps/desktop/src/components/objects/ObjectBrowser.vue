@@ -1393,7 +1393,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 </script>
 
 <template>
-  <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
+  <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0">
     <div class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <Table2 class="h-4 w-4 text-muted-foreground" />

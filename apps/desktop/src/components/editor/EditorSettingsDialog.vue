@@ -66,7 +66,7 @@ import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, 
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sqlFormatterConfig";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/tableColumnTemplates";
-import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcpConfigTemplates";
+import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, type McpLaunchConfig } from "@/lib/mcpConfigTemplates";
 import { isWindows } from "@/lib/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/tableStructureEditorState";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
