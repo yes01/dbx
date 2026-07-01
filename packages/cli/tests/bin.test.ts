@@ -49,5 +49,9 @@ function runDbx(bin: { path: string }, args: string[]) {
   return spawnSync(process.execPath, ["--import", "tsx", bin.path, ...args], {
     cwd: packageDir,
     encoding: "utf-8",
+    env: {
+      ...process.env,
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, "--no-deprecation"].filter(Boolean).join(" "),
+    },
   });
 }

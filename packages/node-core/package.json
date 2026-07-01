@@ -17,6 +17,7 @@
     "./entrypoint": "./dist/entrypoint.js",
     "./format": "./dist/format.js",
     "./paths": "./dist/paths.js",
+    "./redis-command": "./dist/redis-command.js",
     "./schema-context": "./dist/schema-context.js",
     "./sql-safety": "./dist/sql-safety.js"
   },
