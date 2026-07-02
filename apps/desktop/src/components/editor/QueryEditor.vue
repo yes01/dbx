@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { FileCode, Play, Copy, Table2, TextSelect } from "@lucide/vue";
+import { CaseLower, CaseUpper, FileCode, PencilRuler, Play, Copy, Table2, TextSelect } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
 import type { EditorView as EditorViewType } from "@codemirror/view";
@@ -30,7 +30,7 @@ import {
 } from "@/lib/sqlCompletion";
 import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionItem } from "@/lib/elasticsearchCompletion";
 import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongoCompletion";
-import { extractIdentifierAt, isSqlKeyword, matchTable } from "@/lib/sqlNavigation";
+import { extractIdentifierAt, isSqlKeyword, matchTable, splitQualifiedIdentifier } from "@/lib/sqlNavigation";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sqlDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
@@ -87,6 +87,7 @@ const emit = defineEmits<{
   clickTable: [tableName: string];
   viewTableData: [tableName: string];
   viewTableDdl: [tableName: string];
+  editTableStructure: [tableName: string];
   clickColumn: [columns: Array<{ name: string; table: string; schema?: string }>, error?: string | undefined];
   closeColumnPanel: [];
   viewportChange: [viewport: { scrollTop: number; scrollLeft: number }];
@@ -184,6 +185,7 @@ interface EditorGestureEvent extends Event {
 
 let editorViewModule: typeof import("@codemirror/view") | null = null;
 let codeMirrorPrec: typeof import("@codemirror/state").Prec | null = null;
+let codeMirrorEditorSelection: typeof import("@codemirror/state").EditorSelection | null = null;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
@@ -225,6 +227,7 @@ let editorIsActive = true;
 let tableReferenceDropListenerRegistered = false;
 let imeCompositionActive = false;
 let pendingImeModelEmit = false;
+type SelectionCaseMode = "upper" | "lower";
 let editorScrollbarPointerCleanup: (() => void) | null = null;
 const EDITOR_SCROLLBAR_POINTER_GUTTER_PX = 18;
 const tableNavigationHoverClass = "query-editor--table-navigation-hover";
@@ -544,9 +547,38 @@ function selectAllSqlFromContextMenu() {
   focusEditor();
 }
 
+function convertSelectedSqlCaseFromContextMenu(mode: SelectionCaseMode) {
+  const currentView = view.value;
+  const EditorSelection = codeMirrorEditorSelection;
+  if (!currentView || !EditorSelection || !canCopySelectedSql.value) return;
+
+  const state = currentView.state;
+  const transaction = state.changeByRange((range) => {
+    if (range.empty) return { range };
+
+    const selectedText = state.sliceDoc(range.from, range.to);
+    const convertedText = mode === "upper" ? selectedText.toUpperCase() : selectedText.toLowerCase();
+    return {
+      changes: { from: range.from, to: range.to, insert: convertedText },
+      range: EditorSelection.range(range.from, range.from + convertedText.length),
+    };
+  });
+
+  if (!transaction.changes.empty) {
+    currentView.dispatch({ ...transaction, scrollIntoView: true, userEvent: "input" });
+  }
+  focusEditor();
+}
+
 function openTableFromContextMenu() {
   if (!contextTableName.value) return;
   emit("viewTableData", contextTableName.value);
+  focusEditor();
+}
+
+function editTableStructureFromContextMenu() {
+  if (!contextTableName.value) return;
+  emit("editTableStructure", contextTableName.value);
   focusEditor();
 }
 
@@ -566,7 +598,7 @@ function executeSqlStatementFromGutter(currentView: EditorViewType, line: { from
   if (!statementRange) return false;
   event.preventDefault();
   event.stopPropagation();
-  requestExecuteFromView(currentView, line.from, { ignoreSelection: true });
+  emit("execute", statementRange.sql);
   currentView.focus();
   return true;
 }
@@ -602,12 +634,30 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => [
     disabled: !contextTableName.value,
     icon: FileCode,
   },
+  {
+    label: t("contextMenu.editStructure"),
+    action: editTableStructureFromContextMenu,
+    disabled: !contextTableName.value,
+    icon: PencilRuler,
+  },
   { label: "", separator: true },
   {
     label: t("editor.contextMenu.copySelection"),
     action: copySelectedSqlFromContextMenu,
     disabled: !canCopySelectedSql.value,
     icon: Copy,
+  },
+  {
+    label: t("editor.contextMenu.uppercaseSelection"),
+    action: () => convertSelectedSqlCaseFromContextMenu("upper"),
+    disabled: !canCopySelectedSql.value,
+    icon: CaseUpper,
+  },
+  {
+    label: t("editor.contextMenu.lowercaseSelection"),
+    action: () => convertSelectedSqlCaseFromContextMenu("lower"),
+    disabled: !canCopySelectedSql.value,
+    icon: CaseLower,
   },
   { label: t("editor.contextMenu.selectAll"), action: selectAllSqlFromContextMenu, icon: TextSelect },
 ]);
@@ -1958,7 +2008,7 @@ onMounted(async () => {
 
   const [
     { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, Decoration, tooltips, gutter, GutterMarker, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
-    { EditorState, Compartment, Prec, StateEffect, StateField },
+    { EditorState, EditorSelection, Compartment, Prec, StateEffect, StateField },
     langSql,
     { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, history, defaultKeymap, historyKeymap },
@@ -1967,6 +2017,7 @@ onMounted(async () => {
   ] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("@codemirror/autocomplete"), import("@codemirror/commands"), import("@codemirror/language"), import("@codemirror/search")]);
   editorViewModule = { EditorView, keymap, rectangularSelection } as typeof import("@codemirror/view");
   codeMirrorPrec = Prec;
+  codeMirrorEditorSelection = EditorSelection;
   codeMirrorSnippetCompletion = snippetCompletion;
   fontThemeComp = new Compartment();
   codeMirrorTheme = new Compartment();
@@ -2321,11 +2372,15 @@ onMounted(async () => {
           event.preventDefault();
           setTimeout(async () => {
             try {
+              const identifierParts = splitQualifiedIdentifier(identifier);
+              const tableLookupFilter = identifierParts[identifierParts.length - 1] ?? identifier;
+
               // Ensure table cache is populated
               if (cachedTables.length === 0) {
+                // Some metadata providers only accept table-name masks, not schema.table masks.
                 cachedTables = usesLocalOnlyCompletionMetadata()
-                  ? connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, identifier, MAX_COMPLETION_TABLES, props.schema)
-                  : await connectionStore.listCompletionTables(props.connectionId!, props.database!, identifier, MAX_COMPLETION_TABLES, props.schema);
+                  ? connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema)
+                  : await connectionStore.listCompletionTables(props.connectionId!, props.database!, tableLookupFilter, MAX_COMPLETION_TABLES, props.schema);
               }
 
               // 1. Check if it's a table name
@@ -2348,20 +2403,14 @@ onMounted(async () => {
               });
 
               // Check if identifier has a qualifier (e.g., c.card_name or schema.table)
-              const qualifierMatch = /^(.+)\.(.+)$/.exec(identifier);
-              const qualifier = qualifierMatch ? qualifierMatch[1] : null;
+              const qualifier = identifierParts.length >= 2 ? identifierParts[identifierParts.length - 2] : null;
 
-              // 2b. Qualified identifier (schema.table): check against SQL-parsed referenced tables
-              if (qualifierMatch) {
-                const qQualifier = qualifierMatch[1].toLowerCase();
-                const qTableName = qualifierMatch[2].toLowerCase();
-                const matchedRef = referencedTables.find((rt) => rt.name.toLowerCase() === qTableName && rt.schema?.toLowerCase() === qQualifier);
-                if (matchedRef) {
-                  emit("clickTable", matchedRef.schema ? `${matchedRef.schema}.${matchedRef.name}` : matchedRef.name);
-                  return;
-                }
+              const matchedRef = matchTable(identifier, referencedTables);
+              if (matchedRef) {
+                emit("clickTable", matchedRef.schema ? `${matchedRef.schema}.${matchedRef.name}` : matchedRef.name);
+                return;
               }
-              const colName = qualifierMatch ? qualifierMatch[2] : identifier;
+              const colName = identifierParts[identifierParts.length - 1] ?? identifier;
               const colLower = colName.toLowerCase();
 
               if (referencedTables.length === 0) {

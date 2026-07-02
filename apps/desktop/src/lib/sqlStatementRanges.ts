@@ -99,6 +99,7 @@ const WITH_MAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "INSERT", "UPDATE", "DEL
 const EXPLAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP"]);
 const CREATE_BODY_KEYWORDS = new Set(["SELECT", "WITH", "BEGIN", "DECLARE"]);
 const INSERT_BODY_KEYWORDS = new Set(["SELECT", "WITH"]);
+const ALTER_BODY_KEYWORDS = new Set(["ADD", "ALTER", "COMMENT", "DROP", "MODIFY", "RENAME", "SET"]);
 
 /**
  * Parse the SQL document into top-level statement ranges delimited by `;`.
@@ -418,6 +419,10 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
     }
 
     if (currentBodyKeyword === "UPDATE" && lineStart.keyword === "SET") {
+      continue;
+    }
+
+    if (currentBodyKeyword === "ALTER" && ALTER_BODY_KEYWORDS.has(lineStart.keyword)) {
       continue;
     }
 

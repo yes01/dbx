@@ -128,6 +128,7 @@ const emit = defineEmits<{
   clickTable: [tableName: string];
   viewTableData: [tableName: string];
   viewTableDdl: [tableName: string];
+  editTableStructure: [tableName: string];
   openObjectTable: [target: { tableName: string; schema?: string }];
   objectSchemaChange: [schema: string | undefined];
   structureEditorSaved: [commentChanged: boolean];
@@ -492,6 +493,10 @@ function onHandleViewTableDdl(tableName: string) {
   emit("viewTableDdl", tableName);
 }
 
+function onHandleEditTableStructure(tableName: string) {
+  emit("editTableStructure", tableName);
+}
+
 function onHandleCloseColumnPanel() {
   showColumnInfo.value = false;
   columnInfoColumns.value = [];
@@ -611,6 +616,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               @save="emit('saveSql')"
               @click-table="onHandleClickTable"
               @view-table-data="onHandleViewTableData"
+              @edit-table-structure="onHandleEditTableStructure"
               @view-table-ddl="onHandleViewTableDdl"
               @click-column="onHandleClickColumn"
               @close-column-panel="onHandleCloseColumnPanel"

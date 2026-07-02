@@ -78,6 +78,7 @@ export default {
     importDbeaver: "导入 DBeaver",
     importDatagrip: "导入 DataGrip",
     export: "导出连接",
+    collapseAll: "一键折叠",
     collapse: "收起侧边栏",
     expand: "展开侧边栏",
     showMore: "加载更多 ({count})...",
@@ -452,6 +453,8 @@ export default {
       executeSelection: "执行选中 SQL",
       executeCurrent: "执行 SQL",
       copySelection: "复制选中内容",
+      uppercaseSelection: "转为大写",
+      lowercaseSelection: "转为小写",
       selectAll: "全选",
     },
     search: {

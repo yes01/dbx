@@ -222,6 +222,31 @@ describe("statementRangeAtCursor", () => {
     expect(statementRangeAtCursor(sql, indexOf(sql, "DO"), "postgres")?.sql.trim()).toBe("DO $$ BEGIN RAISE NOTICE 'x'; END $$");
   });
 
+  it("keeps MySQL ALTER TABLE column comments with the column definition", () => {
+    const sql =
+      "ALTER TABLE `yb_course_order`\n  ADD COLUMN `audit_status` tinyint(4) DEFAULT NULL\n    COMMENT '审核状态：0-待审核，1-已通过，2-已拒绝',\n  ADD COLUMN `close_reason` varchar(30) DEFAULT NULL\n    COMMENT '关闭原因：timeout-超时关闭，cancel-取消关闭，refund-退款关闭',\n  ADD COLUMN `paid_completion_time` datetime DEFAULT NULL\n    COMMENT '订单完成支付(付清)时间 首次全额支付完成时记录，全部退款后不重置';";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "ALTER"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "close_reason"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps MySQL ALTER TABLE drop column clauses with the statement", () => {
+    const sql = "ALTER TABLE t\n  DROP COLUMN a,\n  DROP COLUMN b;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "ALTER"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "DROP COLUMN b"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps MySQL ALTER TABLE alter column clauses with the statement", () => {
+    const sql = "ALTER TABLE t\n  ALTER COLUMN name SET NOT NULL;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "ALTER"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "ALTER COLUMN"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
   it("returns null when the cursor is on a blank line", () => {
     const sql = "SELECT 1;\n\nSELECT 2;";
     const blankLinePos = sql.indexOf("\n") + 1;

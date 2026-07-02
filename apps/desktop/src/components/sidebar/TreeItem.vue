@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onBeforeUnmount, inject } from "vue";
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount, inject } from "vue";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -76,7 +76,7 @@ import { clearActiveTableReferencePayload, createTableReferencePayload, createTa
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
 import { supportsDatabaseCreation, supportsDatabaseSearch, supportsFieldLineage, supportsObjectBrowserTreeNode, supportsSchemaDiagram, supportsSqlFileExecution, supportsTableImport, supportsTableTruncate, supportsTableStructureEditing, usesTreeSchemaMode } from "@/lib/databaseCapabilities";
-import { copyNameForTreeNode, objectSourceKindForTreeNode, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
+import { copyNameForTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
 import { canActivateExistingDataTableTab } from "@/lib/dataTabActivation";
@@ -100,7 +100,7 @@ import {
   type TableAdminSqlOptions,
 } from "@/lib/dbAdminSql";
 import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType } from "@/lib/objectRenameSql";
-import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
+import { buildEditableObjectSource, buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildViewDdl } from "@/lib/viewDdl";
 import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
 import { getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
@@ -136,16 +136,58 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { flattenTree } from "@/composables/useFlatTree";
 import { createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/createDatabaseCharsetOptions";
+import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebarLabelTooltip";
 
 const { t } = useI18n();
 const labelRef = ref<HTMLElement>();
 const rowRef = ref<HTMLElement>();
-function isLabelTruncated(): boolean {
+const labelOverflowing = ref(false);
+let labelResizeObserver: ResizeObserver | null = null;
+let labelMeasureFrame = 0;
+
+function cancelLabelOverflowMeasure() {
+  if (!labelMeasureFrame) return;
+  window.cancelAnimationFrame(labelMeasureFrame);
+  labelMeasureFrame = 0;
+}
+
+function measureLabelOverflow(): boolean {
   const el = labelRef.value;
-  if (!el) return false;
+  if (!el || !shouldMeasureLabelOverflow()) return false;
   const style = window.getComputedStyle(el);
   if (style.overflowX === "visible" || style.textOverflow !== "ellipsis") return false;
   return el.scrollWidth - el.clientWidth > 2;
+}
+
+function updateLabelOverflow() {
+  labelOverflowing.value = measureLabelOverflow();
+}
+
+function scheduleLabelOverflowMeasure() {
+  if (typeof window === "undefined") {
+    updateLabelOverflow();
+    return;
+  }
+  cancelLabelOverflowMeasure();
+  // Keep synchronous layout reads out of the hover path; they are expensive in large virtualized sidebar trees.
+  labelMeasureFrame = window.requestAnimationFrame(() => {
+    labelMeasureFrame = 0;
+    updateLabelOverflow();
+  });
+}
+
+function observeLabelOverflow() {
+  labelResizeObserver?.disconnect();
+  labelResizeObserver = null;
+  if (!shouldMeasureLabelOverflow()) {
+    labelOverflowing.value = false;
+    return;
+  }
+  if (typeof ResizeObserver !== "undefined" && labelRef.value) {
+    labelResizeObserver = new ResizeObserver(scheduleLabelOverflowMeasure);
+    labelResizeObserver.observe(labelRef.value);
+  }
+  scheduleLabelOverflowMeasure();
 }
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
@@ -434,7 +476,7 @@ const detailTooltip = computed(() => connectionInfoTooltip.value ?? objectCommen
 
 function isTooltipDisabled(): boolean {
   if (detailTooltip.value?.rows.length) return isRenamingGroup.value;
-  return isRenamingGroup.value || !isLabelTruncated();
+  return isRenamingGroup.value || !labelOverflowing.value;
 }
 
 async function toggle() {
@@ -574,17 +616,20 @@ async function toggle() {
   }
 }
 
-function runRowClickAction() {
+function runRowClickAction(clickDetail: number) {
   const node = props.node;
   if (node.type === "load-more") {
+    if (clickDetail > 1) return;
     void loadMoreObjectGroupChildren();
     return;
   }
   if (node.type === "object-browser") {
+    if (clickDetail > 1) return;
     void openObjectBrowser();
     return;
   }
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
+  if (!shouldRunTreeNodeRowAction(action, clickDetail)) return;
   if (action === "open-data") {
     openData();
   } else if (node.type === "mongo-collection") {
@@ -616,6 +661,18 @@ async function loadAllObjectGroupChildren() {
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
+}
+
+function onToggleClick() {
+  selectSingleTreeNode(props.node);
+  rowRef.value?.focus({ preventScroll: true });
+  void toggle();
+}
+
+function onToggleMouseDown(event: MouseEvent) {
+  if (event.button !== 0) return;
+  selectSingleTreeNode(props.node);
+  rowRef.value?.focus({ preventScroll: true });
 }
 
 function visibleTreeNodes(): TreeNode[] {
@@ -687,8 +744,7 @@ function onClick(event: MouseEvent) {
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
   if (settingsStore.editorSettings.sidebarActivation === "double") return;
-  if (event.detail > 1) return;
-  runRowClickAction();
+  runRowClickAction(event.detail);
 }
 
 function onTreeItemContextMenu(event: MouseEvent, openContextMenu: (event: MouseEvent) => void) {
@@ -1431,7 +1487,7 @@ async function duplicateConnection() {
   const config = connectionStore.getConfig(connId);
   if (!config) return;
   const newConfig = { ...config, id: uuid(), name: `${config.name} (Copy)` };
-  await connectionStore.addConnection(newConfig);
+  await connectionStore.addConnection(newConfig, connectionStore.groupIdForConnection(connId));
   toast(t("connection.duplicated"), 2000);
 }
 
@@ -1638,8 +1694,17 @@ function viewObjectSource() {
       return api.getObjectSource(node.connectionId!, node.database!, schema, node.label, objectType as any);
     })
     .then(async (result) => {
+      const databaseType = currentDatabaseType();
+      if (!databaseType) throw new Error("Connection type is unavailable.");
       const tabId = queryStore.createTab(node.connectionId!, node.database!, `Source - ${node.label}`);
-      queryStore.updateSql(tabId, result.source);
+      const editable = await buildEditableObjectSource({
+        databaseType,
+        objectType,
+        schema,
+        name: node.label,
+        source: result.source,
+      });
+      queryStore.updateSql(tabId, editable);
       if (objectType !== "SEQUENCE") {
         queryStore.setObjectSource(tabId, {
           schema,
@@ -3196,6 +3261,14 @@ const isRenamingGroup = ref(false);
 const renameInput = ref("");
 const renameInputRef = ref<HTMLInputElement>();
 
+function shouldMeasureLabelOverflow(): boolean {
+  return shouldMeasureSidebarLabelOverflow({
+    hasDetailTooltip: !!detailTooltip.value?.rows.length,
+    isRenaming: isRenamingGroup.value,
+    usesFullWidthLabel: usesFullWidthLabel.value,
+  });
+}
+
 function startRenameGroup() {
   renameInput.value = props.node.label;
   isRenamingGroup.value = true;
@@ -3213,6 +3286,14 @@ watch(
     }
   },
   { immediate: true },
+);
+
+watch(
+  [() => props.node.id, () => visibleLabel(props.node), () => usesFullWidthLabel.value, () => detailTooltip.value?.rows.length ?? 0, isRenamingGroup],
+  () => {
+    nextTick(observeLabelOverflow);
+  },
+  { flush: "post", immediate: true },
 );
 
 function finishRenameGroup() {
@@ -3434,7 +3515,16 @@ function onRowMouseDown(event: MouseEvent) {
   }
 }
 
-onBeforeUnmount(() => finishTableReferenceDrag());
+onMounted(() => {
+  observeLabelOverflow();
+});
+
+onBeforeUnmount(() => {
+  labelResizeObserver?.disconnect();
+  labelResizeObserver = null;
+  cancelLabelOverflowMeasure();
+  finishTableReferenceDrag();
+});
 
 // ---- CustomContextMenu ----
 
@@ -3768,6 +3858,10 @@ function treeItemMenuItems(): ContextMenuItem[] {
     } else {
       items.push({ label: t("contextMenu.clearDefaultDatabase"), action: clearNodeDefaultDatabase, icon: Database });
     }
+    if (node.type === "mongo-db") {
+      items.push({ label: "", separator: true });
+      items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
+    }
     if (node.type === "redis-db") {
       items.push({ label: "", separator: true });
       items.push({ label: t("redis.flushDb"), action: flushRedisDb, icon: Eraser, variant: "destructive" as const });
@@ -4071,7 +4165,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
           <div v-if="showDropBefore" class="absolute right-2 top-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
           <div v-if="showDropAfter" class="absolute right-2 bottom-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
           <template v-if="canExpand">
-            <button type="button" class="-m-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" @click.stop="toggle">
+            <button type="button" class="-m-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" @mousedown.stop="onToggleMouseDown" @click.stop="onToggleClick">
               <Loader2 v-if="node.isLoading" class="w-3.5 h-3.5 animate-spin" />
               <ChevronDown v-else-if="node.isExpanded" class="w-3.5 h-3.5" />
               <ChevronRight v-else class="w-3.5 h-3.5" />

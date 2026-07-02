@@ -9,10 +9,12 @@ import {
   emptyLayout,
   appendConnectionToLayout,
   removeConnectionFromSidebarLayout,
+  findConnectionLocation,
   createGroup as createGroupOp,
   renameGroup as renameGroupOp,
   deleteGroup as deleteGroupOp,
   toggleGroupCollapsed as toggleGroupCollapsedOp,
+  collapseAllGroups as collapseAllGroupsOp,
   moveConnectionToGroup as moveConnectionToGroupOp,
   remapSidebarLayoutConnectionIds,
   reorderEntry as reorderEntryOp,
@@ -25,6 +27,7 @@ import { isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabas
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/databaseTree";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/sqlServerTree";
+import { collapseExpandedTreeNodes } from "@/lib/sidebarTreeCollapse";
 import { findDatabaseTreeNode } from "@/lib/treeRefreshTarget";
 import { shouldMarkDisconnected } from "@/lib/connectionHealth";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connectionAttemptTimeout";
@@ -890,7 +893,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (scope === "root") rebuildTreeNodes();
   }
 
-  async function addConnection(config: ConnectionConfig) {
+  async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
     const existing = connections.value.findIndex((c) => c.id === normalized.id);
     const nextConnections = [...connections.value];
@@ -898,7 +901,8 @@ export const useConnectionStore = defineStore("connection", () => {
       nextConnections[existing] = normalized;
     } else {
       nextConnections.push(normalized);
-      sidebarLayout.value = appendConnectionToLayout(sidebarLayout.value, normalized.id, newConnectionGroupId.value);
+      const groupId = targetGroupId !== undefined ? targetGroupId : newConnectionGroupId.value;
+      sidebarLayout.value = appendConnectionToLayout(sidebarLayout.value, normalized.id, groupId);
     }
     await persistConnections(nextConnections);
     connections.value = nextConnections;
@@ -3385,6 +3389,11 @@ export const useConnectionStore = defineStore("connection", () => {
     await refreshExpandedNodes(treeNodes.value);
   }
 
+  function collapseAllTreeNodes() {
+    updateLayoutAndRebuild(collapseAllGroupsOp(sidebarLayout.value));
+    collapseExpandedTreeNodes(treeNodes.value);
+  }
+
   async function refreshSidebarObjectPagination() {
     const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
     const isDirectObjectParent = (node: TreeNode) => {
@@ -3797,6 +3806,7 @@ export const useConnectionStore = defineStore("connection", () => {
     treeNodes,
     removeTreeNode,
     refreshAllTree,
+    collapseAllTreeNodes,
     refreshSidebarObjectPagination,
     refreshTreeNode,
     refreshDatabaseTreeNode,
@@ -3919,6 +3929,9 @@ export const useConnectionStore = defineStore("connection", () => {
     },
     moveConnectionToGroup(connectionId: string, groupId: string | null) {
       updateLayoutAndRebuild(moveConnectionToGroupOp(sidebarLayout.value, connectionId, groupId));
+    },
+    groupIdForConnection(connectionId: string): string | null {
+      return findConnectionLocation(sidebarLayout.value, connectionId)?.groupId ?? null;
     },
     reorderSidebarEntry(draggedId: string, targetId: string, position: DropPosition) {
       updateLayoutAndRebuild(reorderEntryOp(sidebarLayout.value, draggedId, targetId, position));

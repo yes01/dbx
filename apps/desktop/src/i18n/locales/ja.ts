@@ -78,6 +78,7 @@ export default {
     importDbeaver: "DBeaverをインポート",
     importDatagrip: "DataGripをインポート",
     export: "接続をエクスポート",
+    collapseAll: "すべて折りたたむ",
     collapse: "サイドバーを折りたたむ",
     expand: "サイドバーを展開",
     showMore: "さらに{count}件表示...",
@@ -443,6 +444,8 @@ export default {
       executeSelection: "選択範囲を実行",
       executeCurrent: "SQLを実行",
       copySelection: "選択範囲をコピー",
+      uppercaseSelection: "大文字に変換",
+      lowercaseSelection: "小文字に変換",
       selectAll: "すべて選択",
     },
     search: {

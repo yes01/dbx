@@ -76,6 +76,7 @@ export default {
     importDbeaver: "Importar DBeaver",
     importDatagrip: "Importar DataGrip",
     export: "Exportar Conexões",
+    collapseAll: "Recolher tudo",
     collapse: "Recolher barra lateral",
     expand: "Expandir barra lateral",
     showMore: "Mostrar mais {count}...",
@@ -423,6 +424,8 @@ export default {
       executeSelection: "Executar seleção",
       executeCurrent: "Executar SQL",
       copySelection: "Copiar seleção",
+      uppercaseSelection: "Converter para maiúsculas",
+      lowercaseSelection: "Converter para minúsculas",
       selectAll: "Selecionar tudo",
     },
     search: {
