@@ -52,9 +52,11 @@ const subRef = ref<HTMLElement>();
 const subX = ref(0);
 const subY = ref(0);
 let subCloseTimer: ReturnType<typeof setTimeout> | null = null;
+let subAnchorRect: { left: number; right: number; top: number; bottom: number } | null = null;
 
 function close() {
   activeSubIndex.value = null;
+  subAnchorRect = null;
   show.value = false;
 }
 
@@ -147,6 +149,7 @@ function onItemMouseEnter(index: number, event: MouseEvent) {
   }
   const trigger = event.currentTarget as HTMLElement;
   const rect = trigger.getBoundingClientRect();
+  subAnchorRect = { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
   subX.value = rect.right + 4;
   subY.value = rect.top;
   activeSubIndex.value = index;
@@ -194,11 +197,25 @@ function adjustSubPosition() {
   const rect = subRef.value.getBoundingClientRect();
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  if (rect.right > vw) {
-    subX.value = Math.max(0, vw - rect.width - 8);
+  const margin = 8;
+  const gap = 4;
+  if (subAnchorRect) {
+    const rightX = subAnchorRect.right + gap;
+    const leftX = subAnchorRect.left - rect.width - gap;
+    if (rightX + rect.width <= vw - margin) {
+      subX.value = rightX;
+    } else if (leftX >= margin) {
+      subX.value = leftX;
+    } else {
+      subX.value = Math.max(margin, Math.min(rightX, vw - rect.width - margin));
+    }
+  } else if (rect.right > vw - margin) {
+    subX.value = Math.max(margin, vw - rect.width - margin);
   }
-  if (rect.bottom > vh) {
-    subY.value = Math.max(0, vh - rect.height - 8);
+  if (rect.bottom > vh - margin) {
+    subY.value = Math.max(margin, vh - rect.height - margin);
+  } else if (rect.top < margin) {
+    subY.value = margin;
   }
   // When the submenu flips left due to right-edge overflow, it may land
   // under the mouse cursor. Since the mouse didn't move, mouseenter won't
@@ -272,8 +289,8 @@ onBeforeUnmount(() => {
     <div
       v-if="show && activeSubIndex !== null && items[activeSubIndex]?.children?.length"
       ref="subRef"
-      :style="{ position: 'fixed', left: subX + 'px', top: subY + 'px', zIndex: 10000 }"
-      class="bg-popover text-popover-foreground min-w-40 rounded-xl p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
+      :style="{ position: 'fixed', left: subX + 'px', top: subY + 'px', zIndex: 10000, maxHeight: 'min(420px, calc(100vh - 16px))' }"
+      class="bg-popover text-popover-foreground w-56 max-w-[calc(100vw-16px)] rounded-xl p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
       @mouseenter="onSubMouseEnter"
       @mouseleave="onSubMouseLeave"
     >
