@@ -82,18 +82,18 @@ jobs:
           shared-key: release-${{ matrix.target }}
           cache-on-failure: true
 
-      - name: Generate release notes
+      - name: Resolve release notes
         id: release-notes
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.release-tag.outputs.tag }}
+          RELEASE_BODY: ${{ github.event.release.body }}
         run: |
-          BODY="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="$TAG" \
-            --jq '.body' 2>/dev/null || true)"
-          if [ -z "$BODY" ]; then
-            BODY="DBX ${TAG}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BODY="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body' 2>/dev/null || true)"
+          else
+            BODY="${RELEASE_BODY:-}"
           fi
           DELIM="RELEASE_NOTES_$(date +%s%N)"
           {
@@ -157,3 +157,59 @@ jobs:
 
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
           gh release upload "${env:TAG}" $zipName --repo "${env:GITHUB_REPOSITORY}" --clobber
+
+  finalize-updater-manifest:
+    name: Finalize updater manifest
+    runs-on: ubuntu-22.04
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: release-tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$TAG" =~ ^v[0-9]+(\.[0-9]+){1,2}.*$ ]]; then
+            echo "::error::Release tag '$TAG' must start with v and a numeric version, for example v0.5.29."
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release notes
+        id: release-notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release-tag.outputs.tag }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BODY="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body' 2>/dev/null || true)"
+          else
+            BODY="${RELEASE_BODY:-}"
+          fi
+          NOTES_PATH="${RUNNER_TEMP}/release-notes.md"
+          printf '%s' "$BODY" > "$NOTES_PATH"
+          echo "path=$NOTES_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Apply release notes to latest.json
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release-tag.outputs.tag }}
+          NOTES_PATH: ${{ steps.release-notes.outputs.path }}
+        run: |
+          WORK_DIR="${RUNNER_TEMP}/latest-json"
+          mkdir -p "$WORK_DIR"
+          gh release download "$TAG" --repo "${GITHUB_REPOSITORY}" --pattern latest.json --dir "$WORK_DIR"
+          node .github/scripts/apply-release-notes-to-latest-json.mjs "$WORK_DIR/latest.json" "$NOTES_PATH"
+          gh release upload "$TAG" "$WORK_DIR/latest.json" --repo "${GITHUB_REPOSITORY}" --clobber

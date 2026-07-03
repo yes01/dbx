@@ -30,6 +30,7 @@ import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/z
 import { isLocalFileTypeDb } from "@/lib/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mqPinnedVersionOptions";
 import { mongodbAuthFailureHint, mongoUrlParam, setMongoUrlParam } from "@/lib/mongoConnectionOptions";
+import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/mysqlConnectionOptions";
 import { copyToClipboard } from "@/lib/clipboard";
 import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
 import { prestoSqlBuiltinDriverPaths } from "@/lib/prestoSqlBuiltinDriver";
@@ -1339,6 +1340,13 @@ const supportsCaCertificatePath = computed(() => form.value.db_type === "clickho
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch");
 const bareMysqlProfiles = new Set(["doris", "starrocks", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
+const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
+const mysqlCleartextPasswordAuth = computed({
+  get: () => mysqlCleartextPasswordAuthEnabled(form.value.url_params),
+  set: (value: boolean) => {
+    form.value.url_params = setMysqlCleartextPasswordAuthEnabled(form.value.url_params, value);
+  },
+});
 const mysqlTlsMode = computed({
   get: () => mysqlTlsModeFromParams(form.value.url_params, form.value.ssl),
   set: (value: string) => {
@@ -3855,6 +3863,16 @@ function openExternalUrl(url: string) {
                 </template>
 
                 <template v-if="supportsMysqlTlsOptions">
+                  <div v-if="supportsMysqlCleartextPasswordAuth" class="grid grid-cols-4 items-start gap-4">
+                    <Label class="pt-1 text-right text-xs">{{ t("connection.mysqlCleartextPasswordAuth") }}</Label>
+                    <div class="col-span-3 flex min-w-0 items-start justify-between gap-4">
+                      <p class="min-w-0 text-[11px] leading-4 text-muted-foreground break-words">
+                        {{ t("connection.mysqlCleartextPasswordAuthHint") }}
+                      </p>
+                      <Switch v-model="mysqlCleartextPasswordAuth" class="mt-0.5 shrink-0" />
+                    </div>
+                  </div>
+
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label class="text-right text-xs">{{ t("connection.mysqlTlsMode") }}</Label>
                     <Select v-model="mysqlTlsMode">
