@@ -1017,6 +1017,11 @@ export default {
   connectionGroup: {
     createGroup: "New Group",
     groupNamePlaceholder: "Group name",
+    selectConnection: "Select connection",
+    deselectConnection: "Deselect connection",
+    selectAllConnections: "Select all connections",
+    deselectAllConnections: "Deselect all connections",
+    exitMultiSelect: "Exit selection",
     renameGroup: "Rename Group",
     deleteGroup: "Delete Group",
     moveToGroup: "Move to Group",

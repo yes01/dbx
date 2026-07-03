@@ -921,6 +921,11 @@ export default {
     newGroupDefault: "新群組",
     deleteGroupConfirmTitle: "刪除群組",
     deleteGroupConfirmMessage: "刪除群組「{name}」？其中的連線將移到頂層。",
+    selectConnection: "選擇連接",
+    deselectConnection: "取消選擇連接",
+    selectAllConnections: "全選連接",
+    deselectAllConnections: "取消全選連接",
+    exitMultiSelect: "退出多選",
   },
   databaseSearch: {
     title: "搜尋資料庫",

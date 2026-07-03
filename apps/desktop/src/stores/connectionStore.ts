@@ -161,6 +161,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const selectedTreeNodeId = ref<string | null>(null);
   const selectedTreeNodeIds = ref<string[]>([]);
   const treeSelectionAnchorId = ref<string | null>(null);
+  const connectionMultiSelectActive = ref(false);
   const treeClipboard = ref<TreeClipboardTableStructure | null>(null);
 
   watch(activeConnectionId, (id) => {
@@ -3818,6 +3819,7 @@ export const useConnectionStore = defineStore("connection", () => {
     selectedTreeNodeId,
     selectedTreeNodeIds,
     treeSelectionAnchorId,
+    connectionMultiSelectActive,
     treeClipboard,
     treeNodes,
     removeTreeNode,

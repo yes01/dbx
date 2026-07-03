@@ -973,6 +973,11 @@ export default {
     newGroupDefault: "新しいグループ",
     deleteGroupConfirmTitle: "グループを削除",
     deleteGroupConfirmMessage: "グループ「{name}」を削除しますか？グループ内の接続はトップレベルに移動されます。",
+    selectConnection: "接続を選択",
+    deselectConnection: "接続の選択を解除",
+    selectAllConnections: "すべての接続を選択",
+    deselectAllConnections: "すべての接続の選択を解除",
+    exitMultiSelect: "複数選択を終了",
   },
   databaseSearch: {
     title: "データベース検索",

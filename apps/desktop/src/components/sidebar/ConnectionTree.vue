@@ -435,6 +435,7 @@ function clearSidebarSelection() {
   // Clicking the blank area of the tree clears the current selection. Row
   // clicks call event.stopPropagation(), so this only fires for blank clicks
   // (issue #681 — selection wasn't cleared in double-click activation mode).
+  store.connectionMultiSelectActive = false;
   store.selectedTreeNodeId = null;
   store.selectedTreeNodeIds = [];
   store.treeSelectionAnchorId = null;

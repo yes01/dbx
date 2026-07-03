@@ -940,6 +940,11 @@ export default {
     newGroupDefault: "Novo Grupo",
     deleteGroupConfirmTitle: "Excluir Grupo",
     deleteGroupConfirmMessage: 'Excluir o grupo "{name}"? As conexões dentro dele serão movidas para o nível superior.',
+    selectConnection: "Selecionar conexão",
+    deselectConnection: "Desmarcar conexão",
+    selectAllConnections: "Selecionar todas as conexões",
+    deselectAllConnections: "Desmarcar todas as conexões",
+    exitMultiSelect: "Sair da seleção múltipla",
   },
   databaseSearch: {
     title: "Pesquisar no Banco de Dados",

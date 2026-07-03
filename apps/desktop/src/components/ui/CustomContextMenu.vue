@@ -23,6 +23,10 @@ defineEmits<{
   close: [];
 }>();
 
+defineSlots<{
+  default(props: { onContextMenu: (event: MouseEvent) => void }): any;
+}>();
+
 // ---- module-level singleton state ----
 const openMenus = new Set<() => void>();
 let globalSetup = false;
@@ -261,7 +265,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <slot :on-context-menu="onContextMenu" />
+  <slot :onContextMenu="onContextMenu" />
   <!-- Main menu -->
   <Teleport to="body">
     <div v-if="show" ref="menuRef" :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }" class="bg-popover text-popover-foreground min-w-40 rounded-xl p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg">

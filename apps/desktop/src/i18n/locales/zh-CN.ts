@@ -1016,6 +1016,11 @@ export default {
   connectionGroup: {
     createGroup: "新建分组",
     groupNamePlaceholder: "分组名称",
+    selectConnection: "选择连接",
+    deselectConnection: "取消选择连接",
+    selectAllConnections: "全选连接",
+    deselectAllConnections: "取消全选连接",
+    exitMultiSelect: "退出多选",
     renameGroup: "重命名分组",
     deleteGroup: "删除分组",
     moveToGroup: "移至分组",
