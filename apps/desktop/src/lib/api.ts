@@ -362,6 +362,13 @@ export const mqRawRequest = forward("mqRawRequest");
 // MongoDB
 export const mongoListDatabases = forward("mongoListDatabases");
 export const mongoListCollections = forward("mongoListCollections");
+export const documentListGridFsBuckets = forward("documentListGridFsBuckets");
+export const documentCreateGridFsBucket = forward("documentCreateGridFsBucket");
+export const documentDeleteGridFsBucket = forward("documentDeleteGridFsBucket");
+export const documentListGridFsFiles = forward("documentListGridFsFiles");
+export const documentDownloadGridFsFile = forward("documentDownloadGridFsFile");
+export const documentUploadGridFsFile = forward("documentUploadGridFsFile");
+export const documentDeleteGridFsFile = forward("documentDeleteGridFsFile");
 export const mongoCreateDatabase = forward("mongoCreateDatabase");
 export const mongoDropDatabase = forward("mongoDropDatabase");
 export const mongoDropCollection = forward("mongoDropCollection");

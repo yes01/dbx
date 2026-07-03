@@ -501,6 +501,9 @@ export type TreeNodeType =
   | "etcd-root"
   | "zookeeper-root"
   | "mongo-db"
+  | "mongo-gridfs"
+  | "mongo-buckets"
+  | "mongo-bucket"
   | "mongo-collection"
   | "vector-collection"
   | "elasticsearch-index";
@@ -623,7 +626,7 @@ export interface QueryTab {
   executionId?: string;
   isExplaining?: boolean;
   explainExecutionId?: string;
-  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users";
+  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users";
   mqTenant?: string;
   nacosNamespace?: string;
   nacosNamespaceName?: string;
@@ -663,6 +666,9 @@ export interface QueryTab {
   };
   querySourceColumns?: Array<string | undefined>;
   queryEditabilityReason?: "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
+  mongoBucket?: {
+    bucketName: string;
+  };
   resultEvicted?: boolean;
   whereInput?: string;
   previewSql?: string;
@@ -706,4 +712,6 @@ export interface CollectionInfo {
   name: string;
   id: string;
   dimension?: number;
+  kind?: "collection" | "bucket";
+  bucketName?: string;
 }
