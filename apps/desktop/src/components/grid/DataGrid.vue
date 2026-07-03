@@ -9024,6 +9024,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .data-grid-topbar {
   --data-grid-topbar-transition-duration: 340ms;
   --data-grid-topbar-transition-easing: cubic-bezier(0.22, 1, 0.36, 1);
+  --data-grid-condition-font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   min-width: 760px;
   transition: min-width var(--data-grid-topbar-transition-duration) var(--data-grid-topbar-transition-easing);
 }
@@ -9038,8 +9039,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   max-width: 5rem;
   overflow: hidden;
   white-space: nowrap;
-  font-size: 0.75rem;
-  font-weight: 500;
+  font-family: var(--data-grid-condition-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.5rem;
   user-select: none;
   opacity: 1;
   transform: translateX(0);
@@ -9074,8 +9077,92 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .data-grid-topbar-condition-input,
 .data-grid-topbar-condition-measure {
-  font-size: 0.8125rem;
-  line-height: 1.125rem;
+  font-family: var(--data-grid-condition-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.875rem;
+  line-height: 1.5rem;
+  font-variant-ligatures: none;
+  font-feature-settings:
+    "liga" 0,
+    "calt" 0;
+}
+
+.data-grid-topbar-condition-input {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0 0.125rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: pre;
+  border: 0;
+  border-radius: 0;
+  appearance: none;
+  scrollbar-width: none;
+}
+
+.data-grid-topbar-condition-input::-webkit-scrollbar {
+  display: none;
+}
+
+.data-grid-topbar-condition-icon-control {
+  align-self: center;
+  margin-top: 0;
+}
+
+.data-grid-topbar-condition-floating-controls {
+  top: var(--data-grid-condition-controls-top);
+  will-change: transform;
+}
+
+.data-grid-topbar-condition-pane--expanded {
+  --data-grid-condition-font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  position: fixed;
+  z-index: 80;
+  right: auto;
+  bottom: auto;
+  box-sizing: border-box;
+  padding: 0.1875rem 0.5rem 0.1875rem 0.5rem;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--background) 96%, var(--muted) 4%);
+  box-shadow:
+    inset 0 -1px 0 var(--border),
+    0 8px 16px rgb(15 23 42 / 8%);
+  transition:
+    height 150ms ease,
+    box-shadow 150ms ease;
+  --data-grid-expanded-scrollbar-offset: 8px;
+  --data-grid-condition-controls-top: 0.125rem;
+  --data-grid-condition-input-top: 0.125rem;
+  --data-grid-condition-prefix-indent: 0px;
+  --data-grid-condition-suffix-width: 0px;
+}
+
+.data-grid-topbar-condition-input--expanded {
+  top: var(--data-grid-condition-input-top);
+  right: 0.5rem;
+  bottom: 0.125rem;
+  left: 0.5rem;
+  height: auto;
+  line-height: 1.5rem;
+  margin-left: 0;
+  width: calc(100% - 1rem + var(--data-grid-expanded-scrollbar-offset));
+  max-width: none;
+  margin-right: calc(-1 * var(--data-grid-expanded-scrollbar-offset));
+  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem 0.125rem;
+  text-indent: var(--data-grid-condition-prefix-indent);
+  overflow-x: hidden;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  scrollbar-width: thin;
+}
+
+.data-grid-topbar-condition-input--expanded::-webkit-scrollbar {
+  display: initial;
+  width: 8px;
 }
 
 .data-grid-topbar-condition-input::placeholder {
