@@ -53,6 +53,8 @@ const ACTIVE_TAB_KEY = "dbx-active-tab";
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
+const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
+type CloseConfirmContext = "tab" | "batch" | "app";
 
 function cloneTabDraft<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -1171,6 +1173,22 @@ export const useQueryStore = defineStore("query", () => {
     tab.executionId = undefined;
   }
 
+  function clearAcknowledgedCancelIfStillRunning(id: string, executionId: string) {
+    setTimeout(() => {
+      const current = tabs.value.find((t) => t.id === id);
+      if (!current || current.executionId !== executionId || !current.isCancelling) return;
+      current.isExecuting = false;
+      current.isCancelling = false;
+      current.executionId = undefined;
+      current.queryExecutionStartedAt = undefined;
+      current.result = toErrorResult(new Error("Query canceled"));
+      current.results = undefined;
+      current.activeResultIndex = undefined;
+      current.resultSessionId = undefined;
+      touchResult(current);
+    }, CANCEL_ACK_SETTLE_TIMEOUT_MS);
+  }
+
   async function executeCurrentTab() {
     const tab = tabs.value.find((t) => t.id === activeTabId.value);
     if (!tab || !tab.sql.trim()) return;
@@ -1996,6 +2014,9 @@ export const useQueryStore = defineStore("query", () => {
     tab.isCancelling = true;
     try {
       const canceled = await withCancelQueryTimeout(api.cancelQuery(executionId));
+      if (canceled) {
+        clearAcknowledgedCancelIfStillRunning(id, executionId);
+      }
       if (!canceled) {
         const current = tabs.value.find((t) => t.id === id);
         if (current && current.executionId === executionId) {
