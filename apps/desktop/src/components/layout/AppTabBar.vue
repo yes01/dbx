@@ -86,6 +86,30 @@ function closeOtherTabsFromTab(tab: QueryTab) {
   if (props.driverStoreOpen) emit("close-driver-store");
 }
 
+function isDirtyTab(tab: QueryTab) {
+  return queryStore.isTabDirty(tab);
+}
+
+function tabTitleLabel(tab: QueryTab) {
+  const title = tabDisplayTitle(tab, t);
+  return isDirtyTab(tab) ? `* ${title}` : title;
+}
+
+function tabTitleText(tab: QueryTab) {
+  return tabDisplayTitle(tab, t);
+}
+
+function tabTitleStyle(tab: QueryTab): CSSProperties | undefined {
+  if (!isDirtyTab(tab)) return undefined;
+  return {
+    fontStyle: "italic",
+    fontWeight: 700,
+    transform: "skewX(-8deg)",
+    transformOrigin: "left center",
+  };
+}
+}
+
 function closeAllTabsAndDriverStore() {
   queryStore.closeAllTabs();
   if (props.driverStoreOpen) emit("close-driver-store");
@@ -292,8 +316,8 @@ const showRegularTabOverflowControls = computed(() => regularTabs.value.length >
 const openTabMenuItems = computed(() =>
   queryStore.tabs.map((tab) => ({
     value: tab.id,
-    label: tabDisplayTitle(tab, t),
-    title: tabDisplayTitle(tab, t),
+    label: tabTitleLabel(tab),
+    title: tabTitleLabel(tab),
     icon: tabMenuIcon(tab),
     iconClass: tabIconClass(tab),
   })),
@@ -302,8 +326,8 @@ const openTabMenuItems = computed(() =>
 const fixedTabMenuItems = computed(() =>
   fixedTabs.value.map((tab) => ({
     value: tab.id,
-    label: tabDisplayTitle(tab, t),
-    title: tabDisplayTitle(tab, t),
+    label: tabTitleLabel(tab),
+    title: tabTitleLabel(tab),
     icon: tabMenuIcon(tab),
     iconClass: tabIconClass(tab),
   })),
@@ -440,7 +464,10 @@ function activateTab(tabId: string) {
                       @keydown.escape.prevent="cancelRenameTab"
                       @blur="commitRenameTab(tab)"
                     />
-                    <span v-else class="min-w-0 truncate flex-1">{{ tabDisplayTitle(tab, t) }}</span>
+                    <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                      <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                      <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                    </span>
                     <Tooltip v-if="isConnectionReadonly(tab.connectionId)">
                       <TooltipTrigger as-child>
                         <Lock class="h-3 w-3 text-muted-foreground shrink-0" />
@@ -564,7 +591,10 @@ function activateTab(tabId: string) {
                       @keydown.escape.prevent="cancelRenameTab"
                       @blur="commitRenameTab(tab)"
                     />
-                    <span v-else class="min-w-0 truncate flex-1 text-foreground">{{ tabDisplayTitle(tab, t) }}</span>
+                    <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
+                      <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                      <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                    </span>
                     <Tooltip v-if="isConnectionReadonly(tab.connectionId)">
                       <TooltipTrigger as-child>
                         <Lock class="h-3 w-3 text-muted-foreground shrink-0" />
@@ -641,6 +671,21 @@ function activateTab(tabId: string) {
 </template>
 
 <style scoped>
+.dirty-tab-marker {
+  display: inline-flex;
+  width: 0.5rem;
+  height: 0.75rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 12px;
+  opacity: 0.9;
+  transform: translateY(2px);
+}
+
 .app-tab-scroll::-webkit-scrollbar {
   display: none;
 }
