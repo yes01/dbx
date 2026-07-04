@@ -81,6 +81,63 @@ function cancelRenameTab() {
   editingTabId.value = null;
 }
 
+function closeOtherTabsFromTab(tab: QueryTab) {
+  queryStore.closeOtherTabs(tab.id);
+  if (props.driverStoreOpen) emit("close-driver-store");
+}
+
+function isDirtyTab(tab: QueryTab) {
+  return queryStore.isTabDirty(tab);
+}
+
+function tabTitleLabel(tab: QueryTab) {
+  const title = tabDisplayTitle(tab, t);
+  return isDirtyTab(tab) ? `* ${title}` : title;
+}
+
+function tabTitleText(tab: QueryTab) {
+  return tabDisplayTitle(tab, t);
+}
+
+function tabTitleStyle(tab: QueryTab): CSSProperties | undefined {
+  if (!isDirtyTab(tab)) return undefined;
+  return {
+    fontStyle: "italic",
+    fontWeight: 700,
+    transform: "skewX(-8deg)",
+    transformOrigin: "left center",
+  };
+}
+
+function closeAllTabsAndDriverStore() {
+  queryStore.closeAllTabs();
+  if (props.driverStoreOpen) emit("close-driver-store");
+}
+
+function getDriverStoreMenuItems(): ContextMenuItem[] {
+  return [
+    {
+      label: compactTabTitle.value ? t("contextMenu.fullTabTitle") : t("contextMenu.compactTabTitle"),
+      action: toggleCompactTabTitle,
+      icon: compactTabTitle.value ? Maximize2 : Minimize2,
+    },
+    { label: "", separator: true },
+    { label: t("contextMenu.closeTab"), action: () => emit("close-driver-store"), icon: X },
+    {
+      label: t("contextMenu.closeOtherTabs"),
+      action: () => queryStore.closeAllTabs(),
+      disabled: queryStore.tabs.length === 0,
+      icon: X,
+    },
+    {
+      label: t("contextMenu.closeAllTabs"),
+      action: closeAllTabsAndDriverStore,
+      variant: "destructive" as const,
+      icon: X,
+    },
+  ];
+}
+
 function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
   return [
     {
@@ -123,13 +180,13 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
     { label: t("contextMenu.closeTab"), action: () => queryStore.closeTab(tab.id), icon: X },
     {
       label: t("contextMenu.closeOtherTabs"),
-      action: () => queryStore.closeOtherTabs(tab.id),
-      disabled: queryStore.tabs.length <= 1,
+      action: () => closeOtherTabsFromTab(tab),
+      disabled: queryStore.tabs.length <= 1 && !props.driverStoreOpen,
       icon: X,
     },
     {
       label: t("contextMenu.closeAllTabs"),
-      action: () => queryStore.closeAllTabs(),
+      action: closeAllTabsAndDriverStore,
       variant: "destructive" as const,
       icon: X,
     },
@@ -258,8 +315,8 @@ const showRegularTabOverflowControls = computed(() => regularTabs.value.length >
 const openTabMenuItems = computed(() =>
   queryStore.tabs.map((tab) => ({
     value: tab.id,
-    label: tabDisplayTitle(tab, t),
-    title: tabDisplayTitle(tab, t),
+    label: tabTitleLabel(tab),
+    title: tabTitleLabel(tab),
     icon: tabMenuIcon(tab),
     iconClass: tabIconClass(tab),
   })),
@@ -268,8 +325,8 @@ const openTabMenuItems = computed(() =>
 const fixedTabMenuItems = computed(() =>
   fixedTabs.value.map((tab) => ({
     value: tab.id,
-    label: tabDisplayTitle(tab, t),
-    title: tabDisplayTitle(tab, t),
+    label: tabTitleLabel(tab),
+    title: tabTitleLabel(tab),
     icon: tabMenuIcon(tab),
     iconClass: tabIconClass(tab),
   })),
@@ -406,7 +463,10 @@ function activateTab(tabId: string) {
                       @keydown.escape.prevent="cancelRenameTab"
                       @blur="commitRenameTab(tab)"
                     />
-                    <span v-else class="min-w-0 truncate flex-1">{{ tabDisplayTitle(tab, t) }}</span>
+                    <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                      <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                      <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                    </span>
                     <Tooltip v-if="isConnectionReadonly(tab.connectionId)">
                       <TooltipTrigger as-child>
                         <Lock class="h-3 w-3 text-muted-foreground shrink-0" />
@@ -429,29 +489,33 @@ function activateTab(tabId: string) {
           </CustomContextMenu>
 
           <!-- Driver Store Tab -->
-          <div
-            v-if="driverStoreOpen"
-            data-driver-store-tab
-            class="group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
-            :class="
-              isClassicLayout
-                ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', driverStoreActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
-                : ['h-7 rounded-md border font-medium', driverStoreActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
-            "
-            :style="isClassicLayout && driverStoreActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
-            @click="emit('activate-driver-store')"
-          >
-            <span class="shrink-0 text-amber-600 dark:text-amber-400">
-              <Package class="h-3.5 w-3.5" />
-            </span>
-            <span class="min-w-0 truncate flex-1">{{ t("toolbar.driverManager") }}</span>
-            <span v-if="(agentDriverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
-              {{ (agentDriverUpdateCount ?? 0) > 99 ? "99+" : agentDriverUpdateCount }}
-            </span>
-            <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-driver-store')">
-              <X class="h-3 w-3" />
-            </button>
-          </div>
+          <CustomContextMenu v-if="driverStoreOpen" :items="getDriverStoreMenuItems()" v-slot="{ onContextMenu }">
+            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
+              <div
+                data-driver-store-tab
+                class="group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                :class="
+                  isClassicLayout
+                    ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', driverStoreActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
+                    : ['h-7 rounded-md border font-medium', driverStoreActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
+                "
+                :style="isClassicLayout && driverStoreActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
+                @click="emit('activate-driver-store')"
+                @mousedown.middle.prevent="emit('close-driver-store')"
+              >
+                <span class="shrink-0 text-amber-600 dark:text-amber-400">
+                  <Package class="h-3.5 w-3.5" />
+                </span>
+                <span class="min-w-0 truncate flex-1">{{ t("toolbar.driverManager") }}</span>
+                <span v-if="(agentDriverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
+                  {{ (agentDriverUpdateCount ?? 0) > 99 ? "99+" : agentDriverUpdateCount }}
+                </span>
+                <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-driver-store')">
+                  <X class="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          </CustomContextMenu>
           <div :class="tabTailDragRegionClass" data-tauri-drag-region />
         </div>
       </div>
@@ -526,7 +590,10 @@ function activateTab(tabId: string) {
                       @keydown.escape.prevent="cancelRenameTab"
                       @blur="commitRenameTab(tab)"
                     />
-                    <span v-else class="min-w-0 truncate flex-1 text-foreground">{{ tabDisplayTitle(tab, t) }}</span>
+                    <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
+                      <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                      <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                    </span>
                     <Tooltip v-if="isConnectionReadonly(tab.connectionId)">
                       <TooltipTrigger as-child>
                         <Lock class="h-3 w-3 text-muted-foreground shrink-0" />
@@ -603,6 +670,21 @@ function activateTab(tabId: string) {
 </template>
 
 <style scoped>
+.dirty-tab-marker {
+  display: inline-flex;
+  width: 0.5rem;
+  height: 0.75rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 12px;
+  opacity: 0.9;
+  transform: translateY(2px);
+}
+
 .app-tab-scroll::-webkit-scrollbar {
   display: none;
 }

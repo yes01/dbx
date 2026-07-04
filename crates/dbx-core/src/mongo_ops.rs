@@ -4,6 +4,28 @@ use crate::db::elasticsearch_driver;
 use crate::db::mongo_driver::{self, MongoDocumentResult};
 use crate::db::vector_driver;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoGridFsFileInfo {
+    pub id: String,
+    pub filename: Option<String>,
+    pub length: i64,
+    pub chunk_size: i32,
+    pub upload_date: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub md5: Option<String>,
+    pub content_type: Option<String>,
+    pub aliases: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoGridFsBucketInfo {
+    pub name: String,
+    pub file_count: u64,
+    pub total_bytes: i64,
+}
+
 fn sort_names(mut names: Vec<String>) -> Vec<String> {
     names.sort_by(|left, right| {
         let left_lower = left.to_lowercase();
@@ -62,6 +84,45 @@ fn mongo_list_databases_unauthorized(error: &str) -> bool {
 
 use crate::db::vector_driver::CollectionInfo;
 
+fn mongo_collection_info(name: String) -> CollectionInfo {
+    CollectionInfo {
+        name: name.clone(),
+        id: name,
+        dimension: None,
+        kind: Some("collection".to_string()),
+        bucket_name: None,
+    }
+}
+
+pub(crate) fn mongo_gridfs_bucket_names(names: &[String]) -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    let name_set: BTreeSet<&str> = names.iter().map(String::as_str).collect();
+    let bucket_names: Vec<String> = names
+        .iter()
+        .filter_map(|name| name.strip_suffix(".files"))
+        .filter(|prefix| name_set.contains(format!("{prefix}.chunks").as_str()))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    sort_names(bucket_names)
+}
+
+fn mongo_bucket_infos(names: &[String]) -> Vec<CollectionInfo> {
+    mongo_gridfs_bucket_names(names)
+        .into_iter()
+        .map(|bucket_name| CollectionInfo {
+            name: bucket_name.clone(),
+            id: format!("bucket:{bucket_name}"),
+            dimension: None,
+            kind: Some("bucket".to_string()),
+            bucket_name: Some(bucket_name),
+        })
+        .collect()
+}
+
 pub async fn mongo_list_collections_core(
     state: &AppState,
     connection_id: &str,
@@ -72,19 +133,145 @@ pub async fn mongo_list_collections_core(
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
             let names = sort_names(mongo_driver::list_collections(client, database).await?);
-            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None }).collect())
+            let mut infos = mongo_bucket_infos(&names);
+            infos.extend(names.into_iter().map(mongo_collection_info));
+            Ok(infos)
         }
         PoolKind::Elasticsearch(client) => {
             let names = sort_names(elasticsearch_driver::list_indices(client).await?);
-            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None }).collect())
+            Ok(names
+                .into_iter()
+                .map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None, kind: None, bucket_name: None })
+                .collect())
         }
         PoolKind::VectorDb(client) => vector_driver::list_collections(client).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let names = sort_names(client.mongo_list_collections(database).await?);
-            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None }).collect())
+            let mut infos = mongo_bucket_infos(&names);
+            infos.extend(names.into_iter().map(mongo_collection_info));
+            Ok(infos)
         }
         _ => Err("Not a MongoDB/Elasticsearch/vector connection".to_string()),
+    }
+}
+
+pub async fn mongo_list_gridfs_files_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    bucket: &str,
+) -> Result<Vec<MongoGridFsFileInfo>, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::list_gridfs_files(client, database, bucket).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS file browsing".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_list_gridfs_buckets_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<Vec<MongoGridFsBucketInfo>, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            let names = sort_names(mongo_driver::list_collections(client, database).await?);
+            let bucket_names = mongo_gridfs_bucket_names(&names);
+            let mut buckets = Vec::with_capacity(bucket_names.len());
+            for bucket_name in bucket_names {
+                buckets.push(mongo_driver::gridfs_bucket_summary(client, database, &bucket_name).await?);
+            }
+            Ok(buckets)
+        }
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS bucket browsing".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_create_gridfs_bucket_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    bucket: &str,
+) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::create_gridfs_bucket(client, database, bucket).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS bucket creation".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_delete_gridfs_bucket_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    bucket: &str,
+) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::delete_gridfs_bucket(client, database, bucket).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS bucket deletion".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_download_gridfs_file_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    bucket: &str,
+    file_id: &str,
+) -> Result<Vec<u8>, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::download_gridfs_file(client, database, bucket, file_id).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS download".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_upload_gridfs_file_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    bucket: &str,
+    file_name: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+) -> Result<String, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::upload_gridfs_file(client, database, bucket, file_name, data, content_type).await
+        }
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS uploads".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_delete_gridfs_file_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    bucket: &str,
+    file_id: &str,
+) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::delete_gridfs_file(client, database, bucket, file_id).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS file deletion".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
     }
 }
 

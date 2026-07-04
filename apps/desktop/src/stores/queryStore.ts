@@ -36,7 +36,7 @@ import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
 import { quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionContext, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
-import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
+import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { sortDataGridRows, type DataGridSortDirection } from "@/lib/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
@@ -53,6 +53,7 @@ const ACTIVE_TAB_KEY = "dbx-active-tab";
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
+const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
 
 function cloneTabDraft<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -658,6 +659,58 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openMongoBucket(connectionId: string, database: string, bucketName: string) {
+    const title = `${database}.${bucketName}`;
+    const existing = tabs.value.find((tab) => tab.mode === "mongo-bucket" && tab.connectionId === connectionId && tab.database === database && tab.mongoBucket?.bucketName === bucketName);
+    if (existing) {
+      activeTabId.value = existing.id;
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title,
+      connectionId,
+      database,
+      sql: bucketName,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mongo-bucket",
+      mongoBucket: {
+        bucketName,
+      },
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
+  function openMongoGridFs(connectionId: string, database: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "mongo-gridfs" && tab.connectionId === connectionId && tab.database === database);
+    if (existing) {
+      activeTabId.value = existing.id;
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: "GridFS",
+      connectionId,
+      database,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "mongo-gridfs",
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
   function openMqAdmin(connectionId: string, target?: { tenant?: string }) {
     const existing = tabs.value.find((tab) => tab.mode === "mq" && tab.connectionId === connectionId);
     if (existing) {
@@ -1169,6 +1222,22 @@ export const useQueryStore = defineStore("query", () => {
     tab.isCancelling = false;
     tab.queryExecutionStartedAt = undefined;
     tab.executionId = undefined;
+  }
+
+  function clearAcknowledgedCancelIfStillRunning(id: string, executionId: string) {
+    setTimeout(() => {
+      const current = tabs.value.find((t) => t.id === id);
+      if (!current || current.executionId !== executionId || !current.isCancelling) return;
+      current.isExecuting = false;
+      current.isCancelling = false;
+      current.executionId = undefined;
+      current.queryExecutionStartedAt = undefined;
+      current.result = toErrorResult(new Error("Query canceled"));
+      current.results = undefined;
+      current.activeResultIndex = undefined;
+      current.resultSessionId = undefined;
+      touchResult(current);
+    }, CANCEL_ACK_SETTLE_TIMEOUT_MS);
   }
 
   async function executeCurrentTab() {
@@ -1776,8 +1845,8 @@ export const useQueryStore = defineStore("query", () => {
         clientSession: Boolean(clientSessionId),
       });
       const executionPromise = api.executeMulti(tab.connectionId, tab.database, sqlToExecute, executionSchema, executionId, executionOptions);
-      const frontendTimeoutSecs = Math.max(queryTimeoutSecs * 2, 60);
-      const results = markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, queryTimeoutSecs === 0 ? 0 : frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs })));
+      const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs);
+      const results = markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs })));
       console.info("[DBX][executeTabSql:execute-multi:done]", {
         traceId,
         resultCount: results.length,
@@ -1996,6 +2065,9 @@ export const useQueryStore = defineStore("query", () => {
     tab.isCancelling = true;
     try {
       const canceled = await withCancelQueryTimeout(api.cancelQuery(executionId));
+      if (canceled) {
+        clearAcknowledgedCancelIfStillRunning(id, executionId);
+      }
       if (!canceled) {
         const current = tabs.value.find((t) => t.id === id);
         if (current && current.executionId === executionId) {
@@ -2402,6 +2474,8 @@ export const useQueryStore = defineStore("query", () => {
     updateEditorSelection,
     renameTab,
     openObjectBrowser,
+    openMongoGridFs,
+    openMongoBucket,
     openUserAdmin,
     openMqAdmin,
     openNacosAdmin,

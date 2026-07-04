@@ -11,7 +11,7 @@ mod data_grid_tdengine_sql;
 use data_grid_tdengine_sql::build_tdengine_data_grid_save_statements;
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::quote_table_identifier;
+use crate::sql_dialect::{quote_table_identifier, uses_single_row_insert_statements};
 use crate::transfer::{format_ch_array_sql_literal, format_pg_array_sql_literal};
 
 const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
@@ -321,6 +321,15 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
             )
         })
         .collect::<Vec<_>>();
+    if options.database_type.is_some_and(uses_single_row_insert_statements) {
+        return Some(
+            value_rows
+                .iter()
+                .map(|values| format!("INSERT INTO {table} ({columns}) VALUES {values};"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
     Some(format!(
         "INSERT INTO {table} ({columns}) VALUES{}{};",
         if value_rows.len() == 1 { " " } else { "\n" },
@@ -1827,6 +1836,28 @@ mod tests {
         assert_eq!(
             statement.as_deref(),
             Some("INSERT INTO `users` (`login_name`, `display_name`) VALUES\n('ada', 'Ada'),\n('linus', 'Linus');")
+        );
+    }
+
+    #[test]
+    fn oracle_copy_insert_statement_uses_one_statement_per_row() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            table_meta: Some(DataGridTableMeta {
+                schema: Some("APP".to_string()),
+                table_name: "USERS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: None,
+            }),
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
+            exclude_primary_keys: false,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\nINSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (2, 'Linus');")
         );
     }
 
