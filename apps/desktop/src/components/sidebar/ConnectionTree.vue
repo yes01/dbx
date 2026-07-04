@@ -4,10 +4,12 @@ import { useI18n } from "vue-i18n";
 import { Search, X, ListFilter, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { TreeNode, TreeNodeType } from "@/types/database";
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree } from "@/lib/sidebarSearchTree";
-import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
+import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/keyboardShortcuts";
+import { connectionPasteTargetGroupId, selectedConnectionClipboardNodes, selectedConnectionEditTarget } from "@/lib/sidebarConnectionSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebarTypeSearch";
 import { usesTreeSchemaMode } from "@/lib/databaseFeatureSupport";
 import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
@@ -21,6 +23,7 @@ import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 
 const { t } = useI18n();
+const { toast } = useToast();
 const store = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
@@ -33,6 +36,7 @@ const plainTreeScrollerRef = ref<HTMLElement | null>(null);
 const sidebarScrollbarTrackRef = ref<HTMLElement | null>(null);
 type SearchScope = "connection" | "database" | "schema" | "table" | "view";
 const selectedSearchScopes = ref<SearchScope[]>([]);
+const rootRef = ref<HTMLElement>();
 const searchCollapsedIds = ref<Set<string>>(new Set());
 const searchRefreshedNodeIds = new Set<string>();
 let searchTimer: number | undefined;
@@ -771,7 +775,32 @@ function focusSearchAtEnd() {
 }
 
 function onWindowKeydown(event: KeyboardEvent) {
-  if (!pointerInsideTree.value || event.defaultPrevented || isEditableSidebarTypeSearchTarget(event.target)) return;
+  if (event.defaultPrevented) return;
+  if (sidebarShortcutTargetIsActive(event.target)) {
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isEditConnectionShortcut(event)) {
+      if (requestSelectedConnectionEdit()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isCopySidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      if (copySelectedSidebarNames()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isPasteSidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      if (requestSelectedSidebarPaste()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+  }
+
+  if (!pointerInsideTree.value || isEditableSidebarTypeSearchTarget(event.target)) return;
   if (isCancelSearchShortcut(event)) {
     if (!searchQuery.value) return;
     event.preventDefault();
@@ -784,6 +813,63 @@ function onWindowKeydown(event: KeyboardEvent) {
   event.preventDefault();
   searchQuery.value = nextQuery;
   focusSearchAtEnd();
+}
+
+function sidebarShortcutTargetIsActive(target: EventTarget | null): boolean {
+  const root = rootRef.value;
+  if (!root) return false;
+  if (target instanceof Node && root.contains(target)) return true;
+  const active = document.activeElement;
+  return pointerInsideTree.value && (!active || active === document.body || root.contains(active));
+}
+
+function sidebarShortcutTargetAllowsAppShortcut(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return true;
+  return !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable || !!target.closest("[contenteditable='true'], [role='textbox']"));
+}
+
+function selectedSidebarNodesInVisibleOrder(): TreeNode[] {
+  const selectedIds = new Set(store.selectedTreeNodeIds);
+  return visibleNodes.value.filter((node) => selectedIds.has(node.id));
+}
+
+function isEditConnectionShortcut(event: KeyboardEvent): boolean {
+  return isEditSidebarConnectionShortcut(event, settingsStore.editorSettings.shortcuts);
+}
+
+function requestSelectedConnectionEdit(): boolean {
+  const selectedNodeId = store.selectedTreeNodeId;
+  const currentNode = selectedNodeId ? visibleNodes.value.find((node) => node.id === selectedNodeId) : null;
+  if (!currentNode) return false;
+  const editTarget = selectedConnectionEditTarget(currentNode, selectedSidebarNodesInVisibleOrder());
+  if (!editTarget) return false;
+  store.startEditing(editTarget.connectionId);
+  return true;
+}
+
+function copySelectedSidebarNames(): boolean {
+  const nodes = selectedSidebarNodesInVisibleOrder();
+  if (nodes.length === 0) return false;
+  const connectionNodes = selectedConnectionClipboardNodes(nodes);
+  if (connectionNodes.length === 0) return false;
+  const copiedCount = store.copyConnectionsToTreeClipboard(connectionNodes.map((node) => node.connectionId));
+  if (copiedCount > 0) toast(t("connection.copied"), 2000);
+  return copiedCount > 0;
+}
+
+function requestSelectedSidebarPaste(): boolean {
+  const clipboard = store.treeClipboard;
+  const selectedNodeId = store.selectedTreeNodeId;
+  if (clipboard?.kind !== "connection-copy") return false;
+  const selectedNode = selectedNodeId ? visibleNodes.value.find((node) => node.id === selectedNodeId) : null;
+  const targetGroupId = connectionPasteTargetGroupId(selectedNode, (connectionId) => store.groupIdForConnection(connectionId));
+  void store
+    .pasteConnectionClipboard(targetGroupId)
+    .then((count) => {
+      if (count > 0) toast(count > 1 ? t("connection.duplicatedSelected", { count }) : t("connection.duplicated"), 2000);
+    })
+    .catch((e: any) => toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000));
+  return true;
 }
 
 onMounted(() => {
@@ -802,7 +888,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
 </script>
 
 <template>
-  <div class="h-full min-h-0 flex flex-col text-sm select-none" @pointerenter="pointerInsideTree = true" @pointerleave="pointerInsideTree = false">
+  <div ref="rootRef" class="h-full min-h-0 flex flex-col text-sm select-none" @pointerenter="pointerInsideTree = true" @pointerleave="pointerInsideTree = false">
     <div class="sticky top-0 z-10 bg-background px-2 py-1">
       <div class="relative flex items-center gap-1">
         <div class="relative flex-1">
