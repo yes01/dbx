@@ -1758,7 +1758,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const children = [
         {
           id: `${nodeId}:__gridfs`,
-          label: i18n.global.t("tree.gridfs"),
+          label: "tree.gridfs",
           type: "mongo-gridfs" as const,
           connectionId,
           database,

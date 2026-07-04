@@ -784,6 +784,9 @@ fn json_value_to_bson(value: &serde_json::Value) -> Bson {
                 if let Some(date) = parse_extended_json_date(obj) {
                     return Bson::DateTime(date);
                 }
+                if let Some(value) = parse_extended_json_number_long(obj) {
+                    return Bson::Int64(value);
+                }
             }
             let doc: Document = obj.iter().map(|(k, v)| (k.clone(), json_value_to_bson(v))).collect();
             Bson::Document(doc)
@@ -842,6 +845,14 @@ fn parse_extended_json_date(obj: &serde_json::Map<String, serde_json::Value>) ->
             Some(serde_json::Value::Number(value)) => value.as_i64().map(DateTime::from_millis),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+fn parse_extended_json_number_long(obj: &serde_json::Map<String, serde_json::Value>) -> Option<i64> {
+    match obj.get("$numberLong")? {
+        serde_json::Value::String(value) => value.parse::<i64>().ok(),
+        serde_json::Value::Number(value) => value.as_i64(),
         _ => None,
     }
 }
@@ -1129,7 +1140,7 @@ mod tests {
             "created_at": { "$date": "2026-06-10T13:59:31.287Z" },
             "count": { "$numberLong": "42" },
         });
-        let doc = json_object_to_document_extended_json(&value).unwrap();
+        let doc = json_object_to_document(&value).unwrap();
 
         assert!(matches!(doc.get("_id"), Some(Bson::ObjectId(oid)) if oid.to_hex() == "507f1f77bcf86cd799439011"));
         assert!(matches!(doc.get("created_at"), Some(Bson::DateTime(_))));

@@ -1738,7 +1738,7 @@ export async function documentDeleteGridFsBucket(connectionId: string, database:
 }
 
 export async function documentDownloadGridFsFile(connectionId: string, database: string, bucket: string, fileId: string): Promise<Uint8Array> {
-  const res = await fetch(apiUrl("/api/document-store/download-gridfs-file"), {
+  const res = await fetch("/api/document-store/download-gridfs-file", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ connectionId, database, bucket, fileId }),
@@ -1758,7 +1758,7 @@ export async function documentUploadGridFsFile(connectionId: string, database: s
   const bytes = new Uint8Array(data.byteLength);
   bytes.set(data);
   body.append("file", new Blob([bytes], { type: contentType || "application/octet-stream" }), fileName);
-  const res = await fetch(apiUrl("/api/document-store/upload-gridfs-file"), {
+  const res = await fetch("/api/document-store/upload-gridfs-file", {
     method: "POST",
     body,
   });
