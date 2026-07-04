@@ -54,7 +54,6 @@ const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanba
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
-type CloseConfirmContext = "tab" | "batch" | "app";
 
 function cloneTabDraft<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;

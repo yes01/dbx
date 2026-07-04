@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
 use crate::sql::find_statement_at_cursor;
-use crate::sql_dialect::{pagination_strategy, quote_table_identifier, PaginationContext, TablePaginationStrategy};
+use crate::sql_dialect::{
+    firebird_rows_clause, pagination_strategy, quote_table_identifier, PaginationContext, TablePaginationStrategy,
+};
 use sqlparser::ast::{Expr, GroupByExpr, SelectItem, SetExpr, Statement};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -187,6 +189,7 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
             .unwrap_or_else(|| err("unsupported")),
         TablePaginationStrategy::QuestDbLimit => ok(add_questdb_limit(&statement, safe_limit, safe_offset)),
         TablePaginationStrategy::InformixFirst => ok(add_informix_first_limit(&statement, safe_limit, safe_offset)),
+        TablePaginationStrategy::FirebirdRows => ok(add_firebird_rows_limit(&statement, safe_limit, safe_offset)),
         TablePaginationStrategy::Db2FetchFirst | TablePaginationStrategy::FetchFirst => {
             ok(add_fetch_first_limit(&statement, safe_limit, safe_offset))
         }
@@ -562,6 +565,26 @@ fn has_top_level_informix_row_limit(sql: &str) -> bool {
     tokens[select_index + 1..from_index].iter().any(|token| token.text == "FIRST" || token.text == "SKIP")
 }
 
+fn has_top_level_firebird_row_limit(sql: &str) -> bool {
+    if has_top_level_fetch_first(sql) {
+        return true;
+    }
+    let tokens = top_level_sql_tokens(sql);
+    if tokens.iter().any(|token| token.text == "ROWS") {
+        return true;
+    }
+    let Some(select_index) = tokens.iter().position(|token| token.text == "SELECT") else {
+        return false;
+    };
+    let from_index = tokens
+        .iter()
+        .enumerate()
+        .find(|(index, token)| *index > select_index && token.text == "FROM")
+        .map(|(index, _)| index)
+        .unwrap_or(tokens.len());
+    tokens[select_index + 1..from_index].iter().any(|token| token.text == "FIRST" || token.text == "SKIP")
+}
+
 fn has_top_level_fetch_first(sql: &str) -> bool {
     let tokens = top_level_sql_tokens(sql);
     tokens.windows(2).any(|w| w[0].text == "FETCH" && w[1].text == "FIRST")
@@ -592,6 +615,14 @@ fn add_fetch_first_limit(statement: &str, limit: usize, offset: usize) -> String
     }
     let offset_sql = if offset > 0 { format!(" OFFSET {offset} ROWS") } else { String::new() };
     append_sql_suffix(statement, &format!("{offset_sql} FETCH FIRST {limit} ROWS ONLY;"))
+}
+
+fn add_firebird_rows_limit(statement: &str, limit: usize, offset: usize) -> String {
+    if has_top_level_firebird_row_limit(statement) {
+        return format!("{statement};");
+    }
+    let rows = firebird_rows_clause(limit, offset);
+    append_sql_suffix(statement, &format!("{rows};"))
 }
 
 fn add_rownum_limit(statement: &str, limit: usize, offset: usize) -> String {

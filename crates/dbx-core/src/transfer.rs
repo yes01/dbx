@@ -3488,7 +3488,7 @@ where
 
     let total_tables = request.tables.len();
     let pg_compat_transfer = is_postgres_compat_transfer(source_db_type, target_db_type);
-    let ResolvedTransferTargetTable { name: target_table, preexisting: mut target_table_preexisting } =
+    let ResolvedTransferTargetTable { name: target_table, preexisting: target_table_preexisting } =
         resolve_transfer_target_table_name(state, request, table, target_pool_key, target_db_type).await;
     let preserves_target_table_name = target_table == table;
 

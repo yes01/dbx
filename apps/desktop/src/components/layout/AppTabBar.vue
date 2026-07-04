@@ -108,7 +108,6 @@ function tabTitleStyle(tab: QueryTab): CSSProperties | undefined {
     transformOrigin: "left center",
   };
 }
-}
 
 function closeAllTabsAndDriverStore() {
   queryStore.closeAllTabs();

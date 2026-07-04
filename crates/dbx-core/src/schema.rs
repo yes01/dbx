@@ -1725,13 +1725,12 @@ mod tests {
         clickhouse_metadata_database, deduplicate_column_infos, filter_mysql_system_databases_for_config,
         filter_table_infos, filter_visible_schema_names, is_agent_postgres_metadata_fallback_config,
         is_retryable_metadata_error, mysql_object_source_sql, mysql_table_metadata_catalog,
-        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
-        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
-        oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
-        oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_columns_from_query_result,
-        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
-        presto_like_tables_from_query_result, visible_schema_filter,
+        normalize_information_schema_table_type, oracle_object_statistics_dba_segments_sql,
+        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
+        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_from_query_result,
+        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
+        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, visible_schema_filter,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{

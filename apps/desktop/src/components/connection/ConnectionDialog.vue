@@ -314,6 +314,7 @@ const dremioConnectionUrls = ref<Record<DremioConnectionMode, string>>({
   legacy: DREMIO_LEGACY_JDBC_URL,
 });
 const dialogStep = ref<DialogStep>("select");
+const connectionLabelClass = "text-right";
 const dbPickerView = ref<DbPickerView>("icon");
 const dbSearchQuery = ref("");
 const configTab = ref<ConfigTab>("connection");

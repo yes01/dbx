@@ -11,10 +11,7 @@ mod data_grid_tdengine_sql;
 use data_grid_tdengine_sql::build_tdengine_data_grid_save_statements;
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{
-    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_single_row_insert_statements,
-    TablePaginationStrategy,
-};
+use crate::sql_dialect::{quote_table_identifier, uses_single_row_insert_statements};
 use crate::transfer::{format_ch_array_sql_literal, format_pg_array_sql_literal};
 
 const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
