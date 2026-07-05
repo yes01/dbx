@@ -28,6 +28,12 @@ describe("tableStructureEditorState", () => {
     expect(dataTypeLengthInputValue("mysql", "set('manual','auto')")).toBe("");
   });
 
+  it("does not expose Oracle-like integer display widths as editable length", () => {
+    expect(isDataTypeLengthDisabled("oracle", "integer")).toBe(true);
+    expect(dataTypeLengthInputValue("dameng", "integer(11)")).toBe("");
+    expect(combineDataTypeForDatabase("oceanbase-oracle", "integer", "11")).toBe("integer");
+  });
+
   it("strips SQL Server metadata parentheses from editable defaults", () => {
     const drafts = createColumnDrafts(
       [

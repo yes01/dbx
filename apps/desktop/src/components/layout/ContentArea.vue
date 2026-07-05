@@ -65,6 +65,7 @@ import { chartableColumnIndexes } from "@/lib/chartData";
 import type { SqlExecutionOverride } from "@/lib/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGridSort";
 import { useTabScroll } from "@/composables/useTabScroll";
+import { formatElapsedSeconds } from "@/lib/elapsedTime";
 import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
 import type { SqlFormatDialect } from "@/lib/sqlFormatter";
 
@@ -132,7 +133,7 @@ const emit = defineEmits<{
   viewTableData: [tableName: string];
   viewTableDdl: [tableName: string];
   editTableStructure: [tableName: string];
-  openObjectTable: [target: { tableName: string; schema?: string }];
+  openObjectTable: [target: { tableName: string; schema?: string; tableType?: string }];
   objectSchemaChange: [schema: string | undefined];
   structureEditorSaved: [commentChanged: boolean];
   structureEditorClose: [];
@@ -346,7 +347,7 @@ function startQueryRunningElapsedTimer() {
   queryRunningElapsedTimer = setInterval(updateQueryRunningElapsed, 100);
 }
 
-const queryRunningElapsedSeconds = computed(() => (queryRunningElapsed.value / 1000).toFixed(1));
+const queryRunningElapsedSeconds = computed(() => formatElapsedSeconds(queryRunningElapsed.value));
 
 watch(() => [props.activeTab.id, props.activeTab.isExecuting, props.activeTab.queryExecutionStartedAt] as const, startQueryRunningElapsedTimer, { immediate: true });
 

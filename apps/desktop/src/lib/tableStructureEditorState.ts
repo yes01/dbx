@@ -421,6 +421,8 @@ export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
   "xml",
 ];
 
+export const ORACLE_LIKE_TYPE_LENGTH_DISABLES: string[] = ["binary_double", "binary_float", "bigint", "boolean", "bool", "byte", "date", "double", "double precision", "float", "integer", "int", "long", "long raw", "nclob", "real", "smallint", "text", "tinyint"];
+
 export function parseExtraToColumnExtra(extra: string | null | undefined, databaseType?: DatabaseType): ColumnExtra {
   const result: ColumnExtra = {};
   if (!extra) return result;
@@ -799,6 +801,10 @@ function isMysqlLikeStructureType(dbType: DatabaseType | undefined): boolean {
   return dbType === "mysql" || dbType === "doris" || dbType === "starrocks" || dbType === "goldendb" || dbType === "sundb" || dbType === "databend";
 }
 
+function isOracleLikeStructureType(dbType: DatabaseType | undefined): boolean {
+  return dbType === "oracle" || dbType === "dameng" || dbType === "oceanbase-oracle" || dbType === "iris" || dbType === "yashandb" || dbType === "xugu";
+}
+
 function isValidTemporalPrecision(dbType: DatabaseType | undefined, params: string): boolean {
   if (!/^\d+$/.test(params)) return false;
   const value = Number(params);
@@ -823,6 +829,9 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
     return key !== "bit" && key !== "float_vector";
   } else if (_dbType === "postgres" || _dbType === "gaussdb" || _dbType === "kwdb" || _dbType === "opengauss" || _dbType === "highgo" || _dbType === "vastbase" || _dbType === "kingbase") {
     return POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
+  } else if (isOracleLikeStructureType(_dbType)) {
+    // Dameng/Oracle integer aliases have fixed precision; MySQL-style display widths generate invalid DDL.
+    return ORACLE_LIKE_TYPE_LENGTH_DISABLES.includes(key);
   } else if (isMysqlLikeStructureType(_dbType)) {
     return key === "enum" || key === "set";
   } else {

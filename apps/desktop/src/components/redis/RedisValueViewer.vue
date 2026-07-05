@@ -815,7 +815,7 @@ onBeforeUnmount(() => {
       <!-- Header -->
       <div class="shrink-0 border-b bg-background">
         <div class="flex h-9 items-center gap-2 px-4">
-          <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ data.key_display }}</span>
+          <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="load"><RefreshCw class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" @click="copyInsertStatement"><Terminal class="h-3.5 w-3.5" /></Button>

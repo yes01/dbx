@@ -757,6 +757,27 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
 }
 
 #[test]
+fn oracle_like_add_integer_column_drops_display_width() {
+    let mut id = column("id");
+    id.data_type = "integer(11)".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "users".to_string(),
+        columns: vec![id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"APP\".\"users\" ADD (\"id\" integer);"]);
+}
+
+#[test]
 fn builds_postgres_create_table_with_comments_and_index() {
     let mut id = column("id");
     id.data_type = "integer".to_string();

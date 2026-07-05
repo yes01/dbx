@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canEditRedisMemberDetail, clampRedisMemberDetailSheetWidth, formatRedisCommandResult, formatRedisMemberDetail, formatRedisStringValue, getRedisMemberSelectionKey, highlightRedisJsonDetail, parseRedisJsonDetail } from "../../apps/desktop/src/lib/redisValuePresentation.ts";
+import { canEditRedisMemberDetail, clampRedisMemberDetailSheetWidth, formatRedisCommandResult, formatRedisMemberDetail, formatRedisStringValue, getRedisMemberSelectionKey, highlightRedisJsonDetail, parseRedisJsonDetail, sanitizeRedisDisplayText } from "../../apps/desktop/src/lib/redisValuePresentation.ts";
 
 test("formats JSON object strings for Redis member details", () => {
   const detail = formatRedisMemberDetail('{"id":1,"name":"Ada","tags":["dbx","redis"]}');
@@ -15,6 +15,15 @@ test("keeps plain Redis member strings unchanged", () => {
 
   assert.equal(detail.format, "text");
   assert.equal(detail.text, "plain long member value");
+});
+
+test("sanitizes Redis display text while preserving raw text", () => {
+  const detail = formatRedisMemberDetail("ok\u0000bad\u007f\nnext");
+
+  assert.equal(detail.format, "text");
+  assert.equal(detail.text, "okbad\nnext");
+  assert.equal(detail.rawText, "ok\u0000bad\u007f\nnext");
+  assert.equal(sanitizeRedisDisplayText("a\u0001b\tc"), "ab\tc");
 });
 
 test("formats JSON string values without changing plain strings", () => {

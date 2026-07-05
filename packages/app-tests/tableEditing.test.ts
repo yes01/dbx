@@ -124,6 +124,8 @@ test("keeps TDengine existing row identity and tag columns read-only", () => {
 test("detects the synthetic Oracle ROWID key case", () => {
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN]), true);
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN.toLowerCase()]), true);
+  assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "VIEW"), false);
+  assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "MATERIALIZED_VIEW"), false);
   assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN]), false);
   assert.equal(usesSyntheticRowIdKey("oracle", ["ID"]), false);
   assert.equal(usesSyntheticRowIdKey("neo4j", [DBX_NEO4J_ELEMENT_ID_COLUMN]), true);
@@ -131,6 +133,7 @@ test("detects the synthetic Oracle ROWID key case", () => {
 
 test("hides only the synthetic Oracle ROWID grid column", () => {
   assert.equal(isHiddenGridColumn("oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), true);
+  assert.equal(isHiddenGridColumn("oracle", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN], "VIEW"), false);
   assert.equal(isHiddenGridColumn("oracle", "ROWID", [DBX_ROWID_COLUMN]), false);
   assert.equal(isHiddenGridColumn("mysql", DBX_ROWID_COLUMN, [DBX_ROWID_COLUMN]), false);
   assert.equal(isHiddenGridColumn("neo4j", DBX_NEO4J_ELEMENT_ID_COLUMN, [DBX_NEO4J_ELEMENT_ID_COLUMN]), true);

@@ -33,7 +33,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : (tableMeta?.primaryKeys ?? []);
-    const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys);
+    const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta?.tableType);
     return buildTableSelectSql({
       databaseType: effectiveDbType,
       schema: tableMeta?.schema,

@@ -18,9 +18,9 @@ export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarge
   function setupTauriListeners() {
     import("@tauri-apps/api/event")
       .then(({ listen }) => {
-        listen<{ connection_id: string; database: string; schema?: string; table: string }>("mcp-open-table", async (event) => {
+        listen<{ connection_id: string; database: string; schema?: string; table: string; tableType?: string; table_type?: string }>("mcp-open-table", async (event) => {
           try {
-            const { connection_id, database, schema, table } = event.payload;
+            const { connection_id, database, schema, table, tableType, table_type } = event.payload;
             if (!connectionStore.connections.length) await connectionStore.initFromDisk();
             const config = connectionStore.getConfig(connection_id);
             if (!config) return;
@@ -31,7 +31,7 @@ export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarge
             } else if (config.db_type === "mongodb") {
               queryStore.createTab(connection_id, database, table, "mongo");
             } else {
-              deps.openTableTarget({ connectionId: connection_id, database, schema, tableName: table });
+              deps.openTableTarget({ connectionId: connection_id, database, schema, tableName: table, tableType: tableType ?? table_type });
             }
             focusCurrentWindow();
           } catch (e) {

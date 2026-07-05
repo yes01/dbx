@@ -68,13 +68,14 @@ export function hiveTablePropertiesIndicateTransactional(result: { rows: readonl
   });
 }
 
-export function usesSyntheticRowIdKey(databaseType: DatabaseType | undefined, primaryKeys: string[]): boolean {
+export function usesSyntheticRowIdKey(databaseType: DatabaseType | undefined, primaryKeys: string[], tableType?: string): boolean {
+  if (isViewTableType(tableType)) return false;
   return primaryKeys.length === 1 && ((databaseType === "oracle" && primaryKeys[0].toUpperCase() === DBX_ROWID_COLUMN) || (databaseType === "neo4j" && primaryKeys[0] === DBX_NEO4J_ELEMENT_ID_COLUMN));
 }
 
-export function isHiddenGridColumn(databaseType: DatabaseType | undefined, column: string, primaryKeys: string[]): boolean {
+export function isHiddenGridColumn(databaseType: DatabaseType | undefined, column: string, primaryKeys: string[], tableType?: string): boolean {
   if (databaseType === "neo4j" && column === DBX_NEO4J_ELEMENT_ID_COLUMN) return true;
-  return usesSyntheticRowIdKey(databaseType, primaryKeys) && column.toUpperCase() === DBX_ROWID_COLUMN;
+  return usesSyntheticRowIdKey(databaseType, primaryKeys, tableType) && column.toUpperCase() === DBX_ROWID_COLUMN;
 }
 
 export function isTdengineExistingRowReadonlyColumn(databaseType: DatabaseType | undefined, column: string, columns: ColumnInfo[]): boolean {
