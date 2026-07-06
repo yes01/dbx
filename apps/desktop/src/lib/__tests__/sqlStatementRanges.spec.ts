@@ -28,6 +28,52 @@ function candidateSummaries(candidates: Array<{ kind: string; sql: string }>): s
   return candidates.map((candidate) => `${candidate.kind}:${candidate.sql.trim()}`);
 }
 
+const oraclePlSqlFixture = `DECLARE
+  v_order_count NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_order_count
+  FROM "DBX_TEST"."ORDERS_10K";
+
+  IF v_order_count = 0 THEN
+    INSERT INTO "DBX_TEST"."STORES"
+      ("ID", "STORE_CODE", "STORE_NAME", "CITY", "OPENED_AT")
+    SELECT 10001, 'TEST_STORE_001', '测试门店', '上海', SYSDATE
+    FROM DUAL
+    WHERE NOT EXISTS (
+      SELECT 1 FROM "DBX_TEST"."STORES" WHERE "ID" = 10001
+    );
+
+    INSERT INTO "DBX_TEST"."PRODUCTS"
+      ("ID", "SKU", "PRODUCT_NAME", "CATEGORY", "PRICE")
+    SELECT 10001, 'TEST_SKU_001', '测试商品', '测试分类', 99.90
+    FROM DUAL
+    WHERE NOT EXISTS (
+      SELECT 1 FROM "DBX_TEST"."PRODUCTS" WHERE "ID" = 10001
+    );
+
+    INSERT INTO "DBX_TEST"."ORDERS_10K"
+      ("ID", "ORDER_NO", "STORE_ID", "PRODUCT_ID", "CUSTOMER_NAME", "QUANTITY", "AMOUNT", "ORDER_STATUS", "CREATED_AT")
+    SELECT 10001, 'TEST_ORDER_001', 10001, 10001, '测试客户', 2, 199.80, 'PAID', SYSDATE
+    FROM DUAL
+    WHERE NOT EXISTS (
+      SELECT 1 FROM "DBX_TEST"."ORDERS_10K" WHERE "ORDER_NO" = 'TEST_ORDER_001'
+    );
+
+    COMMIT;
+  END IF;
+END;
+/
+SELECT 1;`;
+
+const mysqlRoutineFixture = `CREATE PROCEDURE p()
+BEGIN
+  SELECT 1;
+  IF 1 = 1 THEN
+    SELECT 'ok';
+  END IF;
+END;
+SELECT 2;`;
+
 describe("splitSqlStatementRanges", () => {
   it("splits multiple top-level statements", () => {
     const sql = "SELECT 1;\nSELECT 2;\nSELECT 3;";
@@ -88,6 +134,27 @@ describe("splitSqlStatementRanges", () => {
   it("skips MySQL delimiter commands and empty custom delimiter statements", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["select COUNT(1) FROM your_table", "select COUNT(1) FROM your_table;"]);
+  });
+
+  it("keeps MySQL routine blocks together without delimiter commands", () => {
+    const ranges = splitSqlStatementRanges(mysqlRoutineFixture, "mysql");
+    expect(rangeSqlTexts(ranges)).toEqual([mysqlRoutineFixture.slice(0, mysqlRoutineFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
+    expect(ranges[0].sql).toContain("SELECT 1;");
+    expect(ranges[0].sql).toContain("END IF;");
+    expect(ranges[0].sql).not.toMatch(/END;$/);
+  });
+
+  it("does not merge regular MySQL transaction statements as routine blocks", () => {
+    const sql = "BEGIN; INSERT INTO t VALUES (1); COMMIT;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]);
+  });
+
+  it("keeps Oracle PL/SQL blocks together and treats slash lines as delimiters", () => {
+    const ranges = splitSqlStatementRanges(oraclePlSqlFixture, "oracle");
+    expect(rangeSqlTexts(ranges)).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
+    expect(ranges[0].sql).toContain("v_order_count NUMBER;");
+    expect(ranges[0].sql).toContain("END;");
+    expect(ranges[0].sql).not.toContain("\n/");
   });
 });
 
@@ -313,6 +380,16 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
     expect(statementRangeAtCursor(sql, indexOf(sql, "COUNT", 2), "mysql")?.sql.trim()).toBe("select COUNT(1) FROM your_table;");
     expect(statementRangeAtCursor(sql, indexOf(sql, "delimiter"), "mysql")).toBeNull();
   });
+
+  it("returns the full MySQL routine block for cursors inside nested statements", () => {
+    const range = statementRangeAtCursor(mysqlRoutineFixture, indexOf(mysqlRoutineFixture, "ok"), "mysql");
+    expect(range?.sql.trim()).toBe(mysqlRoutineFixture.slice(0, mysqlRoutineFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim());
+  });
+
+  it("returns the full Oracle PL/SQL block for cursors inside nested statements", () => {
+    const range = statementRangeAtCursor(oraclePlSqlFixture, indexOf(oraclePlSqlFixture, "ORDERS_10K", 2), "oracle");
+    expect(range?.sql.trim()).toBe(oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")));
+  });
 });
 
 describe("executableStatementRanges", () => {
@@ -333,6 +410,14 @@ describe("executableStatementRanges", () => {
   it("keeps MySQL REPLACE INTO as an executable statement start", () => {
     const sql = "SELECT 1\nREPLACE INTO users (id, name) VALUES (1, 'a');";
     expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["SELECT 1", "REPLACE INTO users (id, name) VALUES (1, 'a')"]);
+  });
+
+  it("does not split executable Oracle PL/SQL ranges at inner statement starts", () => {
+    expect(rangeSqlTexts(executableStatementRanges(oraclePlSqlFixture, "oracle"))).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
+  });
+
+  it("does not split executable MySQL routine ranges at inner statements", () => {
+    expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineFixture, "mysql"))).toEqual([mysqlRoutineFixture.slice(0, mysqlRoutineFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
   });
 });
 
@@ -456,6 +541,10 @@ describe("hasMultipleExecutionTargets", () => {
   it("counts MySQL delimiter scripts by executable statements", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(true);
+  });
+
+  it("counts MySQL routine blocks without delimiter by executable statements", () => {
+    expect(hasMultipleExecutionTargets(mysqlRoutineFixture, "mysql")).toBe(true);
   });
 
   it("does not show multiple targets for MySQL DESC UPDATE joins", () => {
