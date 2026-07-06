@@ -59,6 +59,8 @@ import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mon
 import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/completionTreeIndex";
 import { kvRootNodeLabel } from "@/lib/kvRootPresentation";
 import { MetadataTaskLimiter } from "@/lib/metadataTaskLimiter";
+import { appendConnectionErrorHints } from "@/lib/connectionErrorHints";
+import i18n from "@/i18n";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -401,7 +403,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function setConnectionError(connectionId: string, message: string) {
-    connectionErrors.value[connectionId] = message;
+    connectionErrors.value[connectionId] = appendConnectionErrorHints(getConfig(connectionId), message, i18n.global.t);
   }
 
   function clearConnectionError(connectionId: string) {
