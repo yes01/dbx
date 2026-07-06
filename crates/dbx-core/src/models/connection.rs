@@ -1185,7 +1185,9 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
     } else if !parts.iter().any(|part| {
         url_param_key_is(part, "ssl-mode") || url_param_key_is(part, "sslmode") || url_param_key_is(part, "require_ssl")
     }) {
-        parts.insert(0, "ssl-mode=preferred".to_string());
+        // Default MySQL connections keep TLS off unless the user explicitly
+        // enables a TLS mode.
+        parts.insert(0, "ssl-mode=disabled".to_string());
     }
 
     if !parts.iter().any(|part| url_param_key_is(part, "charset")) {
@@ -1906,7 +1908,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://user%40tenant%23cluster:secret@10.1.2.3:2883?ssl-mode=preferred&charset=utf8mb4"
+            "mysql://user%40tenant%23cluster:secret@10.1.2.3:2883?ssl-mode=disabled&charset=utf8mb4"
         );
     }
 
@@ -2031,7 +2033,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:p%40ss%3Aword%231@10.1.2.3:2883/db%2Fname?ssl-mode=preferred&charset=utf8mb4"
+            "mysql://root:p%40ss%3Aword%231@10.1.2.3:2883/db%2Fname?ssl-mode=disabled&charset=utf8mb4"
         );
     }
 
@@ -2040,10 +2042,7 @@ mod tests {
         let mut config = mysql_config("root", "secret", Some("test"));
         config.url_params = Some("charset=utf8mb4".to_string());
 
-        assert_eq!(
-            config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
-        );
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4");
     }
 
     #[test]
@@ -2053,7 +2052,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -2064,7 +2063,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -2076,7 +2075,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -2085,10 +2084,7 @@ mod tests {
         let mut config = mysql_config("root", "secret", Some("test"));
         config.url_params = Some("allowCleartextPasswords=false&enable_cleartext_plugin=&charset=utf8mb4".to_string());
 
-        assert_eq!(
-            config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
-        );
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4");
     }
 
     #[test]
@@ -2099,6 +2095,17 @@ mod tests {
         assert_eq!(
             config.connection_url(),
             "mysql://root:secret@10.1.2.3:2883/test?require_ssl=true&verify_ca=false&verify_identity=false&charset=utf8mb4"
+        );
+    }
+
+    #[test]
+    fn mysql_explicit_preferred_tls_mode_is_preserved() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("ssl-mode=preferred".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
         );
     }
 
@@ -2342,7 +2349,7 @@ mod tests {
 
         let url = config.redacted_connection_url();
 
-        assert_eq!(url, "mysql://10.1.2.3:2883/db%2Fname?ssl-mode=preferred&charset=utf8mb4");
+        assert_eq!(url, "mysql://10.1.2.3:2883/db%2Fname?ssl-mode=disabled&charset=utf8mb4");
         assert!(!url.contains("user"));
         assert!(!url.contains("p%40ss"));
         assert!(!url.contains("p@ss"));

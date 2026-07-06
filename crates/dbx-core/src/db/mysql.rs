@@ -816,6 +816,9 @@ fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
         || error.contains("handshake")
         || error.contains("tls connection")
         || error.contains("server closed session")
+        // Some MySQL-compatible servers report a preferred-TLS attempt as a
+        // normal server error instead of a TLS handshake error.
+        || (error.contains("client asked for ssl") && error.contains("server does not have this capability"))
 }
 
 fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
@@ -3218,6 +3221,20 @@ mod tests {
             server closed session with no notification";
 
         assert!(mysql_error_should_retry_without_ssl(error));
+    }
+
+    #[test]
+    fn mysql_server_without_ssl_capability_retries_without_ssl() {
+        let error =
+            "MySQL connection failed: Driver error: `Client asked for SSL but server does not have this capability'";
+
+        assert!(mysql_error_should_retry_without_ssl(error));
+    }
+
+    #[test]
+    fn mysql_tcp_keepalive_uses_milliseconds_not_seconds() {
+        assert_eq!(MYSQL_TCP_KEEPALIVE_MS, 30_000);
+        assert!(MYSQL_TCP_KEEPALIVE_MS >= 1_000);
     }
 
     #[test]
