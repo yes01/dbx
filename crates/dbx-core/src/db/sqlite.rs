@@ -392,6 +392,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn text_affinity_blob_bytes_display_as_utf8_text() {
+        let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
+
+        execute_query(
+            &pool,
+            "CREATE TABLE goods (data TEXT); INSERT INTO goods (data) VALUES (X'7b227469746c65223a22e4b8ade69687227d');",
+        )
+        .await
+        .expect("insert blob-backed JSON into TEXT column");
+        let result = execute_query(&pool, "SELECT data FROM goods").await.expect("select data");
+
+        assert_eq!(result.rows[0][0], serde_json::json!(r#"{"title":"中文"}"#));
+    }
+
+    #[tokio::test]
+    async fn blob_declared_columns_stay_hex_encoded() {
+        let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
+
+        execute_query(
+            &pool,
+            "CREATE TABLE goods (data BLOB); INSERT INTO goods (data) VALUES (X'7b227469746c65223a22e4b8ade69687227d');",
+        )
+        .await
+        .expect("insert blob-backed JSON into BLOB column");
+        let result = execute_query(&pool, "SELECT data FROM goods").await.expect("select data");
+
+        assert_eq!(result.rows[0][0], serde_json::json!("0x7b227469746c65223a22e4b8ade69687227d"));
+    }
+
+    #[tokio::test]
     async fn create_if_missing_rejects_existing_non_sqlite_file() {
         let path = std::env::temp_dir().join(format!("dbx-not-sqlite-{}.png", uuid::Uuid::new_v4()));
         std::fs::write(&path, b"\x89PNG\r\n\x1a\nnot sqlite").unwrap();
@@ -1925,13 +1955,18 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
         if starts_with_executable_sql_keyword(sql, &["SELECT", "PRAGMA", "EXPLAIN", "WITH"]) {
             let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
             let columns = stmt.column_names().iter().map(|name| name.to_string()).collect::<Vec<_>>();
+            let column_decl_types =
+                stmt.columns().iter().map(|column| column.decl_type().map(str::to_string)).collect::<Vec<_>>();
             let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
             let mut result_rows = Vec::new();
 
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
                 let mut values = Vec::with_capacity(columns.len());
                 for i in 0..columns.len() {
-                    values.push(value_ref_to_json(row.get_ref(i).map_err(|e| e.to_string())?));
+                    values.push(value_ref_to_json(
+                        row.get_ref(i).map_err(|e| e.to_string())?,
+                        column_decl_types.get(i).and_then(Option::as_deref),
+                    ));
                 }
                 result_rows.push(values);
                 if result_rows.len() > row_limit {
@@ -1972,7 +2007,7 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
     })
 }
 
-fn value_ref_to_json(value: ValueRef<'_>) -> serde_json::Value {
+fn value_ref_to_json(value: ValueRef<'_>, column_decl_type: Option<&str>) -> serde_json::Value {
     match value {
         ValueRef::Null => serde_json::Value::Null,
         ValueRef::Integer(v) => super::safe_i64_to_json(v),
@@ -1980,6 +2015,22 @@ fn value_ref_to_json(value: ValueRef<'_>) -> serde_json::Value {
             serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
         }
         ValueRef::Text(v) => serde_json::Value::String(String::from_utf8_lossy(v).to_string()),
-        ValueRef::Blob(v) => super::binary_value_to_json(v),
+        ValueRef::Blob(v) => sqlite_blob_value_to_json(v, column_decl_type),
     }
+}
+
+fn sqlite_blob_value_to_json(bytes: &[u8], column_decl_type: Option<&str>) -> serde_json::Value {
+    if is_sqlite_text_affinity(column_decl_type) {
+        // SQLite columns can hold BLOB values even when declared as TEXT.
+        // Match common clients by showing valid UTF-8 bytes as text for text-affinity columns.
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return serde_json::Value::String(text.to_string());
+        }
+    }
+    super::binary_value_to_json(bytes)
+}
+
+fn is_sqlite_text_affinity(column_decl_type: Option<&str>) -> bool {
+    let upper = column_decl_type.unwrap_or("").to_ascii_uppercase();
+    upper.contains("CHAR") || upper.contains("CLOB") || upper.contains("TEXT")
 }
