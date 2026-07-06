@@ -45,6 +45,14 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void schemaSwitchPlacesSysCatalogAfterSelectedSchema() {
+        KingbaseAgent agent = new KingbaseAgent();
+
+        Assertions.assertEquals("SET search_path TO \"app\", sys_catalog", agent.setSchemaSQL("app"));
+        Assertions.assertEquals("SET search_path TO \"app\"\"prod\", sys_catalog", agent.setSchemaSQL("app\"prod"));
+    }
+
+    @Test
     void mysqlCompatListDatabasesUsesCurrentDatabase() {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
