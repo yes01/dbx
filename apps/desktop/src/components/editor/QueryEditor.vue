@@ -1155,20 +1155,9 @@ function setSemanticDiagnostics(next: SqlSemanticDiagnostic[]) {
   reconfigureDiagnostics();
 }
 
-function clearScheduledSemanticDiagnostics() {
-  semanticDiagnosticRunId++;
-  if (semanticDiagnosticTimer) clearTimeout(semanticDiagnosticTimer);
-  semanticDiagnosticTimer = null;
-  pendingSemanticDiagnosticPreserveOutsideRanges = false;
-}
-
 function invalidateSemanticDiagnosticsForDocumentChange() {
   semanticDiagnosticRunId++;
   semanticDiagnostics = [];
-}
-
-function shouldSkipSqlSemanticDiagnostics() {
-  return props.databaseType !== "redis" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
 }
 
 function rangesOverlap(left: { from: number; to: number }, right: { from: number; to: number }): boolean {

@@ -530,7 +530,7 @@ function buildMysqlUrlParams(config: ConnectionConfig): string {
 async function mysqlTlsOptions(config: ConnectionConfig): Promise<SslOptions | undefined> {
   if (!bareMysqlUsesTls(config)) return undefined;
 
-  const params = urlParams(config);
+  const params = new URLSearchParams(buildMysqlUrlParams(config));
   const tls: SslOptions = {};
   const verifyCa = (params.get("verify_ca") || "").toLowerCase() === "true";
   const verifyIdentity = (params.get("verify_identity") || "").toLowerCase() === "true";
