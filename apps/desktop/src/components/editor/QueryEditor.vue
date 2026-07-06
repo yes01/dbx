@@ -1506,8 +1506,9 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
       scheduleCompletionMetadataRefresh(completionContext);
       if (!explicit) return localResult;
     }
-    const shouldResolveAsyncColumnCompletion = completionContext.suggestColumns && completionContext.referencedTables.length > 0 && completionContext.prefix.length > 0;
-    if (!explicit && !shouldResolveAsyncColumnCompletion) {
+    const tableNameCompletion = isTableNameCompletionContext(completionContext);
+    const shouldResolveAsyncCompletion = tableNameCompletion || (completionContext.suggestColumns && completionContext.referencedTables.length > 0 && completionContext.prefix.length > 0);
+    if (!explicit && !shouldResolveAsyncCompletion) {
       scheduleCompletionMetadataRefresh(completionContext);
       return null;
     }
@@ -1556,6 +1557,22 @@ function flushImeComposition() {
   emit("cursorChange", currentView.state.selection.main.head);
   latestSelection = readEditorSelection(currentView);
   if (editorIsActive) emitEditorSelection(latestSelection);
+}
+
+function shouldStartSqlCompletionAfterInput(insertedText: string, currentView: EditorViewType): boolean {
+  const position = currentView.state.selection.main.head;
+  const fullDoc = currentView.state.doc.toString();
+  if (insertedText.endsWith(".")) return true;
+  if (/[,(]$/.test(insertedText)) {
+    const completionContext = getSqlCompletionContext(fullDoc, position);
+    return !!completionContext.insertTable;
+  }
+  if (/\s$/.test(insertedText)) {
+    return shouldAutoOpenSqlCompletion(fullDoc, position);
+  }
+  if (!/[\w$@]$/.test(insertedText)) return false;
+  const completionContext = getSqlCompletionContext(fullDoc, position);
+  return isTableNameCompletionContext(completionContext);
 }
 
 function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number) {
@@ -1652,6 +1669,7 @@ function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof 
   if (!props.connectionId || props.database == null) return;
   const localOnlyMetadata = usesLocalOnlyCompletionMetadata();
   const onDemandOnlyColumns = usesOnDemandOnlyCompletionColumns();
+  const tableNameCompletion = isTableNameCompletionContext(completionContext);
   const connectionId = props.connectionId;
   const database = props.database;
   const schema = completionContext.qualifier && completionContext.suggestTables ? completionContext.qualifier : props.schema;
@@ -1703,7 +1721,7 @@ function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof 
         .catch(() => {});
     }
   }
-  if (!onDemandOnlyColumns) {
+  if (!onDemandOnlyColumns && !tableNameCompletion) {
     for (const refTable of completionContext.referencedTables) {
       if (refTable.columns && refTable.columns.length > 0) continue;
       const cacheKey = refTable.schema ? `${refTable.schema}.${refTable.name}` : refTable.name;
@@ -1719,7 +1737,7 @@ function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof 
         .catch(() => {});
     }
   }
-  if ((completionContext.suggestTables || completionContext.suggestJoinConditions) && completionContext.referencedTables.length > 0) {
+  if (!tableNameCompletion && (completionContext.suggestTables || completionContext.suggestJoinConditions) && completionContext.referencedTables.length > 0) {
     void ensureForeignKeysForTables(completionContext.referencedTables);
   }
 }
@@ -1883,8 +1901,8 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     }
   }
 
-  const isTableNameCompletionContext = completionContext.suggestTables || completionContext.exclusiveTableSuggestions;
-  const shouldFetchColumnsForCompletion = !onDemandOnlyColumns || ((completionContext.suggestColumns || completionContext.exclusiveColumnSuggestions) && !isTableNameCompletionContext) || !!completionContext.insertTable;
+  const tableNameCompletion = isTableNameCompletionContext(completionContext);
+  const shouldFetchColumnsForCompletion = !tableNameCompletion && (!onDemandOnlyColumns || completionContext.suggestColumns || completionContext.exclusiveColumnSuggestions || !!completionContext.insertTable);
   if (shouldFetchColumnsForCompletion) {
     await Promise.all(
       refs.map(async (refTable) => {
@@ -1906,7 +1924,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
   }
   if (epoch !== completionEpoch) return null;
 
-  if ((completionContext.suggestTables || completionContext.suggestJoinConditions) && refs.length > 0) {
+  if (!tableNameCompletion && (completionContext.suggestTables || completionContext.suggestJoinConditions) && refs.length > 0) {
     const fkPrefetchTables = completionContext.suggestTables ? [...refs, ...tables.slice(0, MAX_JOIN_FK_PREFETCH_TABLES)] : refs;
     await ensureForeignKeysForTables(fkPrefetchTables.filter((table) => !("columns" in table) || !table.columns || table.columns.length === 0));
     if (epoch !== completionEpoch) return null;
@@ -1982,6 +2000,10 @@ function isReferencedTableQualifier(completionContext: ReturnType<typeof getSqlC
   const qualifier = completionContext.qualifier.toLowerCase();
   const qualifiedColumnTarget = completionQualifiedTableTarget(completionContext);
   return completionContext.referencedTables.some((table) => table.alias?.toLowerCase() === qualifier || table.name.toLowerCase() === qualifier || (!!qualifiedColumnTarget && completionTablesMatch(table, qualifiedColumnTarget)));
+}
+
+function isTableNameCompletionContext(completionContext: ReturnType<typeof getSqlCompletionContext>): boolean {
+  return completionContext.suggestTables || completionContext.exclusiveTableSuggestions;
 }
 
 function mergeCompletionObjects(existing: SqlCompletionObject[], incoming: SqlCompletionObject[]) {
@@ -2273,8 +2295,10 @@ onMounted(async () => {
             update.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
               insertedText += inserted.toString();
             });
-            if (insertedText.endsWith(".")) {
-              startCompletion(update.view);
+            if (shouldStartSqlCompletionAfterInput(insertedText, update.view)) {
+              window.setTimeout(() => {
+                if (!isEditorComposing(update.view)) startCompletion(update.view);
+              }, 0);
             }
           }
         }
