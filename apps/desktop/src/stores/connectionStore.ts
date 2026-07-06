@@ -272,9 +272,13 @@ export const useConnectionStore = defineStore("connection", () => {
   let layoutPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const staleTreeRefreshIds = new Set<string>();
   const connectInFlight = new Map<string, Promise<void>>();
+  const disconnectInFlight = new Map<string, Promise<void>>();
+  const disconnectInFlightScoped = new Map<string, boolean>();
+  const cancelDisconnectInFlight = new Map<string, Promise<void>>();
   const activeLocalConnectionAttempts = new Map<string, number>();
   const cancelledLocalConnectionAttempts = new Map<string, Set<number>>();
-  const cancelDisconnectInFlight = new Map<string, Promise<void>>();
+  const successfulLocalConnectionAttempts = new Map<string, number>();
+  const connectionStateRevisions = new Map<string, number>();
   let nextLocalConnectionAttempt = 0;
   let beforeConnectHandler: BeforeConnectHandler | null = null;
   let initFromDiskPromise: Promise<void> | null = null;
@@ -317,11 +321,30 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function beginLocalConnectionAttempt(connectionId: string): number {
     const attempt = ++nextLocalConnectionAttempt;
+    bumpConnectionStateRevision(connectionId);
     activeLocalConnectionAttempts.set(connectionId, attempt);
     connectingIds.value.add(connectionId);
     const node = findNode(treeNodes.value, connectionId);
     if (node) node.isLoading = true;
     return attempt;
+  }
+
+  function markSuccessfulLocalConnectionAttempt(connectionId: string, attempt: number) {
+    successfulLocalConnectionAttempts.set(connectionId, attempt);
+  }
+
+  function forgetSuccessfulLocalConnectionAttempt(connectionId: string) {
+    successfulLocalConnectionAttempts.delete(connectionId);
+  }
+
+  function bumpConnectionStateRevision(connectionId: string): number {
+    const revision = (connectionStateRevisions.get(connectionId) ?? 0) + 1;
+    connectionStateRevisions.set(connectionId, revision);
+    return revision;
+  }
+
+  function isCurrentConnectionStateRevision(connectionId: string, revision: number): boolean {
+    return connectionStateRevisions.get(connectionId) === revision;
   }
 
   function isCurrentLocalConnectionAttempt(connectionId: string, attempt: number): boolean {
@@ -351,8 +374,78 @@ export const useConnectionStore = defineStore("connection", () => {
     activeLocalConnectionAttempts.delete(connectionId);
     connectingIds.value.delete(connectionId);
     clearConnectionNodeLoading(connectionId);
+    clearConnectionRootMetadataLoad(connectionId);
     connectInFlight.delete(connectionId);
     return attempt;
+  }
+
+  function clearConnectionRootMetadataLoad(connectionId: string) {
+    clearLoadedChildrenCache(connectionId);
+  }
+
+  function getBlockingDisconnectInFlight(connectionId: string): Promise<void> | undefined {
+    return disconnectInFlightScoped.get(connectionId) ? undefined : disconnectInFlight.get(connectionId);
+  }
+
+  async function waitForBlockingDisconnectInFlight(connectionId: string): Promise<void> {
+    const pending = getBlockingDisconnectInFlight(connectionId);
+    if (pending) await pending;
+  }
+
+  function trackDisconnectRequest(connectionId: string, request: Promise<void>, scoped: boolean): Promise<void> {
+    const bounded = withDisconnectRequestTimeout(connectionId, request);
+    const tracked = bounded
+      .catch((error) => {
+        console.warn("[DBX][connection:disconnect-error]", { connectionId, error });
+      })
+      .finally(() => {
+        if (disconnectInFlight.get(connectionId) === tracked) {
+          disconnectInFlight.delete(connectionId);
+          disconnectInFlightScoped.delete(connectionId);
+        }
+      });
+    disconnectInFlight.set(connectionId, tracked);
+    disconnectInFlightScoped.set(connectionId, scoped);
+    return bounded;
+  }
+
+  function startDisconnectRequest(connectionId: string): Promise<void> {
+    const clientAttempt = activeLocalConnectionAttempts.get(connectionId) ?? successfulLocalConnectionAttempts.get(connectionId);
+    let request: Promise<void>;
+    try {
+      request = api.disconnectDb(connectionId, clientAttempt);
+    } catch (error) {
+      request = Promise.reject(error);
+    }
+    return trackDisconnectRequest(connectionId, request, clientAttempt != null);
+  }
+
+  function cancelDisconnectKey(connectionId: string, attempt: number): string {
+    return `${connectionId}:${attempt}`;
+  }
+
+  function startCancelDisconnectRequest(connectionId: string, attempt: number): Promise<void> {
+    const key = cancelDisconnectKey(connectionId, attempt);
+    const existing = cancelDisconnectInFlight.get(key);
+    if (existing) return existing;
+    let request: Promise<void>;
+    try {
+      request = api.disconnectDb(connectionId, attempt);
+    } catch (error) {
+      request = Promise.reject(error);
+    }
+    const tracked = withDisconnectRequestTimeout(connectionId, request)
+      .catch((error) => {
+        console.warn("[DBX][connection:cancel-disconnect-error]", { connectionId, attempt, error });
+        throw error;
+      })
+      .finally(() => {
+        if (cancelDisconnectInFlight.get(key) === tracked) {
+          cancelDisconnectInFlight.delete(key);
+        }
+      });
+    cancelDisconnectInFlight.set(key, tracked);
+    return tracked;
   }
 
   async function cleanupResolvedCancelledConnectionAttempt(connectionId: string, attempt: number) {
@@ -380,26 +473,20 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  function cancelDisconnectKey(connectionId: string, attempt: number): string {
-    return `${connectionId}:${attempt}`;
-  }
-
-  async function cancelConnecting(connectionId: string) {
-    const attempt = cancelLocalConnectionAttempt(connectionId);
-    if (attempt == null) return;
-    const key = cancelDisconnectKey(connectionId, attempt);
-    const existing = cancelDisconnectInFlight.get(key);
-    if (existing) {
-      await existing;
-      return;
-    }
-    const request = withDisconnectRequestTimeout(connectionId, api.disconnectDb(connectionId, attempt)).finally(() => {
-      if (cancelDisconnectInFlight.get(key) === request) {
-        cancelDisconnectInFlight.delete(key);
-      }
-    });
-    cancelDisconnectInFlight.set(key, request);
-    await request;
+  async function cancelConnecting(connectionId: string): Promise<boolean> {
+    const attempt = activeLocalConnectionAttempts.get(connectionId);
+    if (attempt == null) return false;
+    const disconnectRequest = startCancelDisconnectRequest(connectionId, attempt);
+    const cancelledAttempt = cancelLocalConnectionAttempt(connectionId);
+    if (cancelledAttempt == null) return false;
+    clearConnectionError(connectionId);
+    connectedIds.value.delete(connectionId);
+    forgetSuccessfulLocalConnectionAttempt(connectionId);
+    clearConnectionHealthCheck(connectionId);
+    if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
+    invalidateCompletionCache(connectionId);
+    await disconnectRequest;
+    return true;
   }
 
   function setConnectionError(connectionId: string, message: string) {
@@ -550,10 +637,19 @@ export const useConnectionStore = defineStore("connection", () => {
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
             timedOut = true;
+            if (clientAttempt != null && isCancelledLocalConnectionAttempt(config.id, clientAttempt)) {
+              reject(new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE));
+              return;
+            }
             reject(new Error(timeoutMessage));
           }, timeoutMs);
         }),
       ]);
+    } catch (error) {
+      if (clientAttempt != null && isCancelledLocalConnectionAttempt(config.id, clientAttempt)) {
+        throw new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
+      }
+      throw error;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -1330,6 +1426,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
+    if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
     const attempt = beginLocalConnectionAttempt(config.id);
     try {
       await beforeConnectHandler?.(config);
@@ -1339,6 +1436,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await syncMongoLegacyDriverFallback(id, config);
       activeConnectionId.value = id;
       connectedIds.value.add(id);
+      if (id !== config.id) markSuccessfulLocalConnectionAttempt(config.id, attempt);
+      markSuccessfulLocalConnectionAttempt(id, attempt);
       markConnectionHealthChecked(id);
       clearConnectionError(config.id);
       if (id !== config.id) clearConnectionError(id);
@@ -1373,13 +1472,26 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function disconnect(connectionId: string) {
-    if (connectingIds.value.has(connectionId)) {
-      await cancelConnecting(connectionId);
-      return;
-    }
+    const stateRevision = bumpConnectionStateRevision(connectionId);
+    const disconnectRequest = startDisconnectRequest(connectionId);
+    cancelLocalConnectionAttempt(connectionId);
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
-    await withDisconnectRequestTimeout(connectionId, api.disconnectDb(connectionId));
-    clearConnectionError(connectionId);
+
+    connectedIds.value.delete(connectionId);
+    forgetSuccessfulLocalConnectionAttempt(connectionId);
+    clearConnectionHealthCheck(connectionId);
+    const node = findNode(treeNodes.value, connectionId);
+    if (node) {
+      node.isLoading = false;
+      node.isExpanded = false;
+      node.children = [];
+    }
+    clearConnectionRootMetadataLoad(connectionId);
+    clearLoadedChildrenCache(connectionId);
+    if (activeConnectionId.value === connectionId) {
+      activeConnectionId.value = null;
+    }
+    invalidateCompletionCache(connectionId);
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
     switch (settingsStore.editorSettings.disconnectTabHandlingMode) {
@@ -1392,20 +1504,11 @@ export const useConnectionStore = defineStore("connection", () => {
       case "keep-tabs-keep-results":
         break;
     }
-    connectedIds.value.delete(connectionId);
-    clearConnectionHealthCheck(connectionId);
-    const node = findNode(treeNodes.value, connectionId);
-    if (node) {
-      node.isLoading = false;
-      node.isExpanded = false;
-      node.children = [];
+    await disconnectRequest;
+    if (isCurrentConnectionStateRevision(connectionId, stateRevision)) {
+      clearConnectionError(connectionId);
     }
-    clearLoadedChildrenCache(connectionId);
-    if (activeConnectionId.value === connectionId) {
-      activeConnectionId.value = null;
-    }
-    invalidateCompletionCache(connectionId);
-    if (shouldRemoveOneTimeConnection) {
+    if (shouldRemoveOneTimeConnection && isCurrentConnectionStateRevision(connectionId, stateRevision)) {
       await removeConnection(connectionId);
     }
   }
@@ -1458,6 +1561,7 @@ export const useConnectionStore = defineStore("connection", () => {
       recordConnectionError(connectionId, error);
       throw error;
     }
+    if (getBlockingDisconnectInFlight(connectionId)) await waitForBlockingDisconnectInFlight(connectionId);
     const existingConnect = connectInFlight.get(connectionId);
     if (existingConnect) {
       await existingConnect;
@@ -1475,6 +1579,7 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       await syncMongoLegacyDriverFallback(connectionId, config);
       connectedIds.value.add(connectionId);
+      markSuccessfulLocalConnectionAttempt(connectionId, attempt);
       markConnectionHealthChecked(connectionId);
       activeConnectionId.value = connectionId;
       clearConnectionError(connectionId);
