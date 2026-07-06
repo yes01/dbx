@@ -860,6 +860,41 @@ test("auto-opens table completion immediately after FROM context whitespace", ()
   }
 });
 
+test("auto-opens column completion immediately after condition context whitespace", () => {
+  for (const { sql, cursor = sql.length } of [
+    { sql: "select * from users where " },
+    {
+      sql: "SELECT *\nFROM t_0001 AS t0 WHERE \nLIMIT 100;",
+      cursor: "SELECT *\nFROM t_0001 AS t0 WHERE ".length,
+    },
+  ]) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, cursor), true, sql);
+  }
+});
+
+test("does not auto-open column completion immediately after comparison operators", () => {
+  for (const sql of ["SELECT * FROM public.users WHERE id>", "SELECT * FROM public.users WHERE id> ", "SELECT * FROM public.users WHERE id = "]) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), false, sql);
+  }
+  const rhsColumnPrefix = "SELECT * FROM public.users WHERE id > i";
+  assert.equal(shouldAutoOpenSqlCompletion(rhsColumnPrefix, rhsColumnPrefix.length), true);
+});
+
+test("does not auto-open keyword completion immediately after a completed numeric WHERE value", () => {
+  for (const { sql, cursor = sql.length } of [
+    { sql: "SELECT * FROM public.users WHERE id > 0" },
+    { sql: "SELECT * FROM public.users WHERE id > 0 " },
+    {
+      sql: "SELECT *\nFROM t_0001 AS t0 WHERE id>0\nLIMIT 100;",
+      cursor: "SELECT *\nFROM t_0001 AS t0 WHERE id>0".length,
+    },
+  ]) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, cursor), false, sql);
+  }
+  const nextKeywordPrefix = "SELECT * FROM public.users WHERE id > 0 l";
+  assert.equal(shouldAutoOpenSqlCompletion(nextKeywordPrefix, nextKeywordPrefix.length), true);
+});
+
 test("auto-opens keyword completion after JOIN modifier whitespace", () => {
   assert.equal(shouldAutoOpenSqlCompletion("select * from users left ", "select * from users left ".length), true);
   assert.equal(shouldAutoOpenSqlCompletion("select left ", "select left ".length), false);
@@ -995,6 +1030,72 @@ test("suggests SQL snippets for common abbreviations", () => {
   assert.equal(snippet.apply, "SELECT *\nFROM ${table}\nLIMIT 100;");
 });
 
+test("prioritizes FROM after SELECT star when typing the keyword", () => {
+  const sql = "SELECT * f";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "FROM");
+});
+
+test("prioritizes referenced columns in WHERE conditions", () => {
+  const sql = "SELECT * FROM public.users WHERE i";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "id");
+});
+
+test("prioritizes referenced columns after WHERE comparison operators", () => {
+  const sql = "SELECT * FROM public.users WHERE id > i";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "id");
+});
+
+test("prioritizes LIMIT after SELECT WHERE condition", () => {
+  const sql = "SELECT * FROM public.users WHERE id > 0 l";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "LIMIT");
+});
+
+test("prioritizes AND after a completed WHERE condition", () => {
+  const sql = "SELECT * FROM public.users WHERE id > 0 a";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "AND");
+});
+
+test("prioritizes OR after a completed WHERE condition", () => {
+  const sql = "SELECT * FROM public.users WHERE id > 0 o";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "OR");
+});
+
 test("applies keyword case to built-in SQL snippets", () => {
   const items = buildSqlCompletionItems("sel", 3, {
     tables,
@@ -1096,6 +1197,22 @@ test("keeps snippets below matching WHERE field columns", () => {
     ],
   );
   assert.equal(items.some((item) => item.type === "snippet" && item.label === "insert into"), false);
+});
+
+test("suggests referenced table columns after WHERE whitespace", () => {
+  const sql = "select * from users where ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  assert.deepEqual(
+    items
+      .filter((item) => item.type === "column")
+      .slice(0, 3)
+      .map((item) => item.label),
+    ["id", "name", "email"],
+  );
 });
 
 test("suggests user functions and triggers with fuzzy matching", () => {
