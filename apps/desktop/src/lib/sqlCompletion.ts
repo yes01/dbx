@@ -2728,7 +2728,7 @@ function buildOracleTableFunctionItems(prefix: string): SqlCompletionItem[] {
     .map((item) => ({
       ...item,
       type: "function" as const,
-      boost: computeBoost(item.label, prefix) + 2200,
+      boost: computeBoost(item.label, prefix) + 600,
     }));
 }
 
