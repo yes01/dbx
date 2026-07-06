@@ -1560,17 +1560,25 @@ async function testConnection() {
       mongoDriverMode.value = "legacy";
     }
     testResult.value = { ok: true, message: msg };
+    clearEditedConnectionErrorAfterSuccessfulTest();
   } catch (e: any) {
     if (runId !== testRunId) return;
     const message = appendConnectionErrorHints(config, mongodbAuthFailureHint(String(e)), t);
     const fallbackMessage = await tryNacosDockerConsoleFallback(config, message, runId);
     if (runId !== testRunId) return;
     testResult.value = fallbackMessage ? { ok: true, message: fallbackMessage } : { ok: false, message };
+    if (fallbackMessage) {
+      clearEditedConnectionErrorAfterSuccessfulTest();
+    }
   } finally {
     if (runId === testRunId) {
       isTesting.value = false;
     }
   }
+}
+
+function clearEditedConnectionErrorAfterSuccessfulTest() {
+  if (editingId.value) store.clearConnectionError(editingId.value);
 }
 
 function applyConnectionUrlToForm(input: string): boolean {
