@@ -104,7 +104,7 @@ import {
   visibleTransposeRecordWindow,
 } from "@/lib/dataGridTranspose";
 import { matchesRowStatusFilter, type RowStatus, type RowStatusFilter } from "@/lib/gridRowStatus";
-import { displayCellValue, type CellValue } from "@/lib/cellValue";
+import { displayCellValue, firstLineCellDisplayValue, type CellValue } from "@/lib/cellValue";
 import { getApplicablePreviewActions } from "@/lib/resultPreviewRegistry";
 import "@/lib/previewHandlers/geometryMapPreview";
 import { BINARY_CELL_DOWNLOAD_MODES, binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, downloadBinaryCellPayload, isBinaryCellColumnType, parseBinaryCellBytes, type BinaryCellDownloadMode } from "@/lib/binaryCellDownload";
@@ -7507,7 +7507,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         />
                       </template>
                       <template v-else>
-                        {{ cell.display }}
+                        {{ firstLineCellDisplayValue(cell.display) }}
                         <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-0.5 top-0.5 flex items-center gap-1">
                           <LightDropdownMenu
                             v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)"
@@ -8079,7 +8079,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         />
                       </template>
                       <template v-else>
-                        {{ formatCellCached(item.data[col.actualColIdx], col.actualColIdx) }}
+                        {{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx)) }}
                         <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-0.5 top-0.5 flex items-center gap-1">
                           <LightDropdownMenu
                             v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
@@ -8936,7 +8936,18 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           <p class="text-sm text-muted-foreground">
             {{ t("grid.bulkEditDescription", { count: selectedCellCount }) }}
           </p>
-          <Input v-model="bulkEditValue" :placeholder="t('grid.bulkEditValuePlaceholder')" @keydown.enter.prevent="applyBulkEditValue" />
+          <textarea
+            v-model="bulkEditValue"
+            autocapitalize="off"
+            autocomplete="off"
+            autocorrect="off"
+            spellcheck="false"
+            rows="5"
+            class="min-h-24 w-full min-w-0 resize-y rounded-[6px] border border-input bg-transparent px-2.5 py-1.5 text-base outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:text-sm"
+            :placeholder="t('grid.bulkEditValuePlaceholder')"
+            @keydown.ctrl.enter.prevent="applyBulkEditValue"
+            @keydown.meta.enter.prevent="applyBulkEditValue"
+          />
         </div>
         <DialogFooter>
           <Button variant="outline" @click="bulkEditDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
