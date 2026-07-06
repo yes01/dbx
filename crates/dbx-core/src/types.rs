@@ -261,6 +261,15 @@ pub struct RuleInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExtensionInfo {
+    pub name: String,
+    pub version: String,
+    pub comment: Option<String>,
+    pub schema: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OwnerInfo {
     pub object_name: String,
     pub object_type: String,

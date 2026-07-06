@@ -18,6 +18,7 @@ import type {
   SequenceInfo,
   RuleInfo,
   OwnerInfo,
+  ExtensionInfo,
   QueryResult,
   SqlReferenceAnalysis,
   DatabaseType,
@@ -26,6 +27,7 @@ import type {
   JdbcMavenBundleInfo,
   JdbcPluginStatus,
   SidebarLayout,
+  SshConfigHostEntry,
   SavedSqlFile,
   SavedSqlFolder,
   SavedSqlLibrary,
@@ -183,16 +185,20 @@ export async function testConnection(config: ConnectionConfig): Promise<string> 
   return post("/api/connection/test", { config });
 }
 
-export async function connectDb(config: ConnectionConfig): Promise<string> {
-  return post("/api/connection/connect", { config });
+export async function listSshConfigHosts(): Promise<SshConfigHostEntry[]> {
+  return get("/api/ssh-config/hosts");
+}
+
+export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {
+  return post("/api/connection/connect", { config, clientAttempt });
 }
 
 export async function connectionFinalProxyPort(config: ConnectionConfig): Promise<number> {
   return post("/api/connection/final-proxy-port", { config });
 }
 
-export async function disconnectDb(connectionId: string): Promise<void> {
-  return post("/api/connection/disconnect", { connectionId });
+export async function disconnectDb(connectionId: string, clientAttempt?: number): Promise<void> {
+  return post("/api/connection/disconnect", { connectionId, clientAttempt });
 }
 
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
@@ -577,6 +583,14 @@ export async function listRules(connectionId: string, database: string, schema: 
 
 export async function listOwners(connectionId: string, database: string, schema: string): Promise<OwnerInfo[]> {
   return get(`/api/schema/owners?${qs({ connection_id: connectionId, database, schema })}`);
+}
+
+export async function listExtensions(connectionId: string, database: string, schema: string): Promise<ExtensionInfo[]> {
+  return get(`/api/schema/extensions?${qs({ connection_id: connectionId, database, schema })}`);
+}
+
+export async function listAvailableExtensions(connectionId: string, database: string): Promise<ExtensionInfo[]> {
+  return get(`/api/schema/available-extensions?${qs({ connection_id: connectionId, database })}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1560,8 +1574,8 @@ export async function redisExecuteCommand(connectionId: string, db: number, comm
   return post("/api/redis/execute-command", { connectionId, db, command, skipSafetyCheck: skipSafetyCheck ?? false });
 }
 
-export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number): Promise<RedisValue> {
-  return post("/api/redis/load-more", { connectionId, db, keyRaw, keyType, cursor, count });
+export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filterQuery?: string): Promise<RedisValue> {
+  return post("/api/redis/load-more", { connectionId, db, keyRaw, keyType, cursor, count, filterQuery });
 }
 
 export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {

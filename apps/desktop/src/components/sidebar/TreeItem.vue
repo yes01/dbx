@@ -58,9 +58,10 @@ import {
   Info,
   Archive,
   Square,
+  X,
 } from "@lucide/vue";
 import CustomContextMenu from "@/components/ui/CustomContextMenu.vue";
-import { useConnectionStore } from "@/stores/connectionStore";
+import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -107,6 +108,7 @@ import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType }
 import { buildEditableObjectSource, buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/objectSourceEditor";
 import { buildViewDdl } from "@/lib/viewDdl";
 import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
+import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
 import { getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { hexToRgba } from "@/lib/color";
@@ -361,6 +363,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-partitions":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
+    case "group-extensions":
+      return { icon: Package, colorClass: "text-violet-500" };
+    case "extension":
+      return { icon: Package, colorClass: "text-violet-400" };
     case "load-more":
       return { icon: Plus, colorClass: "text-primary" };
     default:
@@ -368,7 +374,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   }
 }
 
-const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions"]);
+const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions", "group-extensions"]);
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
 }
@@ -503,6 +509,9 @@ function isTooltipDisabled(): boolean {
 
 async function toggle() {
   const node = props.node;
+  if (node.type === "connection" && node.connectionId && connectionStore.connectingIds.has(node.connectionId)) {
+    return;
+  }
   if (node.isLoading) {
     if (node.type !== "connection") return;
     node.isLoading = false;
@@ -631,6 +640,7 @@ async function toggle() {
   } catch (e: any) {
     if (!wasExpanded) node.isExpanded = false;
     const errMsg = e?.message || String(e);
+    if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
     toast(t("connection.connectFailed", { message: translateBackendError(t, errMsg) }), 5000);
     if (errMsg.includes("driver is not installed") || errMsg.includes("is not installed")) {
       window.dispatchEvent(new Event("dbx-open-driver-store"));
@@ -1659,6 +1669,11 @@ const showDropSchemaConfirm = ref(false);
 const showEditSchemaCommentDialog = ref(false);
 const schemaCommentText = ref("");
 const schemaCommentLoading = ref(false);
+const installExtensionDialogRef = ref<InstanceType<typeof InstallExtensionDialog> | null>(null);
+
+function openInstallExtensionDialog() {
+  installExtensionDialogRef.value?.show();
+}
 
 // --- Procedure / Function Management ---
 const showDropObjectConfirm = ref(false);
@@ -3150,6 +3165,11 @@ async function backupSqliteDatabase() {
 async function disconnectConnection() {
   if (props.node.connectionId) {
     try {
+      if (connectionStore.connectingIds.has(props.node.connectionId)) {
+        await connectionStore.cancelConnecting(props.node.connectionId);
+        toast(t("connection.connectCancelled"), 2000);
+        return;
+      }
       await connectionStore.disconnect(props.node.connectionId);
       props.node.isExpanded = false;
       props.node.children = [];
@@ -3157,6 +3177,16 @@ async function disconnectConnection() {
     } catch (e: any) {
       toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
     }
+  }
+}
+
+async function cancelConnectionAttempt() {
+  if (!props.node.connectionId) return;
+  try {
+    await connectionStore.cancelConnecting(props.node.connectionId);
+    toast(t("connection.connectCancelled"), 2000);
+  } catch (e: any) {
+    toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
   }
 }
 
@@ -3316,6 +3346,7 @@ const tableComment = computed(() =>
 );
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
 const isConnected = computed(() => props.node.type === "connection" && !!props.node.connectionId && connectionStore.connectedIds.has(props.node.connectionId));
+const isConnecting = computed(() => props.node.type === "connection" && !!props.node.connectionId && connectionStore.connectingIds.has(props.node.connectionId));
 const isConnectionReadonly = computed(() => props.node.type === "connection" && !!props.node.connectionId && (connectionStore.getConfig(props.node.connectionId)?.read_only ?? false));
 const isOpenedDatabase = computed(() => isSidebarDatabaseOpened(props.node, connectionStore.isTreeNodeChildrenLoaded));
 const canCloseDatabaseConnection = computed(() => canCloseSidebarDatabaseConnection(props.node, connectionStore.isTreeNodeChildrenLoaded));
@@ -3759,7 +3790,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
 
   // 2. Connection
   if (node.type === "connection") {
-    if (!isConnected.value) {
+    if (isConnecting.value) {
+      items.push({ label: t("contextMenu.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
+    } else if (!isConnected.value) {
       items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
     } else {
       items.push({ label: t("contextMenu.closeConnection"), action: disconnectConnection, icon: Unplug });
@@ -4220,6 +4253,11 @@ function treeItemMenuItems(): ContextMenuItem[] {
     return items;
   }
 
+  if (node.type === "extension") {
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    return items;
+  }
+
   // 9. Group Labels (group-columns, group-tables, etc.)
   if (isGroupLabel(node)) {
     const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database);
@@ -4231,6 +4269,14 @@ function treeItemMenuItems(): ContextMenuItem[] {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
     }
     if (hasGroupCreateAction) {
+      items.push({ label: "", separator: true });
+    }
+    if (node.type === "group-extensions") {
+      items.push({
+        label: t("contextMenu.manageExtension"),
+        action: openInstallExtensionDialog,
+        icon: Plus,
+      });
       items.push({ label: "", separator: true });
     }
     if (canLoadAllObjectGroup) {
@@ -4334,12 +4380,23 @@ function treeItemMenuItems(): ContextMenuItem[] {
           <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
           <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
           <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
+          <button
+            v-if="isConnecting"
+            type="button"
+            class="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-secondary/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :aria-label="t('contextMenu.cancelConnecting')"
+            :title="t('contextMenu.cancelConnecting')"
+            @mousedown.stop
+            @click.stop="cancelConnectionAttempt"
+          >
+            <X class="h-3 w-3" />
+          </button>
           <Pin v-if="isPinned" class="w-3 h-3 shrink-0 text-primary fill-current" aria-hidden="true" />
           <button
             v-if="node.type === 'connection'"
             type="button"
-            class="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
-            :class="{ 'opacity-100': isConnectionSelectionChecked || connectionStore.connectionMultiSelectActive }"
+            class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
+            :class="{ 'opacity-100': isConnectionSelectionChecked || connectionStore.connectionMultiSelectActive, 'ml-auto': !isConnecting }"
             :aria-label="isConnectionSelectionChecked ? t('connectionGroup.deselectConnection') : t('connectionGroup.selectConnection')"
             @mousedown.stop
             @click="toggleConnectionMultiSelection"
@@ -4704,6 +4761,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
   <DangerConfirmDialog v-model:open="showDropSchemaConfirm" :title="t('contextMenu.confirmDropSchemaTitle')" :message="t('contextMenu.confirmDropSchemaMessage', { name: node.label })" :sql="dropSchemaPreviewSql" :confirm-label="t('contextMenu.dropSchema')" @confirm="confirmDropSchema" />
 
   <DdlViewDialog v-if="ddlTarget" :connection-id="ddlTarget.connectionId!" :database="ddlTarget.database!" :schema="ddlTarget.schema" :table-name="ddlTarget.label" :dialect="ddlDialect" v-model:open="showDdlDialog" />
+  <InstallExtensionDialog ref="installExtensionDialogRef" :node="node" @close="refresh" />
 </template>
 
 <style>

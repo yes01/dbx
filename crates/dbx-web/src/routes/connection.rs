@@ -13,12 +13,14 @@ use crate::state::WebState;
 #[serde(rename_all = "camelCase")]
 pub struct ConnectRequest {
     pub config: ConnectionConfig,
+    pub client_attempt: Option<u64>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisconnectRequest {
     pub connection_id: String,
+    pub client_attempt: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -65,9 +67,10 @@ pub async fn connect_db(
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
     let config = body.config;
+    let client_attempt = body.client_attempt;
     let app = &state.app;
     let connection_id = config.id.clone();
-    let attempt = app.begin_connection_attempt(&connection_id).await;
+    let attempt = app.begin_connection_attempt_with_client_attempt(&connection_id, client_attempt).await;
 
     app.remove_connection_pools_detached(&connection_id).await;
     app.reset_connection_transport_for_config(&connection_id, &config).await;
@@ -102,7 +105,13 @@ pub async fn disconnect_db(
 ) -> Result<Json<()>, AppError> {
     let app = &state.app;
 
-    app.supersede_connection_attempt(&body.connection_id).await;
+    if let Some(client_attempt) = body.client_attempt {
+        if !app.supersede_connection_attempt_if_client_attempt(&body.connection_id, client_attempt).await {
+            return Ok(Json(()));
+        }
+    } else {
+        app.supersede_connection_attempt(&body.connection_id).await;
+    }
     app.remove_connection_pools_detached(&body.connection_id).await;
     app.nacos_registry.drop_connection(&body.connection_id).await;
     #[cfg(feature = "mq-admin")]
@@ -418,7 +427,9 @@ mod tests {
         let first = state.app.mq_registry.get_or_build(&initial).await.unwrap();
 
         let updated = mq_config("mq-conn", &spawn_pulsar_clusters_server().await);
-        let result = connect_db(State(state.clone()), Json(ConnectRequest { config: updated.clone() })).await;
+        let result =
+            connect_db(State(state.clone()), Json(ConnectRequest { config: updated.clone(), client_attempt: None }))
+                .await;
         assert!(result.is_ok());
 
         let second = state.app.mq_registry.get_or_build(&updated).await.unwrap();
@@ -518,8 +529,11 @@ mod tests {
             connections.insert("conn2".to_string(), PoolKind::Sqlite(conn2_pool));
         }
 
-        let result =
-            disconnect_db(State(state.clone()), Json(DisconnectRequest { connection_id: "conn".to_string() })).await;
+        let result = disconnect_db(
+            State(state.clone()),
+            Json(DisconnectRequest { connection_id: "conn".to_string(), client_attempt: None }),
+        )
+        .await;
         assert!(result.is_ok());
 
         let connections = state.app.connections.read().await;
@@ -545,8 +559,11 @@ mod tests {
             configs.insert("conn".to_string(), sqlite_config("conn", &conn_path.to_string_lossy()));
         }
 
-        let result =
-            disconnect_db(State(state.clone()), Json(DisconnectRequest { connection_id: "conn".to_string() })).await;
+        let result = disconnect_db(
+            State(state.clone()),
+            Json(DisconnectRequest { connection_id: "conn".to_string(), client_attempt: None }),
+        )
+        .await;
         assert!(result.is_ok());
 
         let configs = state.app.configs.read().await;
@@ -564,8 +581,11 @@ mod tests {
         state.app.connections.write().await.insert(config.id.clone(), PoolKind::MessageQueue);
         let first = state.app.mq_registry.get_or_build(&config).await.unwrap();
 
-        let result =
-            disconnect_db(State(state.clone()), Json(DisconnectRequest { connection_id: config.id.clone() })).await;
+        let result = disconnect_db(
+            State(state.clone()),
+            Json(DisconnectRequest { connection_id: config.id.clone(), client_attempt: None }),
+        )
+        .await;
         assert!(result.is_ok());
 
         assert!(!state.app.connections.read().await.contains_key(&config.id));
@@ -587,8 +607,11 @@ mod tests {
             configs.insert(draft_id.to_string(), sqlite_config(draft_id, &conn_path.to_string_lossy()));
         }
 
-        let result =
-            disconnect_db(State(state.clone()), Json(DisconnectRequest { connection_id: draft_id.to_string() })).await;
+        let result = disconnect_db(
+            State(state.clone()),
+            Json(DisconnectRequest { connection_id: draft_id.to_string(), client_attempt: None }),
+        )
+        .await;
         assert!(result.is_ok());
 
         let configs = state.app.configs.read().await;

@@ -1,4 +1,5 @@
 use crate::models::connection::TransportLayerConfig;
+use crate::ssh_config::resolve_ssh_tunnel_config;
 
 use super::proxy_tunnel::ProxyTunnelManager;
 use super::ssh_tunnel::TunnelManager;
@@ -34,9 +35,17 @@ pub async fn start_transport_layers(
     let mut next_connect_endpoint: Option<LayerEndpoint> = None;
     let mut final_local_port = 0;
 
-    for (index, layer) in layers.iter().enumerate() {
+    let resolved_layers: Vec<TransportLayerConfig> = layers
+        .iter()
+        .map(|layer| match layer {
+            TransportLayerConfig::Ssh(ssh) => TransportLayerConfig::Ssh(resolve_ssh_tunnel_config(ssh)),
+            TransportLayerConfig::Proxy(proxy) => TransportLayerConfig::Proxy(proxy.clone()),
+        })
+        .collect();
+
+    for (index, layer) in resolved_layers.iter().enumerate() {
         let layer_id = layer_id(connection_id, index);
-        let is_last = index + 1 == layers.len();
+        let is_last = index + 1 == resolved_layers.len();
         let (layer_host, layer_port) = layer.endpoint();
         let connect_endpoint = next_connect_endpoint
             .clone()
@@ -44,7 +53,7 @@ pub async fn start_transport_layers(
         let target_endpoint = if is_last {
             LayerEndpoint { host: remote_host.to_string(), port: remote_port }
         } else {
-            let (next_host, next_port) = layers[index + 1].endpoint();
+            let (next_host, next_port) = resolved_layers[index + 1].endpoint();
             LayerEndpoint { host: next_host.to_string(), port: next_port }
         };
 

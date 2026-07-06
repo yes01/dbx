@@ -9,6 +9,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "function",
   "package",
   "package-body",
+  "extension",
   "object-browser",
   "redis-db",
   "mq-tenant",

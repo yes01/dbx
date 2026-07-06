@@ -16,7 +16,7 @@ import { Switch } from "@/components/ui/switch";
 import type { ConnectionConfig, DatabaseType, JdbcDriverInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { NacosAdminConfig, NacosAuthConfig } from "@/types/nacos";
-import { useConnectionStore } from "@/stores/connectionStore";
+import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -2570,8 +2570,10 @@ async function save() {
           emit("connectSucceeded", config.name);
         })
         .catch((e: any) => {
+          const message = String(e?.message || e);
           if (config.one_time) void store.removeConnection(config.id);
-          emit("connectFailed", mongodbAuthFailureHint(String(e?.message || e)));
+          if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
+          emit("connectFailed", mongodbAuthFailureHint(message));
         });
       return;
     }

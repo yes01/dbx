@@ -63,7 +63,7 @@ describe("connectionStore timeout recovery", () => {
     await ensure;
 
     expect(checkConnectionHealth).toHaveBeenCalledWith(connection.id);
-    expect(connectDb).toHaveBeenCalledWith(connection);
+    expect(connectDb).toHaveBeenCalledWith(connection, expect.any(Number));
     expect(store.connectedIds.has(connection.id)).toBe(true);
   }, 10_000);
 

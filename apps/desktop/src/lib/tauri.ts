@@ -20,6 +20,7 @@ import type {
   SequenceInfo,
   RuleInfo,
   OwnerInfo,
+  ExtensionInfo,
   QueryResult,
   SqlReferenceAnalysis,
   DatabaseType,
@@ -27,6 +28,7 @@ import type {
   JdbcDriverInfo,
   JdbcMavenBundleInfo,
   JdbcPluginStatus,
+  SshConfigHostEntry,
   SavedSqlFile,
   SavedSqlFolder,
   SavedSqlLibrary,
@@ -474,20 +476,24 @@ export async function deleteAiConversation(id: string): Promise<void> {
   return invoke("delete_ai_conversation", { id });
 }
 
+export async function listSshConfigHosts(): Promise<SshConfigHostEntry[]> {
+  return invoke("list_ssh_config_hosts");
+}
+
 export async function testConnection(config: ConnectionConfig): Promise<string> {
   return invoke("test_connection", { config });
 }
 
-export async function connectDb(config: ConnectionConfig): Promise<string> {
-  return invoke("connect_db", { config });
+export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {
+  return invoke("connect_db", { config, clientAttempt });
 }
 
 export async function connectionFinalProxyPort(config: ConnectionConfig): Promise<number> {
   return invoke("connection_final_proxy_port", { config });
 }
 
-export async function disconnectDb(connectionId: string): Promise<void> {
-  return invoke("disconnect_db", { connectionId });
+export async function disconnectDb(connectionId: string, clientAttempt?: number): Promise<void> {
+  return invoke("disconnect_db", { connectionId, clientAttempt });
 }
 
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
@@ -882,6 +888,14 @@ export async function listRules(connectionId: string, database: string, schema: 
 
 export async function listOwners(connectionId: string, database: string, schema: string): Promise<OwnerInfo[]> {
   return invoke("list_owners", { connectionId, database, schema });
+}
+
+export async function listExtensions(connectionId: string, database: string, schema: string): Promise<ExtensionInfo[]> {
+  return invoke("list_extensions", { connectionId, database, schema });
+}
+
+export async function listAvailableExtensions(connectionId: string, database: string): Promise<ExtensionInfo[]> {
+  return invoke("list_available_extensions", { connectionId, database });
 }
 
 export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {
@@ -1282,8 +1296,8 @@ export async function redisExecuteCommand(connectionId: string, db: number, comm
   return invoke("redis_execute_command", { connectionId, db, command, skipSafetyCheck: skipSafetyCheck ?? false });
 }
 
-export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number): Promise<RedisValue> {
-  return invoke("redis_load_more", { connectionId, db, keyRaw, keyType, cursor, count });
+export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filterQuery?: string): Promise<RedisValue> {
+  return invoke("redis_load_more", { connectionId, db, keyRaw, keyType, cursor, count, filterQuery });
 }
 
 export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {
