@@ -72,6 +72,7 @@ export const COMPLETION_METADATA_CONCURRENCY = 2;
 const MONGO_LEGACY_DRIVER_PROFILE = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL = "MongoDB (Legacy)";
 const SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE = "Connection attempt was superseded by a newer attempt";
+export const CONNECTION_ATTEMPT_CANCELLED_MESSAGE = "Connection attempt was cancelled";
 function sidebarObjectGroupPageSize(): number {
   const settingsStore = useSettingsStore();
   const size = settingsStore.desktopSettings.sidebar_table_page_size;
@@ -194,6 +195,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const treeNodes = ref<TreeNode[]>([]);
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
   const connectedIds = ref<Set<string>>(new Set());
+  const connectingIds = ref<Set<string>>(new Set());
   const lastConnectionHealthCheckAt = ref<Record<string, number>>({});
   const loadedTreeNodeChildrenIds = ref<Set<string>>(new Set());
   const connectionErrors = ref<Record<string, string>>({});
@@ -268,6 +270,10 @@ export const useConnectionStore = defineStore("connection", () => {
   let layoutPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const staleTreeRefreshIds = new Set<string>();
   const connectInFlight = new Map<string, Promise<void>>();
+  const activeLocalConnectionAttempts = new Map<string, number>();
+  const cancelledLocalConnectionAttempts = new Map<string, Set<number>>();
+  const cancelDisconnectInFlight = new Map<string, Promise<void>>();
+  let nextLocalConnectionAttempt = 0;
   let beforeConnectHandler: BeforeConnectHandler | null = null;
   let initFromDiskPromise: Promise<void> | null = null;
 
@@ -301,6 +307,97 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function isSupersededConnectionAttempt(error: unknown): boolean {
     return connectionErrorMessage(error).includes(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
+  }
+
+  function isCancelledConnectionAttempt(error: unknown): boolean {
+    return connectionErrorMessage(error).includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
+  }
+
+  function beginLocalConnectionAttempt(connectionId: string): number {
+    const attempt = ++nextLocalConnectionAttempt;
+    activeLocalConnectionAttempts.set(connectionId, attempt);
+    connectingIds.value.add(connectionId);
+    const node = findNode(treeNodes.value, connectionId);
+    if (node) node.isLoading = true;
+    return attempt;
+  }
+
+  function isCurrentLocalConnectionAttempt(connectionId: string, attempt: number): boolean {
+    return activeLocalConnectionAttempts.get(connectionId) === attempt;
+  }
+
+  function isCancelledLocalConnectionAttempt(connectionId: string, attempt: number): boolean {
+    return cancelledLocalConnectionAttempts.get(connectionId)?.has(attempt) === true;
+  }
+
+  function finishLocalConnectionAttempt(connectionId: string, attempt: number) {
+    const attempts = cancelledLocalConnectionAttempts.get(connectionId);
+    attempts?.delete(attempt);
+    if (attempts?.size === 0) cancelledLocalConnectionAttempts.delete(connectionId);
+    if (!isCurrentLocalConnectionAttempt(connectionId, attempt)) return;
+    activeLocalConnectionAttempts.delete(connectionId);
+    connectingIds.value.delete(connectionId);
+    clearConnectionNodeLoading(connectionId);
+  }
+
+  function cancelLocalConnectionAttempt(connectionId: string): number | undefined {
+    const attempt = activeLocalConnectionAttempts.get(connectionId);
+    if (attempt == null) return undefined;
+    const attempts = cancelledLocalConnectionAttempts.get(connectionId) ?? new Set<number>();
+    attempts.add(attempt);
+    cancelledLocalConnectionAttempts.set(connectionId, attempts);
+    activeLocalConnectionAttempts.delete(connectionId);
+    connectingIds.value.delete(connectionId);
+    clearConnectionNodeLoading(connectionId);
+    connectInFlight.delete(connectionId);
+    return attempt;
+  }
+
+  async function cleanupResolvedCancelledConnectionAttempt(connectionId: string, attempt: number) {
+    try {
+      await withDisconnectRequestTimeout(connectionId, api.disconnectDb(connectionId, attempt));
+    } catch (error) {
+      console.warn("[DBX][connection:cancel-result-cleanup-error]", { connectionId, attempt, error });
+    }
+  }
+
+  async function ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId: string, attempt: number, cleanupConnectionId: string) {
+    if (isCancelledLocalConnectionAttempt(connectionId, attempt)) {
+      await cleanupResolvedCancelledConnectionAttempt(cleanupConnectionId, attempt);
+      throw new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
+    }
+    ensureLocalConnectionAttemptActive(connectionId, attempt);
+  }
+
+  function ensureLocalConnectionAttemptActive(connectionId: string, attempt: number) {
+    if (isCancelledLocalConnectionAttempt(connectionId, attempt)) {
+      throw new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
+    }
+    if (!isCurrentLocalConnectionAttempt(connectionId, attempt)) {
+      throw new Error(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
+    }
+  }
+
+  function cancelDisconnectKey(connectionId: string, attempt: number): string {
+    return `${connectionId}:${attempt}`;
+  }
+
+  async function cancelConnecting(connectionId: string) {
+    const attempt = cancelLocalConnectionAttempt(connectionId);
+    if (attempt == null) return;
+    const key = cancelDisconnectKey(connectionId, attempt);
+    const existing = cancelDisconnectInFlight.get(key);
+    if (existing) {
+      await existing;
+      return;
+    }
+    const request = withDisconnectRequestTimeout(connectionId, api.disconnectDb(connectionId, attempt)).finally(() => {
+      if (cancelDisconnectInFlight.get(key) === request) {
+        cancelDisconnectInFlight.delete(key);
+      }
+    });
+    cancelDisconnectInFlight.set(key, request);
+    await request;
   }
 
   function setConnectionError(connectionId: string, message: string) {
@@ -424,7 +521,7 @@ export const useConnectionStore = defineStore("connection", () => {
     recordConnectionError(connectionId, error);
   }
 
-  async function withConnectionAttemptTimeout<T>(promise: Promise<T>, config: ConnectionConfig): Promise<T> {
+  async function withConnectionAttemptTimeout<T>(promise: Promise<T>, config: ConnectionConfig, clientAttempt?: number): Promise<T> {
     const timeoutMs = connectionAttemptTimeoutMs(config);
     const timeoutMessage = connectionAttemptTimeoutMessage(timeoutMs);
     let timedOut = false;
@@ -434,7 +531,7 @@ export const useConnectionStore = defineStore("connection", () => {
         if (!timedOut) return;
         const cleanupConnectionId = typeof connectionId === "string" && connectionId ? connectionId : config.id;
         if (connectedIds.value.has(cleanupConnectionId)) return;
-        void api.disconnectDb(cleanupConnectionId).catch((error) => {
+        void api.disconnectDb(cleanupConnectionId, clientAttempt).catch((error) => {
           console.warn("[DBX][connection:timeout-cleanup-failed]", { connectionId: cleanupConnectionId, error });
         });
       },
@@ -640,6 +737,11 @@ export const useConnectionStore = defineStore("connection", () => {
   function supportedSidebarObjectTypes(config?: ConnectionConfig): DatabaseObjectTreeKind[] {
     const dbType = effectiveDatabaseTypeForConnection(config);
     return sidebarObjectKindsForDatabase(dbType);
+  }
+
+  function isPostgresLikeForExtensions(config?: ConnectionConfig): boolean {
+    const dbType = effectiveDatabaseTypeForConnection(config);
+    return dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "highgo" || dbType === "vastbase" || dbType === "kingbase";
   }
 
   function sortSidebarSchemaInfos(schemas: readonly SchemaInfo[]): SchemaInfo[] {
@@ -1226,11 +1328,12 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
-    const pendingNode = findNode(treeNodes.value, config.id);
-    if (pendingNode) pendingNode.isLoading = true;
+    const attempt = beginLocalConnectionAttempt(config.id);
     try {
       await beforeConnectHandler?.(config);
-      const id = await withConnectionAttemptTimeout(api.connectDb(config), config);
+      ensureLocalConnectionAttemptActive(config.id, attempt);
+      const id = await withConnectionAttemptTimeout(api.connectDb(config, attempt), config, attempt);
+      await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, attempt, id);
       await syncMongoLegacyDriverFallback(id, config);
       activeConnectionId.value = id;
       connectedIds.value.add(id);
@@ -1256,15 +1359,22 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       return id;
     } catch (e) {
+      if (isCancelledConnectionAttempt(e)) {
+        clearConnectionError(config.id);
+        throw e;
+      }
       recordConnectionError(config.id, e);
       throw e;
     } finally {
-      const node = findNode(treeNodes.value, config.id);
-      if (node) node.isLoading = false;
+      finishLocalConnectionAttempt(config.id, attempt);
     }
   }
 
   async function disconnect(connectionId: string) {
+    if (connectingIds.value.has(connectionId)) {
+      await cancelConnecting(connectionId);
+      return;
+    }
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
     await withDisconnectRequestTimeout(connectionId, api.disconnectDb(connectionId));
     clearConnectionError(connectionId);
@@ -1353,7 +1463,14 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     const connectPromise = (async () => {
       await beforeConnectHandler?.(config);
-      await withConnectionAttemptTimeout(api.connectDb(config), config);
+      const attempt = beginLocalConnectionAttempt(connectionId);
+      try {
+        ensureLocalConnectionAttemptActive(connectionId, attempt);
+        const id = await withConnectionAttemptTimeout(api.connectDb(config, attempt), config, attempt);
+        await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, attempt, id);
+      } finally {
+        finishLocalConnectionAttempt(connectionId, attempt);
+      }
       await syncMongoLegacyDriverFallback(connectionId, config);
       connectedIds.value.add(connectionId);
       markConnectionHealthChecked(connectionId);
@@ -1364,6 +1481,10 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await connectPromise;
     } catch (e) {
+      if (isCancelledConnectionAttempt(e)) {
+        clearConnectionError(connectionId);
+        throw e;
+      }
       if (isSupersededConnectionAttempt(e) && connectedIds.value.has(connectionId)) {
         clearConnectionError(connectionId);
         return;
@@ -2075,6 +2196,18 @@ export const useConnectionStore = defineStore("connection", () => {
           schema: effectiveSchema,
           objectTypes: supportedSidebarObjectTypes(config),
         });
+        if (isPostgresLikeForExtensions(config)) {
+          children.push({
+            id: `${nodeId}:__extensions`,
+            label: "tree.extensions",
+            type: "group-extensions",
+            connectionId,
+            database,
+            schema: effectiveSchema,
+            isExpanded: false,
+            children: [],
+          });
+        }
       }
       setChildren(node, children);
       await savePersistedTreeChildren(cacheKey, children);
@@ -2141,6 +2274,35 @@ export const useConnectionStore = defineStore("connection", () => {
       node.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(node.connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadExtensions(connectionId: string, database: string, schema: string, options?: LoadTreeOptions) {
+    const node = findNode(treeNodes.value, `${connectionId}:${database}:${schema}:__extensions`);
+    if (!node) return;
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      if (useCachedChildren(node, options)) return;
+      const extensions = await withMetadataLoadTimeout(connectionId, api.listExtensions(connectionId, database, schema || "public"), "extensions");
+      const children: TreeNode[] = extensions.map((ext) => ({
+        id: `${node.id}:${ext.name}`,
+        label: ext.name,
+        type: "extension",
+        connectionId,
+        database,
+        schema,
+        comment: ext.comment ?? null,
+        meta: ext,
+        isExpanded: false,
+      }));
+      setChildren(node, children);
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
       node.isLoading = false;
@@ -2622,6 +2784,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadObjectGroupChildren(node, options);
     } else if (node.type === "group-partitions") {
       node.isExpanded = true;
+    } else if (node.type === "group-extensions" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      await loadExtensions(node.connectionId, node.database || "", node.schema || "", options);
     }
   }
 
@@ -2638,6 +2802,12 @@ export const useConnectionStore = defineStore("connection", () => {
     if (objectTypesForGroupNode(node.type)) {
       clearLoadedChildrenCache(node.id);
       await loadObjectGroupChildren(node, { force: true });
+      return;
+    }
+
+    if (node.type === "group-extensions" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      clearLoadedChildrenCache(node.id);
+      await loadExtensions(node.connectionId, node.database || "", node.schema || "", { force: true });
       return;
     }
 
@@ -3890,6 +4060,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshDatabaseTreeNode,
     refreshObjectListTreeNode,
     connectedIds,
+    connectingIds,
     connectionErrors,
     setConnectionError,
     clearConnectionError,
@@ -3921,6 +4092,7 @@ export const useConnectionStore = defineStore("connection", () => {
     startCreatingConnectionInGroup,
     stopCreatingConnectionInGroup,
     connect,
+    cancelConnecting,
     disconnect,
     closeDatabaseConnection,
     ensureConnected,

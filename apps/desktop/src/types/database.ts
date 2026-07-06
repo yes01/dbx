@@ -172,6 +172,14 @@ export interface SshTunnelConfig {
   ssh_agent_sock_path?: string;
 }
 
+export interface SshConfigHostEntry {
+  alias: string;
+  host_name?: string | null;
+  port?: number | null;
+  user?: string | null;
+  identity_file?: string | null;
+}
+
 export interface ProxyTunnelConfig {
   id: string;
   name?: string;
@@ -370,6 +378,13 @@ export interface RuleInfo {
   definition: string;
 }
 
+export interface ExtensionInfo {
+  name: string;
+  version: string;
+  comment?: string | null;
+  schema?: string | null;
+}
+
 export interface OwnerInfo {
   object_name: string;
   object_type: string;
@@ -485,6 +500,8 @@ export type TreeNodeType =
   | "group-sequences"
   | "group-packages"
   | "group-partitions"
+  | "group-extensions"
+  | "extension"
   | "object-browser"
   | "user-admin"
   | "saved-sql-root"
@@ -549,7 +566,7 @@ export interface TreeNode {
   hiddenChildren?: TreeNode[];
   savedSqlId?: string;
   savedSqlFolderId?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | VectorCollectionMeta;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ExtensionInfo | VectorCollectionMeta;
   loadMore?: {
     parentId: string;
     offset: number;

@@ -101,6 +101,19 @@ export function buildDuplicateTableStructureSql(options: DuplicateTableStructure
   return api.buildDuplicateTableStructureSql(options);
 }
 
+export function buildCreateExtensionSql(name: string, schema?: string | null): string {
+  const extName = quotePostgresIdentifier(name);
+  if (schema) {
+    return `CREATE EXTENSION ${extName} WITH SCHEMA ${quotePostgresIdentifier(schema)};`;
+  }
+  return `CREATE EXTENSION ${extName};`;
+}
+
+export function buildDropExtensionSql(name: string, cascade = false): string {
+  const extName = quotePostgresIdentifier(name);
+  return cascade ? `DROP EXTENSION ${extName} CASCADE;` : `DROP EXTENSION ${extName};`;
+}
+
 function quotePostgresIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
 }
