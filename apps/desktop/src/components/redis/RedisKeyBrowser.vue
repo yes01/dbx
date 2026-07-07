@@ -213,7 +213,12 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
 
 async function fetchScanPage(): Promise<RedisScanResult> {
   const pageSize = redisScanPageSize.value;
-  return isValueSearchMode.value ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all") : await api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, 1, false);
+  // Redis SCAN may return an empty page with a non-zero cursor; batch a few
+  // key-search pages so sparse MATCH patterns do not look empty immediately.
+  const keySearchIterations = 8;
+  return isValueSearchMode.value
+    ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all")
+    : await api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, keySearchIterations, false);
 }
 
 /// Batch-scan variant that performs multiple SCAN iterations server-side.
