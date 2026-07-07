@@ -405,6 +405,10 @@ function fixWithAi(errorMessage: string) {
   nextTick(() => aiAssistantRef.value?.triggerAction("fix", errorMessage));
 }
 
+function openConnectionSettings(connectionId: string) {
+  connectionStore.startEditing(connectionId);
+}
+
 function openAiPanel() {
   if (!showAiPanel.value) {
     showAiPanel.value = true;
@@ -1651,6 +1655,7 @@ onUnmounted(() => {
                     "
                     @structure-editor-close="activeTab && queryStore.closeTab(activeTab.id)"
                     @open-settings="openSettings"
+                    @open-connection-settings="(connectionId: string) => openConnectionSettings(connectionId)"
                   />
                 </KeepAlive>
               </div>

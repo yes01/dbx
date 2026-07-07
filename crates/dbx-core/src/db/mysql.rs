@@ -488,6 +488,7 @@ fn create_pool(
     let tls_url = mysql_tls_url(url)?;
     let opts =
         mysql_async::Opts::from_url(&mysql_async_url(&tls_url.url)).map_err(|e| format!("Invalid MySQL URL: {e}"))?;
+    let tcp_host = mysql_async_tcp_host(opts.ip_or_hostname()).to_string();
     let base_ssl_opts = opts.ssl_opts().cloned();
     let max_connections = max_connections.max(1);
     // Single-connection pools (max_connections == 1) are client session pools that
@@ -504,6 +505,7 @@ fn create_pool(
         None => mysql_setup_queries(url, extra_setup_queries),
     };
     let mut builder = mysql_async::OptsBuilder::from_opts(opts)
+        .ip_or_hostname(tcp_host)
         .stmt_cache_size(0)
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
@@ -513,6 +515,15 @@ fn create_pool(
         builder = builder.ssl_opts(ssl_opts);
     }
     Ok(MySqlPool::new(builder))
+}
+
+fn mysql_async_tcp_host(host: &str) -> &str {
+    if let Some(inner) = host.strip_prefix('[').and_then(|value| value.strip_suffix(']')) {
+        if inner.parse::<std::net::Ipv6Addr>().is_ok() {
+            return inner;
+        }
+    }
+    host
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -632,6 +643,7 @@ fn mysql_setup_queries_for_database(
         queries.push(format!("SET time_zone = {}", quote_value(&time_zone)));
     }
     queries.push(format!("SET NAMES {charset}"));
+    queries.push("SET @@group_concat_max_len = 1048576".to_string());
     // StarRocks/Doris expose external storage (Paimon, Hive, ...) through a
     // catalog. `SET catalog` must run *before* `USE <database>` (the database
     // lives in the external catalog and is unknown to the default one).
@@ -3328,6 +3340,27 @@ mod tests {
     }
 
     #[test]
+    fn mysql_async_builder_host_strips_ipv6_url_brackets() {
+        let opts = mysql_async::Opts::from_url("mysql://root:secret@[2001:db8::1]:3306/app").unwrap();
+
+        assert_eq!(opts.ip_or_hostname(), "[2001:db8::1]");
+        assert_eq!(mysql_async_tcp_host(opts.ip_or_hostname()), "2001:db8::1");
+
+        let builder_opts = mysql_async::Opts::from(
+            mysql_async::OptsBuilder::from_opts(opts).ip_or_hostname(mysql_async_tcp_host("[2001:db8::1]").to_string()),
+        );
+        assert_eq!(builder_opts.ip_or_hostname(), "2001:db8::1");
+        assert_eq!(builder_opts.tcp_port(), 3306);
+    }
+
+    #[test]
+    fn mysql_async_builder_host_only_strips_valid_ipv6_literals() {
+        assert_eq!(mysql_async_tcp_host("2001:db8::1"), "2001:db8::1");
+        assert_eq!(mysql_async_tcp_host("[mysql.example.com]"), "[mysql.example.com]");
+        assert_eq!(mysql_async_tcp_host("mysql.example.com"), "mysql.example.com");
+    }
+
+    #[test]
     fn mysql_tls_url_strips_client_identity_params_before_driver_parse() {
         let dir = std::env::temp_dir();
         let cert = dir.join(format!("dbx-mysql-client-cert-{}.pem", std::process::id()));
@@ -3389,21 +3422,21 @@ mod tests {
     fn mysql_setup_queries_select_requested_database_before_session_init() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["USE `app`", "SET NAMES utf8mb4"]);
+        assert_eq!(queries, vec!["USE `app`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
     }
 
     #[test]
     fn mysql_setup_queries_skip_use_when_database_missing() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["SET NAMES utf8mb4"]);
+        assert_eq!(queries, vec!["SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
     }
 
     #[test]
     fn mysql_setup_queries_decode_database_name_from_url() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/db%2Fname?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["USE `db/name`", "SET NAMES utf8mb4"]);
+        assert_eq!(queries, vec!["USE `db/name`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
     }
 
     #[test]
@@ -3414,7 +3447,7 @@ mod tests {
             &[],
         );
 
-        assert_eq!(queries, vec!["USE `app``proxy`", "SET NAMES utf8mb4"]);
+        assert_eq!(queries, vec!["USE `app``proxy`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
     }
 
     #[test]
@@ -3625,18 +3658,21 @@ mod tests {
 
     #[test]
     fn mysql_setup_queries_default_to_utf8mb4() {
-        assert_eq!(mysql_setup_queries("mysql://host:3306/db", &[]), vec!["USE `db`", "SET NAMES utf8mb4"]);
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db", &[]),
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
+        );
     }
 
     #[test]
     fn mysql_setup_queries_use_safe_custom_charset() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?ssl-mode=preferred&charset=gbk", &[]),
-            vec!["USE `db`", "SET NAMES gbk"]
+            vec!["USE `db`", "SET NAMES gbk", "SET @@group_concat_max_len = 1048576"]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4;DROP TABLE users", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
     }
 
@@ -3646,7 +3682,12 @@ mod tests {
 
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db", &extra),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET ob_query_timeout = 30000000"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET @@group_concat_max_len = 1048576",
+                "SET ob_query_timeout = 30000000"
+            ]
         );
     }
 
@@ -3654,11 +3695,16 @@ mod tests {
     fn mysql_setup_queries_apply_explicit_time_zone() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&charset=utf8mb4", &[]),
-            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time-zone=Asia%2FShanghai", &[]),
-            vec!["USE `db`", "SET time_zone = 'Asia/Shanghai'", "SET NAMES utf8mb4"]
+            vec![
+                "USE `db`",
+                "SET time_zone = 'Asia/Shanghai'",
+                "SET NAMES utf8mb4",
+                "SET @@group_concat_max_len = 1048576"
+            ]
         );
     }
 
@@ -3666,11 +3712,11 @@ mod tests {
     fn mysql_setup_queries_apply_jdbc_time_zone_aliases() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?serverTimezone=GMT%2B8", &[]),
-            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=UTC", &[]),
-            vec!["USE `db`", "SET time_zone = '+00:00'", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET time_zone = '+00:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
     }
 
@@ -3678,11 +3724,16 @@ mod tests {
     fn mysql_setup_queries_apply_go_loc_when_no_explicit_time_zone_exists() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?loc=Asia%2FShanghai", &[]),
-            vec!["USE `db`", "SET time_zone = 'Asia/Shanghai'", "SET NAMES utf8mb4"]
+            vec![
+                "USE `db`",
+                "SET time_zone = 'Asia/Shanghai'",
+                "SET NAMES utf8mb4",
+                "SET @@group_concat_max_len = 1048576"
+            ]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&loc=UTC", &[]),
-            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
     }
 
@@ -3690,7 +3741,7 @@ mod tests {
     fn mysql_setup_queries_ignore_unsafe_time_zone_values() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00%27%3BDROP%20TABLE%20users", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
     }
 
@@ -3700,7 +3751,12 @@ mod tests {
         // execution (Vec::pop) runs it before `USE <database>`.
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/clip?catalog=paimon_catalog", &[]),
-            vec!["USE `clip`", "SET NAMES utf8mb4", "SET catalog = `paimon_catalog`"]
+            vec![
+                "USE `clip`",
+                "SET NAMES utf8mb4",
+                "SET @@group_concat_max_len = 1048576",
+                "SET catalog = `paimon_catalog`"
+            ]
         );
     }
 
@@ -3708,7 +3764,7 @@ mod tests {
     fn mysql_setup_queries_switch_catalog_without_database() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/?catalog=paimon_catalog", &[]),
-            vec!["SET NAMES utf8mb4", "SET catalog = `paimon_catalog`"]
+            vec!["SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576", "SET catalog = `paimon_catalog`"]
         );
     }
 
@@ -3716,7 +3772,7 @@ mod tests {
     fn mysql_setup_queries_decodes_catalog_parameter() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?catalog=my%5Fcatalog", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET catalog = `my_catalog`"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576", "SET catalog = `my_catalog`"]
         );
     }
 
@@ -3724,7 +3780,7 @@ mod tests {
     fn mysql_setup_queries_omits_catalog_when_absent() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
     }
 }

@@ -54,6 +54,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridSearchMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
+import { isQueryTimeoutErrorMessage } from "@/lib/queryError";
 import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
 import { defaultQueryResultArchiveFileName } from "@/lib/queryResultArchive";
 import { saveQueryResultArchiveFile } from "@/lib/queryResultArchiveFile";
@@ -138,6 +139,7 @@ const emit = defineEmits<{
   structureEditorSaved: [commentChanged: boolean];
   structureEditorClose: [];
   openSettings: [initialTab?: string, initialSection?: string];
+  openConnectionSettings: [connectionId: string, initialTab: "advanced"];
 }>();
 
 const { t } = useI18n();
@@ -1048,6 +1050,10 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
               >
                 <template v-if="activeTab.result?.columns.includes('Error')" #error-actions="{ errorMessage }">
+                  <Button v-if="activeTab.connectionId && isQueryTimeoutErrorMessage(String(errorMessage))" variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('openConnectionSettings', activeTab.connectionId, 'advanced')">
+                    <Wrench class="h-3.5 w-3.5" />
+                    {{ t("editor.changeQueryTimeout") }}
+                  </Button>
                   <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('fixWithAi', String(errorMessage))">
                     <Bot class="h-3.5 w-3.5" />
                     {{ t("ai.fixWithAi") }}

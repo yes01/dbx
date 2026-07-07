@@ -545,6 +545,7 @@ const headerPanelDismissGuardUntil = ref(0);
 const localFilterSearch = ref("");
 const localFilterDraft = ref<LocalColumnFilterDraft | null>(null);
 const filterBuilderOpen = ref(false);
+const filterBuilderColumnSearch = ref("");
 const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "equals", labelKey: "grid.filterBuilderEquals" },
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
@@ -557,6 +558,12 @@ const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
 ];
 const filterBuilderColumns = computed(() => props.tableMeta?.columns ?? []);
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
+const filteredFilterBuilderColumnOptions = computed(() => {
+  const query = filterBuilderColumnSearch.value.trim().toLowerCase();
+  if (!query) return filterBuilderColumnOptions.value;
+  return filterBuilderColumnOptions.value.filter((columnName) => columnName.toLowerCase().includes(query));
+});
+const filterBuilderColumnSearchNavigationKeys = new Set(["Escape", "Tab", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
 const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", filterBuilderColumnOptions.value.join("\0")].join("\u0001"));
 const structuredFilterRules = ref<StructuredFilterRule[]>([]);
@@ -1100,6 +1107,23 @@ function updateStructuredFilterRule(ruleId: string, patch: Partial<StructuredFil
   });
 }
 
+function updateStructuredFilterRuleColumn(ruleId: string, columnName: string) {
+  updateStructuredFilterRule(ruleId, { columnName });
+  filterBuilderColumnSearch.value = "";
+}
+
+function handleFilterBuilderColumnSearchKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.key === "Process") {
+    event.stopPropagation();
+    return;
+  }
+  if (filterBuilderColumnSearchNavigationKeys.has(event.key)) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.key.length === 1 || event.key === "Backspace" || event.key === "Delete") {
+    event.stopPropagation();
+  }
+}
+
 function resetStructuredFilters() {
   appliedStructuredWhereInput.value = "";
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
@@ -1155,6 +1179,10 @@ async function applyStructuredFilters() {
 }
 
 watch([structuredFilterCacheKey, structuredFilterScopeKey], loadStructuredFilterStateForScope, { immediate: true });
+
+watch(filterBuilderOpen, (open) => {
+  if (!open) filterBuilderColumnSearch.value = "";
+});
 
 watch(
   [structuredFilterRules, appliedStructuredWhereInput],
@@ -6244,8 +6272,14 @@ function onRowContext(rowId: number, rowIndex: number) {
 
 async function prefetchCopyStatements() {
   await prefetchRowAsInsertStatement(false);
+  if (isMultiRow.value) {
+    await prefetchRowAsInsertStatement(false, "row-by-row");
+  }
   if (canCopyRowAsInsertWithoutPrimaryKeys.value) {
     await prefetchRowAsInsertStatement(true);
+    if (isMultiRow.value) {
+      await prefetchRowAsInsertStatement(true, "row-by-row");
+    }
   }
   if (canCopyRowAsUpdate.value) {
     await prefetchRowAsUpdateStatement();
@@ -6739,7 +6773,11 @@ function copyRowLabels() {
   return {
     row: isMultiRow.value ? t("grid.copyRows", { count }) : t("grid.copyRow"),
     insert: isMultiRow.value ? t("grid.copyRowsInsert", { count }) : t("grid.copyRowInsert"),
+    insertMerged: t("grid.copyRowsInsertMerged", { count }),
+    insertRowByRow: t("grid.copyRowsInsertRowByRow", { count }),
     insertNoPk: isMultiRow.value ? t("grid.copyRowsInsertWithoutPrimaryKeys", { count }) : t("grid.copyRowInsertWithoutPrimaryKeys"),
+    insertNoPkMerged: t("grid.copyRowsInsertWithoutPrimaryKeysMerged", { count }),
+    insertNoPkRowByRow: t("grid.copyRowsInsertWithoutPrimaryKeysRowByRow", { count }),
     update: isMultiRow.value ? t("grid.copyRowsUpdate", { count }) : t("grid.copyRowUpdate"),
   };
 }
@@ -6771,13 +6809,31 @@ function copySubmenu(): ContextMenuItem {
     items.push({ label: t("grid.copyCell"), action: copyCell });
   }
   items.push({ label: labels.row, action: copyRow });
-  items.push({ label: labels.insert, action: copyRowAsInsert, disabled: !canCopyPreparedInsert(false) });
+  if (isMultiRow.value) {
+    items.push({ label: labels.insertMerged, action: () => copyRowAsInsert("merged"), disabled: !canCopyPreparedInsert(false, "merged") });
+    items.push({ label: labels.insertRowByRow, action: () => copyRowAsInsert("row-by-row"), disabled: !canCopyPreparedInsert(false, "row-by-row") });
+  } else {
+    items.push({ label: labels.insert, action: () => copyRowAsInsert(), disabled: !canCopyPreparedInsert(false) });
+  }
   if (canCopyRowAsInsertWithoutPrimaryKeys.value) {
-    items.push({
-      label: labels.insertNoPk,
-      action: copyRowAsInsertWithoutPrimaryKeys,
-      disabled: !canCopyPreparedInsert(true),
-    });
+    if (isMultiRow.value) {
+      items.push({
+        label: labels.insertNoPkMerged,
+        action: () => copyRowAsInsertWithoutPrimaryKeys("merged"),
+        disabled: !canCopyPreparedInsert(true, "merged"),
+      });
+      items.push({
+        label: labels.insertNoPkRowByRow,
+        action: () => copyRowAsInsertWithoutPrimaryKeys("row-by-row"),
+        disabled: !canCopyPreparedInsert(true, "row-by-row"),
+      });
+    } else {
+      items.push({
+        label: labels.insertNoPk,
+        action: () => copyRowAsInsertWithoutPrimaryKeys(),
+        disabled: !canCopyPreparedInsert(true),
+      });
+    }
   }
   if (canCopyRowAsUpdate.value) {
     items.push({ label: labels.update, action: copyRowAsUpdate, disabled: !canCopyPreparedUpdate() });
@@ -7065,14 +7121,32 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             </Button>
                           </div>
                           <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
-                            <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { columnName: String(value) })">
+                            <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRuleColumn(rule.id, String(value))">
                               <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                                 <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
                               </SelectTrigger>
-                              <SelectContent position="popper">
-                                <SelectItem v-for="columnName in filterBuilderColumnOptions" :key="columnName" :value="columnName">
+                              <SelectContent position="popper" class="max-h-72" :hide-scroll-buttons="true">
+                                <SelectItem v-for="columnName in filteredFilterBuilderColumnOptions" :key="columnName" :value="columnName">
                                   {{ columnName }}
                                 </SelectItem>
+                                <div v-if="filteredFilterBuilderColumnOptions.length === 0" class="px-2 py-2 text-xs text-muted-foreground">
+                                  {{ t("grid.filterBuilderNoMatchingColumns") }}
+                                </div>
+                                <div class="sticky bottom-0 mt-1 flex items-center gap-1.5 border-t bg-popover px-2 py-1.5">
+                                  <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                  <input
+                                    v-model="filterBuilderColumnSearch"
+                                    autocapitalize="off"
+                                    autocomplete="off"
+                                    autocorrect="off"
+                                    spellcheck="false"
+                                    class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+                                    :placeholder="t('grid.filterBuilderSearchColumns')"
+                                    @click.stop
+                                    @keydown="handleFilterBuilderColumnSearchKeydown"
+                                    @pointerdown.stop
+                                  />
+                                </div>
                               </SelectContent>
                             </Select>
 

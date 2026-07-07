@@ -354,6 +354,12 @@ function openEditSnippetDialog(snippet: SqlSnippet) {
   snippetDialogOpen.value = true;
 }
 
+function setSnippetEnabled(snippet: SqlSnippet, enabled: boolean) {
+  const idx = editSnippets.value.findIndex((item) => item.id === snippet.id);
+  if (idx === -1) return;
+  editSnippets.value[idx] = { ...editSnippets.value[idx], enabled };
+}
+
 function saveSnippet() {
   const prefix = snippetForm.value.prefix.trim();
   if (!prefix) {
@@ -373,6 +379,7 @@ function saveSnippet() {
         label: snippetForm.value.label.trim() || prefix,
         prefix,
         body: snippetForm.value.body,
+        enabled: editSnippets.value[idx].enabled !== false,
       };
     }
   } else {
@@ -381,6 +388,7 @@ function saveSnippet() {
       label: snippetForm.value.label.trim() || prefix,
       prefix,
       body: snippetForm.value.body,
+      enabled: true,
     });
   }
   snippetDialogOpen.value = false;
@@ -2869,6 +2877,9 @@ watch(
                       <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
                         {{ t("settings.snippetsBody") }}
                       </th>
+                      <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
+                        {{ t("settings.snippetsEnabled") }}
+                      </th>
                       <th class="px-3 py-2 w-20"></th>
                     </tr>
                   </thead>
@@ -2882,6 +2893,14 @@ watch(
                       </td>
                       <td class="px-3 py-2 font-mono text-xs text-muted-foreground max-w-[300px] truncate">
                         {{ snippet.body }}
+                      </td>
+                      <td class="px-3 py-2">
+                        <div class="flex items-center gap-2">
+                          <Switch :model-value="snippet.enabled !== false" @update:model-value="setSnippetEnabled(snippet, $event)" />
+                          <span class="text-xs text-muted-foreground">
+                            {{ snippet.enabled === false ? t("settings.snippetsDisabled") : t("settings.snippetsEnabled") }}
+                          </span>
+                        </div>
                       </td>
                       <td class="px-3 py-2">
                         <div class="flex items-center gap-1">

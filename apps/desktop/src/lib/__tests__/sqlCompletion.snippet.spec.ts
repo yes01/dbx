@@ -101,4 +101,9 @@ describe("buildSnippetItems", () => {
     const items = buildSnippetItemsForTest("", TEST_SNIPPETS);
     expect(items).toEqual([]);
   });
+
+  it("skips disabled snippets", () => {
+    const items = buildSnippetItemsForTest("sel", [{ id: "disabled", label: "select all", prefix: "sel", body: "SELECT * FROM table", enabled: false }]);
+    expect(items).toEqual([]);
+  });
 });

@@ -1,6 +1,7 @@
 export type ShortcutActionId =
   | "executeSql"
   | "formatSql"
+  | "toggleLineComment"
   | "saveSql"
   | "acceptCompletion"
   | "indentMore"
@@ -14,6 +15,7 @@ export type ShortcutActionId =
   | "undo"
   | "redo"
   | "selectAll"
+  | "exPasteSqlInCondition"
   | "copyCurrentRow"
   | "deleteCurrentRow"
   | "newQuery"
@@ -68,6 +70,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutFormatSql",
     scope: "editor",
     defaultShortcut: "Shift+Mod+F",
+  },
+  {
+    id: "toggleLineComment",
+    labelKey: "settings.shortcutToggleLineComment",
+    scope: "editor",
+    defaultShortcut: "Mod+/",
   },
   {
     id: "saveSql",
@@ -146,6 +154,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutSelectAll",
     scope: "editor",
     defaultShortcut: "Mod+A",
+  },
+  {
+    id: "exPasteSqlInCondition",
+    labelKey: "settings.shortcutExPasteSqlInCondition",
+    scope: "editor",
+    defaultShortcut: "",
   },
   {
     id: "copyCurrentRow",

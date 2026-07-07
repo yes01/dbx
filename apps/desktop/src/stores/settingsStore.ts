@@ -607,7 +607,7 @@ function normalizeSqlSnippets(value: unknown, existing?: SqlSnippet[]): SqlSnipp
     }
     if (seenPrefixes.has(item.prefix)) continue;
     seenPrefixes.add(item.prefix);
-    valid.push({ id: item.id, label: item.label, prefix: item.prefix, body: item.body });
+    valid.push({ id: item.id, label: item.label, prefix: item.prefix, body: item.body, enabled: item.enabled !== false });
   }
   if (valid.length === 0) return existing ?? DEFAULT_SQL_SNIPPETS;
   return valid;

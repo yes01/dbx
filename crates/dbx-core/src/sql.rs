@@ -106,6 +106,7 @@ pub struct SqlFileImportStatement {
 struct SqlDialectProfile {
     supports_hash_line_comments: bool,
     supports_oracle_plsql_blocks: bool,
+    supports_hana_do_blocks: bool,
     supports_slash_line_block_delimiter: bool,
     supports_custom_delimiter_commands: bool,
     supports_mysql_routine_blocks: bool,
@@ -119,6 +120,7 @@ impl Default for SqlDialectProfile {
         Self {
             supports_hash_line_comments: false,
             supports_oracle_plsql_blocks: false,
+            supports_hana_do_blocks: false,
             supports_slash_line_block_delimiter: false,
             supports_custom_delimiter_commands: true,
             supports_mysql_routine_blocks: false,
@@ -143,6 +145,10 @@ impl SqlDialectProfile {
             return Self::mysql_compatible();
         }
 
+        if matches!(db_type, DatabaseType::SapHana) {
+            return Self::sap_hana();
+        }
+
         Self::default()
     }
 
@@ -156,6 +162,10 @@ impl SqlDialectProfile {
 
     fn sql_server() -> Self {
         Self { supports_go_batch_separator: true, keeps_sqlserver_module_batch_at_cursor: true, ..Self::default() }
+    }
+
+    fn sap_hana() -> Self {
+        Self { supports_hana_do_blocks: true, ..Self::default() }
     }
 
     fn is_mysql_compatible_database(db_type: DatabaseType) -> bool {
@@ -407,6 +417,11 @@ impl SqlStatementSplitter {
                         if oracle_plsql_block_is_complete(&self.buffer) {
                             self.push_current_statement(&mut statements);
                         }
+                    } else if self.options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&self.buffer) {
+                        self.buffer.push(ch);
+                        if hana_do_block_is_complete(&self.buffer) {
+                            self.push_current_statement(&mut statements);
+                        }
                     } else {
                         self.push_current_statement(&mut statements);
                     }
@@ -621,6 +636,9 @@ fn split_statement_range_at_blank_lines(
     if options.profile.supports_oracle_plsql_blocks && starts_with_oracle_plsql_block(&statement.text) {
         return vec![statement.clone()];
     }
+    if options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&statement.text) {
+        return vec![statement.clone()];
+    }
 
     let mut ranges = Vec::new();
     let mut scanner = SqlScanner::with_profile(options.profile);
@@ -809,6 +827,12 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                         options.profile.supports_oracle_plsql_blocks && starts_with_oracle_plsql_block(&sql[start..i]);
                     if is_oracle_plsql {
                         if !oracle_plsql_block_is_complete(&sql[start..i + ch.len_utf8()]) {
+                            i += ch.len_utf8();
+                            continue;
+                        }
+                        push_statement_range(&mut ranges, sql, start, i + ch.len_utf8(), options);
+                    } else if options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&sql[start..i]) {
+                        if !hana_do_block_is_complete(&sql[start..i + ch.len_utf8()]) {
                             i += ch.len_utf8();
                             continue;
                         }
@@ -1942,6 +1966,68 @@ fn oracle_plsql_block_is_complete(sql: &str) -> bool {
     OraclePlSqlBlock::parse(sql).is_complete()
 }
 
+fn starts_with_hana_do_block(sql: &str) -> bool {
+    HanaDoBlock::parse(sql).starts_block()
+}
+
+fn hana_do_block_is_complete(sql: &str) -> bool {
+    HanaDoBlock::parse(sql).is_complete()
+}
+
+struct HanaDoBlock {
+    tokens: Vec<OraclePlSqlToken>,
+}
+
+impl HanaDoBlock {
+    fn parse(sql: &str) -> Self {
+        Self { tokens: oracle_plsql_tokens(sql) }
+    }
+
+    fn starts_block(&self) -> bool {
+        self.tokens.first().is_some_and(|token| token.is_word("DO"))
+    }
+
+    fn is_complete(&self) -> bool {
+        if !self.starts_block() {
+            return false;
+        }
+
+        let mut stack: Vec<String> = Vec::new();
+        let mut saw_begin = false;
+
+        for (index, token) in self.tokens.iter().enumerate() {
+            if token.is_word("BEGIN") {
+                if previous_word_token(&self.tokens, index).is_some_and(|previous| previous == "END") {
+                    continue;
+                }
+                stack.push("BLOCK".to_string());
+                saw_begin = true;
+                continue;
+            }
+            if token.is_any_word(&["IF", "FOR", "WHILE", "CASE"]) {
+                if previous_word_token(&self.tokens, index).is_none_or(|previous| previous != "END") {
+                    stack.push(token.as_word().unwrap_or("BLOCK").to_string());
+                }
+                continue;
+            }
+            if token.is_word("END") {
+                let next = next_word_token(&self.tokens, index);
+                let top = stack.last().map(|value| value.as_str());
+                let target = match next {
+                    Some(keyword @ ("IF" | "FOR" | "WHILE")) => keyword,
+                    _ if top == Some("CASE") => "CASE",
+                    _ => "BLOCK",
+                };
+                if top == Some(target) {
+                    stack.pop();
+                }
+            }
+        }
+
+        saw_begin && stack.is_empty() && self.tokens.last().is_some_and(OraclePlSqlToken::is_semicolon)
+    }
+}
+
 struct OraclePlSqlBlock {
     tokens: Vec<OraclePlSqlToken>,
 }
@@ -2040,6 +2126,13 @@ impl OraclePlSqlToken {
         matches!(self, Self::Word(value) if value == expected)
     }
 
+    fn as_word(&self) -> Option<&str> {
+        match self {
+            Self::Word(value) => Some(value),
+            Self::Semicolon => None,
+        }
+    }
+
     fn is_any_word(&self, expected: &[&str]) -> bool {
         expected.iter().any(|word| self.is_word(word))
     }
@@ -2047,6 +2140,14 @@ impl OraclePlSqlToken {
     fn is_semicolon(&self) -> bool {
         matches!(self, Self::Semicolon)
     }
+}
+
+fn previous_word_token(tokens: &[OraclePlSqlToken], index: usize) -> Option<&str> {
+    tokens[..index].iter().rev().find_map(OraclePlSqlToken::as_word)
+}
+
+fn next_word_token(tokens: &[OraclePlSqlToken], index: usize) -> Option<&str> {
+    tokens[index + 1..].iter().find_map(OraclePlSqlToken::as_word)
 }
 
 fn oracle_plsql_tokens(sql: &str) -> Vec<OraclePlSqlToken> {
@@ -2779,6 +2880,7 @@ SELECT 2;";
         assert!(!default.supports_hash_line_comments);
         assert!(!default.supports_mysql_routine_blocks);
         assert!(!default.supports_oracle_plsql_blocks);
+        assert!(!default.supports_hana_do_blocks);
         assert!(!default.supports_slash_line_block_delimiter);
         assert!(!default.supports_go_batch_separator);
         assert!(!default.keeps_sqlserver_module_batch_at_cursor);
@@ -2809,6 +2911,43 @@ SELECT 2;";
         assert_eq!(sql_server, SqlDialectProfile::sql_server());
         assert!(sql_server.supports_go_batch_separator);
         assert!(sql_server.keeps_sqlserver_module_batch_at_cursor);
+
+        let sap_hana = SqlDialectProfile::for_database_type(DatabaseType::SapHana);
+        assert_eq!(sap_hana, SqlDialectProfile::sap_hana());
+        assert!(sap_hana.supports_hana_do_blocks);
+    }
+
+    #[test]
+    fn sap_hana_split_keeps_do_block_together() {
+        let sql = "\
+DO
+BEGIN
+  SELECT 1 AS \"Result\" FROM DUMMY;
+END;
+SELECT 2 FROM DUMMY;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SapHana),
+            vec!["DO\nBEGIN\n  SELECT 1 AS \"Result\" FROM DUMMY;\nEND;", "SELECT 2 FROM DUMMY"]
+        );
+    }
+
+    #[test]
+    fn sap_hana_cursor_statement_keeps_nested_do_block_together() {
+        let sql = "\
+DO
+BEGIN
+  IF 1 = 1 THEN
+    SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END AS \"Result\" FROM DUMMY;
+  END IF;
+END;
+SELECT 2 FROM DUMMY;";
+        let cursor = sql.find("Result").unwrap();
+
+        assert_eq!(
+            find_statement_at_cursor_for_database(sql, cursor, DatabaseType::SapHana),
+            "DO\nBEGIN\n  IF 1 = 1 THEN\n    SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END AS \"Result\" FROM DUMMY;\n  END IF;\nEND;"
+        );
     }
 
     #[test]

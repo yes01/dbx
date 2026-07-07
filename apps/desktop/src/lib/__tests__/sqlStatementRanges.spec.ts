@@ -74,6 +74,14 @@ BEGIN
 END;
 SELECT 2;`;
 
+const sapHanaDoBlockFixture = `DO
+BEGIN
+  IF 1 = 1 THEN
+    SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END AS "Result" FROM DUMMY;
+  END IF;
+END;
+SELECT 2 FROM DUMMY;`;
+
 describe("splitSqlStatementRanges", () => {
   it("splits multiple top-level statements", () => {
     const sql = "SELECT 1;\nSELECT 2;\nSELECT 3;";
@@ -155,6 +163,10 @@ describe("splitSqlStatementRanges", () => {
     expect(ranges[0].sql).toContain("v_order_count NUMBER;");
     expect(ranges[0].sql).toContain("END;");
     expect(ranges[0].sql).not.toContain("\n/");
+  });
+
+  it("keeps SAP HANA DO blocks together", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(sapHanaDoBlockFixture, "saphana"))).toEqual(['DO\nBEGIN\n  IF 1 = 1 THEN\n    SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END AS "Result" FROM DUMMY;\n  END IF;\nEND;', "SELECT 2 FROM DUMMY"]);
   });
 });
 
@@ -390,6 +402,11 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
     const range = statementRangeAtCursor(oraclePlSqlFixture, indexOf(oraclePlSqlFixture, "ORDERS_10K", 2), "oracle");
     expect(range?.sql.trim()).toBe(oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")));
   });
+
+  it("returns the full SAP HANA DO block for cursors inside nested statements", () => {
+    const range = statementRangeAtCursor(sapHanaDoBlockFixture, indexOf(sapHanaDoBlockFixture, "Result"), "saphana");
+    expect(range?.sql.trim()).toBe(sapHanaDoBlockFixture.slice(0, sapHanaDoBlockFixture.indexOf("\nSELECT 2")));
+  });
 });
 
 describe("executableStatementRanges", () => {
@@ -418,6 +435,10 @@ describe("executableStatementRanges", () => {
 
   it("does not split executable MySQL routine ranges at inner statements", () => {
     expect(rangeSqlTexts(executableStatementRanges(mysqlRoutineFixture, "mysql"))).toEqual([mysqlRoutineFixture.slice(0, mysqlRoutineFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
+  });
+
+  it("does not split executable SAP HANA DO ranges at inner statements", () => {
+    expect(rangeSqlTexts(executableStatementRanges(sapHanaDoBlockFixture, "saphana"))).toEqual([sapHanaDoBlockFixture.slice(0, sapHanaDoBlockFixture.indexOf("\nSELECT 2")), "SELECT 2 FROM DUMMY"]);
   });
 });
 

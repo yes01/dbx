@@ -19,6 +19,7 @@ import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle
 import { createRedisShikiJsonHighlighter, type RedisJsonHighlighter } from "@/lib/redisJsonHighlighter";
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatTtl } from "@/lib/ttlFormat";
+import { safeJsonFormat } from "@/lib/safeJsonFormat";
 import { canEditRedisMemberDetail, clampRedisMemberDetailSheetWidth, formatRedisMemberDetail, getRedisMemberSelectionKey } from "@/lib/redisValuePresentation";
 
 const { t } = useI18n();
@@ -346,8 +347,7 @@ function handleStringInput() {
 
 function formatJsonText(raw: string): string | null {
   try {
-    const parsed = JSON.parse(raw);
-    return JSON.stringify(parsed, null, 2);
+    return safeJsonFormat(raw, 2);
   } catch {
     return null;
   }
@@ -355,8 +355,7 @@ function formatJsonText(raw: string): string | null {
 
 function compressJsonText(raw: string): string | null {
   try {
-    const parsed = JSON.parse(raw);
-    return JSON.stringify(parsed);
+    return safeJsonFormat(raw);
   } catch {
     return null;
   }

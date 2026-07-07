@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -165,6 +166,94 @@ func TestIsQuerySQLRequiresKeywordBoundary(t *testing.T) {
 		if isQuerySQL(sqlText) {
 			t.Fatalf("expected SQL not to be treated as query: %s", sqlText)
 		}
+	}
+}
+
+func TestTrimStatementSQLPreservesAnonymousPLSQLBlockTerminator(t *testing.T) {
+	sqlText := `DECLARE
+   PRE_TRD_DATE   INTEGER ;
+BEGIN
+   SELECT 1 + 2 INTO PRE_TRD_DATE FROM DUAL;
+END;`
+
+	if got := trimStatementSQL(sqlText); got != sqlText {
+		t.Fatalf("trimStatementSQL() = %q, want full PL/SQL block %q", got, sqlText)
+	}
+}
+
+func TestTrimStatementSQLStripsSlashDelimiterAfterPLSQLBlock(t *testing.T) {
+	sqlText := "BEGIN\n  NULL;\nEND;\n/"
+	want := "BEGIN\n  NULL;\nEND;"
+
+	if got := trimStatementSQL(sqlText); got != want {
+		t.Fatalf("trimStatementSQL() = %q, want %q", got, want)
+	}
+}
+
+func TestTrimStatementSQLPreservesCreatePLSQLObjectTerminator(t *testing.T) {
+	tests := []string{
+		"CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;",
+		"CREATE OR REPLACE FUNCTION f RETURN NUMBER AS\nBEGIN\n  RETURN 1;\nEND;",
+		"CREATE OR REPLACE PACKAGE pkg_utils AS\n  FUNCTION get_version RETURN VARCHAR2;\nEND pkg_utils;",
+	}
+	for _, sqlText := range tests {
+		if got := trimStatementSQL(sqlText); got != sqlText {
+			t.Fatalf("trimStatementSQL() = %q, want full PL/SQL object %q", got, sqlText)
+		}
+	}
+}
+
+func TestTrimStatementSQLStripsSlashDelimiterAfterCreatePLSQLObject(t *testing.T) {
+	sqlText := "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\n/"
+	want := "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;"
+
+	if got := trimStatementSQL(sqlText); got != want {
+		t.Fatalf("trimStatementSQL() = %q, want %q", got, want)
+	}
+}
+
+func TestTrimStatementSQLRemovesRegularStatementSemicolon(t *testing.T) {
+	if got := trimStatementSQL("SELECT 1 FROM DUAL;"); got != "SELECT 1 FROM DUAL" {
+		t.Fatalf("trimStatementSQL() = %q, want regular statement without semicolon", got)
+	}
+}
+
+func TestUnsupportedOracleServerCharsetID(t *testing.T) {
+	charsetID, ok := unsupportedOracleServerCharsetID(
+		fmt.Errorf("server use charset with id: 854 but not supported by the driver"),
+	)
+	if !ok || charsetID != oracleCharsetZHS32GB18030 {
+		t.Fatalf("unsupportedOracleServerCharsetID() = %d, %v", charsetID, ok)
+	}
+}
+
+func TestOracleGB18030ConverterRoundTrip(t *testing.T) {
+	converter := oracleGB18030Converter{}
+	encoded := converter.Encode("中文")
+	if string(encoded) == "中文" {
+		t.Fatalf("expected GB18030 bytes, got UTF-8 text")
+	}
+	if decoded := converter.Decode(encoded); decoded != "中文" {
+		t.Fatalf("Decode(Encode()) = %q", decoded)
+	}
+	if converter.GetLangID() != oracleCharsetZHS32GB18030 {
+		t.Fatalf("unexpected lang id: %d", converter.GetLangID())
+	}
+}
+
+func TestOracleStringConverterForUnsupportedCharsetError(t *testing.T) {
+	converter, ok := oracleStringConverterForUnsupportedCharsetError(
+		fmt.Errorf("server use charset with id: 854 but not supported by the driver"),
+	)
+	if !ok || converter == nil {
+		t.Fatalf("expected GB18030 converter")
+	}
+
+	converter, ok = oracleStringConverterForUnsupportedCharsetError(
+		fmt.Errorf("server use charset with id: 999999 but not supported by the driver"),
+	)
+	if ok || converter != nil {
+		t.Fatalf("unknown charset ids should not get a guessed converter")
 	}
 }
 

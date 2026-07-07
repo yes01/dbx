@@ -79,6 +79,7 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
   duckdb: ["ATTACH", "DETACH", "EXPORT", "IMPORT", "INSTALL", "LOAD"],
   clickhouse: ["ATTACH", "CHECK", "DETACH", "EXCHANGE", "KILL", "OPTIMIZE", "SYSTEM"],
   sqlserver: ["BACKUP", "DBCC", "DENY", "RESTORE"],
+  saphana: ["DO"],
   oracle: ["FLASHBACK", "LOCK", "PURGE"],
   dameng: ["FLASHBACK", "LOCK", "PURGE"],
   gaussdb: ["DO", "LOCK"],
@@ -110,6 +111,7 @@ const MYSQL_CONTROL_BLOCK_SUFFIXES = new Set(["IF", "LOOP", "CASE", "REPEAT", "W
 const ORACLE_PL_SQL_BLOCK_STARTERS = new Set(["DECLARE", "BEGIN"]);
 const ORACLE_PL_SQL_CREATE_OBJECT_TYPES = new Set(["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE", "PACKAGE BODY", "TYPE", "TYPE BODY"]);
 const ORACLE_PL_SQL_TERMINATORS = new Set(["IF", "LOOP", "CASE"]);
+const SAP_HANA_SCRIPT_BLOCK_TERMINATORS = new Set(["IF", "FOR", "WHILE"]);
 
 /**
  * Parse the SQL document into top-level statement ranges delimited by `;`.
@@ -325,10 +327,16 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         // Internal semicolons remain part of the routine body.
         flush();
       } else {
-        const isOraclePlSql = isOracleLikeDatabase(databaseType) && statementStart !== -1 && startsWithOraclePlSqlBlock(sql.slice(statementStart, i));
-        if (isOraclePlSql) {
+        const statementSoFar = statementStart === -1 ? "" : sql.slice(statementStart, i);
+        const isOraclePlSql = isOracleLikeDatabase(databaseType) && statementStart !== -1 && startsWithOraclePlSqlBlock(statementSoFar);
+        const isSapHanaScriptBlock = isSapHanaScriptBlockDatabase(databaseType) && statementStart !== -1 && startsWithSapHanaScriptBlock(statementSoFar);
+        if (isOraclePlSql || isSapHanaScriptBlock) {
           markContent(i);
-          if (!oraclePlSqlBlockIsComplete(sql.slice(statementStart, i + 1))) {
+          if (isOraclePlSql && !oraclePlSqlBlockIsComplete(sql.slice(statementStart, i + 1))) {
+            i += 1;
+            continue;
+          }
+          if (isSapHanaScriptBlock && !sapHanaScriptBlockIsComplete(sql.slice(statementStart, i + 1))) {
             i += 1;
             continue;
           }
@@ -430,6 +438,7 @@ function rangeForCursorInSoftRanges(sql: string, ranges: RawStatement[], pos: nu
 
 function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, databaseType?: DatabaseType): RawStatement[] {
   if (isOraclePlSqlStatement(statement.sql, databaseType) || (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql))) return [statement];
+  if (isSapHanaScriptBlockStatement(statement.sql, databaseType)) return [statement];
 
   const lineStarts = topLevelSoftStatementLineStarts(sql, statement, databaseType);
   if (lineStarts.length <= 1) return [statement];
@@ -1053,6 +1062,14 @@ export function isOraclePlSqlStatement(sql: string, databaseType?: DatabaseType)
   return isOracleLikeDatabase(databaseType) && startsWithOraclePlSqlBlock(sql);
 }
 
+function isSapHanaScriptBlockDatabase(databaseType?: DatabaseType): boolean {
+  return databaseType === "saphana";
+}
+
+function isSapHanaScriptBlockStatement(sql: string, databaseType?: DatabaseType): boolean {
+  return isSapHanaScriptBlockDatabase(databaseType) && startsWithSapHanaScriptBlock(sql);
+}
+
 function isMysqlRoutineBlockDatabase(databaseType?: DatabaseType): boolean {
   return !!databaseType && MYSQL_ROUTINE_BLOCK_DATABASES.has(databaseType);
 }
@@ -1269,6 +1286,42 @@ function oraclePlSqlBlockIsComplete(sql: string): boolean {
   }
 
   return stack.length === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
+}
+
+function startsWithSapHanaScriptBlock(sql: string): boolean {
+  return oraclePlSqlWords(sql)[0] === "DO";
+}
+
+function sapHanaScriptBlockIsComplete(sql: string): boolean {
+  if (!startsWithSapHanaScriptBlock(sql)) return false;
+
+  const tokens = oraclePlSqlTokens(sql);
+  const stack: string[] = [];
+  let sawBegin = false;
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.kind !== "word") continue;
+
+    if (token.value === "BEGIN") {
+      if (previousWordToken(tokens, index) === "END") continue;
+      stack.push("BLOCK");
+      sawBegin = true;
+      continue;
+    }
+    if (["IF", "FOR", "WHILE", "CASE"].includes(token.value)) {
+      if (previousWordToken(tokens, index) !== "END") stack.push(token.value);
+      continue;
+    }
+    if (token.value === "END") {
+      const next = nextWordToken(tokens, index);
+      const top = stack[stack.length - 1];
+      const target = SAP_HANA_SCRIPT_BLOCK_TERMINATORS.has(next ?? "") ? next : top === "CASE" ? "CASE" : "BLOCK";
+      if (top === target) stack.pop();
+    }
+  }
+
+  return sawBegin && stack.length === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
 }
 
 function oraclePlSqlWords(sql: string): string[] {

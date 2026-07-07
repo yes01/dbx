@@ -1,4 +1,5 @@
 import type { KvKeyMetadata } from "@/lib/api";
+import { safeJsonFormat } from "@/lib/safeJsonFormat";
 
 export interface PrettyPrintJsonResult {
   ok: boolean;
@@ -20,7 +21,7 @@ export interface ZooKeeperSummaryLabels {
 
 export function prettyPrintJsonText(text: string): PrettyPrintJsonResult {
   try {
-    return { ok: true, value: JSON.stringify(JSON.parse(text), null, 2) };
+    return { ok: true, value: safeJsonFormat(text, 2) };
   } catch {
     return { ok: false, error: "invalid_json" };
   }

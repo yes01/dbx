@@ -3558,6 +3558,7 @@ export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[],
 function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
   if (!prefix) return [];
   return snippets
+    .filter((snippet) => snippet.enabled !== false)
     .filter((snippet) => {
       const matchesSnippetPrefix = matchesPrefix(snippet.prefix, prefix);
       const matchesSnippetLabel = prefix.length > snippet.prefix.length && matchesPrefix(snippet.label, prefix);
