@@ -414,14 +414,14 @@ function typeColorClass(t: string): string {
   // Strip precision/scale suffix like (20,6)
   const base = t.replace(/\(.*\)$/, "").toLowerCase();
   if (["int", "int2", "int4", "int8", "smallint", "bigint", "integer", "serial", "bigserial", "tinyint", "mediumint"].includes(base)) return "text-blue-500";
-  if (["float4", "float8", "double", "decimal", "numeric", "real", "float", "money"].includes(base)) return "text-cyan-500";
-  if (["varchar", "text", "char", "character varying", "character", "string", "nvarchar", "nchar", "ntext", "longtext", "mediumtext", "tinytext", "clob"].includes(base)) return "text-green-500";
+  if (["float4", "float8", "double", "decimal", "numeric", "real", "float", "money", "number", "binary_float", "binary_double", "dec"].includes(base)) return "text-cyan-500";
+  if (["varchar", "varchar2", "nvarchar2", "text", "char", "character varying", "character", "string", "nvarchar", "nchar", "ntext", "longtext", "mediumtext", "tinytext", "clob", "long"].includes(base)) return "text-green-500";
   if (["bool", "boolean", "bit"].includes(base)) return "text-orange-500";
   if (["timestamp", "timestamptz", "datetime", "date", "time", "timetz", "datetime2", "smalldatetime"].includes(base)) return "text-purple-500";
-  if (["json", "jsonb", "xml", "array"].includes(base)) return "text-pink-500";
+  if (["json", "jsonb", "xml", "xmltype", "array"].includes(base)) return "text-pink-500";
   if (["uuid", "uniqueidentifier"].includes(base)) return "text-amber-500";
-  if (["bytea", "blob", "binary", "varbinary", "image"].includes(base)) return "text-red-400";
-  if (["geometry", "geography"].includes(base)) return "text-emerald-500";
+  if (["bytea", "blob", "binary", "varbinary", "image", "raw", "long raw", "bfile"].includes(base)) return "text-red-400";
+  if (["geometry", "geography", "sdo_geometry"].includes(base)) return "text-emerald-500";
   return "text-muted-foreground";
 }
 const contextCell = ref<{ rowId: number; rowIndex: number; col: number } | null>(null);
@@ -3202,6 +3202,20 @@ function cellIsCurrentMatch(displayRow: number, col: number): boolean {
   return m.kind === "cell" && m.displayRow === displayRow && m.col === col;
 }
 
+// Transpose view renders fields as rows; a column-name match (displayRow = -1)
+// maps to the field row header at the field's original column index.
+function transposeHeaderIsSearchMatch(fieldIndex: number): boolean {
+  if (isScrolling.value) return false;
+  return searchMatchSet.value.has(`column:-1:${fieldIndex}`);
+}
+
+function transposeHeaderIsCurrentMatch(fieldIndex: number): boolean {
+  if (isScrolling.value) return false;
+  const m = currentSearchMatch.value;
+  if (!m) return false;
+  return m.kind === "column" && m.col === fieldIndex;
+}
+
 function navigateMatch(delta: number) {
   const total = searchMatches.value.length;
   if (total === 0) return;
@@ -3213,6 +3227,10 @@ function scrollToCurrentMatch() {
   const idx = currentMatchIndex.value;
   if (idx < 0 || idx >= searchMatches.value.length) return;
   const match = searchMatches.value[idx];
+  if (showTranspose.value) {
+    scrollTransposeMatchIntoView(match);
+    return;
+  }
   const visibleColIdx = visibleColumnIndexes.value.indexOf(match.col);
   if (visibleColIdx >= 0) scrollGridColumnIntoView(visibleColIdx);
   if (match.kind === "column") {
@@ -3237,6 +3255,24 @@ function scrollToCurrentMatch() {
   }
   const rowEl = scrollEl.querySelector(`[data-row-index="${match.displayRow}"]`) as HTMLElement | null;
   if (rowEl) rowEl.scrollIntoView({ block: "center" });
+}
+
+function scrollTransposeMatchIntoView(match: SearchMatch) {
+  nextTick(() => {
+    const rawScroller = transposeScrollRef.value;
+    const fieldIndex = visibleColumnIndexes.value.indexOf(match.col);
+    if (fieldIndex >= 0) {
+      if (rawScroller && !(rawScroller instanceof HTMLElement)) {
+        (rawScroller as { scrollToItem?: (index: number) => void; scrollToPosition?: (position: number) => void }).scrollToItem?.(fieldIndex);
+        (rawScroller as { scrollToPosition?: (position: number) => void }).scrollToPosition?.(fieldIndex * 30);
+      }
+      const el = transposeScrollElement();
+      if (el) el.scrollTop = fieldIndex * 30;
+    }
+    if (match.kind === "cell") {
+      scrollTransposeRecordIntoView(match.displayRow);
+    }
+  });
 }
 
 function getRowItem(rowId: number): RowItem | undefined {
@@ -7441,9 +7477,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
                   </div>
                 </template>
-                <template #default="{ item }">
+                <template #default="{ item, index }">
                   <div class="flex border-b border-border/60 text-xs" :style="{ height: '30px', width: `${transposeTotalWidth}px` }">
-                    <div class="sticky left-0 z-10 flex shrink-0 items-center border-r border-border bg-background px-3 py-0 font-medium truncate" :style="{ width: `${transposePinnedWidth}px` }" :title="item.column">
+                    <div
+                      class="sticky left-0 z-10 flex shrink-0 items-center border-r border-border bg-background px-3 py-0 font-medium truncate"
+                      :class="{
+                        'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
+                        'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
+                      }"
+                      :style="{ width: `${transposePinnedWidth}px` }"
+                      :title="item.column"
+                    >
                       {{ item.column }}
                     </div>
                     <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
@@ -7459,6 +7503,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         'row-cell-selected-dirty': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                         'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                         'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                        'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(cell.recordIndex, cell.valueIndex),
+                        'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(cell.recordIndex, cell.valueIndex),
                         'cursor-text': !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex),
                         'hover:bg-gray-200 dark:hover:bg-gray-800':
                           !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),

@@ -10,7 +10,8 @@ import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { copyToClipboard } from "@/lib/clipboard";
 import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sqlExecutionTarget";
-import { buildExecutionCandidates, executableStatementRanges, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sqlStatementRanges";
+import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sqlStatementRanges";
+import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/executableStatementRangeCache";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
 import { formatMongoShellText } from "@/lib/mongoFormatter";
 import { useConnectionStore, COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
@@ -228,6 +229,7 @@ let tableReferenceDropListenerRegistered = false;
 let imeCompositionActive = false;
 let pendingImeModelEmit = false;
 type SelectionCaseMode = "upper" | "lower";
+let executableStatementRangeCache: ExecutableStatementRangeCache | null = null;
 let editorScrollbarPointerCleanup: (() => void) | null = null;
 let editorSelectionDragCleanup: (() => void) | null = null;
 let editorSelectionDropCursorEl: HTMLDivElement | null = null;
@@ -730,7 +732,8 @@ function openTableDdlFromContextMenu() {
 }
 
 function executableStatementRangeStartingAt(currentView: EditorViewType, lineFrom: number) {
-  return executableStatementRanges(currentView.state.doc.toString(), props.databaseType).find((range) => range.from === lineFrom) ?? null;
+  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType);
+  return executableStatementRangeStartingAtLine(executableStatementRangeCache, lineFrom);
 }
 
 function executeSqlStatementFromGutter(currentView: EditorViewType, line: { from: number; to: number }, event: Event): boolean {

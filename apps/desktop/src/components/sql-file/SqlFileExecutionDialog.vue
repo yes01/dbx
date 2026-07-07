@@ -26,6 +26,7 @@ const open = defineModel<boolean>("open", { default: false });
 const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
+  prefillFilePath?: string;
 }>();
 
 const store = useConnectionStore();
@@ -404,6 +405,9 @@ watch(
     resetState();
     if (connectionId.value) {
       loadDatabasesForConnection(connectionId.value);
+    }
+    if (props.prefillFilePath) {
+      void loadPreview(props.prefillFilePath);
     }
   },
   { immediate: true },

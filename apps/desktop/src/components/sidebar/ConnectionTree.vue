@@ -117,11 +117,10 @@ const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   view: ["view"],
 };
 
-// Database-level container types. When browsing a large number of children
-// under one of these (e.g. hundreds of tables) and scrolling down, the row is
-// kept pinned at the top of the tree so the active database stays visible and
-// can be collapsed with one click. Mirrors the `database` search scope above.
+// Sticky-row container types. Database nodes are preferred. Schema is a
+// fallback for Dameng/Oracle-style trees that expose connection -> schema.
 const DATABASE_LEVEL_TYPES = new Set<TreeNodeType>(SEARCH_SCOPE_TO_NODE_TYPES.database);
+const SCHEMA_LEVEL_TYPES = new Set<TreeNodeType>(["schema"]);
 
 const searchScopeOptions = computed(() => {
   return [
@@ -289,16 +288,22 @@ const stickyNode = computed<FlatTreeNode | null>(() => {
   if (len === 0) return null;
 
   const topIndex = Math.min(Math.floor(stickyScrollTop.value / SIDEBAR_TREE_ROW_HEIGHT), len - 1);
-  // Walk UP from the topmost visible row to the nearest database-level ancestor.
-  // Show the overlay as soon as that database row starts crossing the top edge,
-  // instead of waiting for it to fully scroll out by one row.
+  let schemaCandidate: FlatTreeNode | null = null;
+  let schemaCandidateTop = 0;
   for (let i = topIndex; i >= 0; i--) {
     const item = nodes[i];
-    if (!DATABASE_LEVEL_TYPES.has(item.type)) continue;
-    const rowTop = i * SIDEBAR_TREE_ROW_HEIGHT;
-    return stickyScrollTop.value > rowTop ? item : null;
+    if (item.type === "connection" || item.type === "connection-group") break;
+    if (DATABASE_LEVEL_TYPES.has(item.type)) {
+      const rowTop = i * SIDEBAR_TREE_ROW_HEIGHT;
+      return stickyScrollTop.value > rowTop ? item : null;
+    }
+    if (item.type === "schema" && !schemaCandidate) {
+      schemaCandidate = item;
+      schemaCandidateTop = i * SIDEBAR_TREE_ROW_HEIGHT;
+    }
   }
-  return null;
+  if (!schemaCandidate) return null;
+  return stickyScrollTop.value > schemaCandidateTop ? schemaCandidate : null;
 });
 
 const stickyHeaderStyle = computed<CSSProperties>(() => {
@@ -307,7 +312,16 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
   const nodes = flatNodes.value;
   const currentIndex = nodes.findIndex((item) => item.id === node.id);
   if (currentIndex < 0) return {};
-  const nextDatabaseIndex = nodes.findIndex((item, index) => index > currentIndex && DATABASE_LEVEL_TYPES.has(item.type));
+  const nextTypes = SCHEMA_LEVEL_TYPES.has(node.type) ? SCHEMA_LEVEL_TYPES : DATABASE_LEVEL_TYPES;
+  let nextDatabaseIndex = -1;
+  for (let i = currentIndex + 1; i < nodes.length; i += 1) {
+    const item = nodes[i];
+    if (item.type === "connection" || item.type === "connection-group") break;
+    if (nextTypes.has(item.type)) {
+      nextDatabaseIndex = i;
+      break;
+    }
+  }
   if (nextDatabaseIndex < 0) return {};
   const distanceToNext = nextDatabaseIndex * SIDEBAR_TREE_ROW_HEIGHT - stickyScrollTop.value;
   if (distanceToNext >= SIDEBAR_TREE_ROW_HEIGHT) return {};

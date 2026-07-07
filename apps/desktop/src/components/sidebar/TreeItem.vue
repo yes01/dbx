@@ -98,6 +98,8 @@ import {
   buildEmptyTableSql,
   buildSetSchemaCommentSql,
   buildTruncateTableSql,
+  supportsDropTableCascade,
+  supportsTruncateTableCascade,
   supportsSchemaComment,
   type DropTableChildObjectSqlOptions,
   type DropObjectSqlOptions,
@@ -760,19 +762,24 @@ function selectTreeNodeRange(node: TreeNode) {
   connectionStore.selectedTreeNodeId = node.id;
 }
 
-const selectedConnectionIds = computed(() => {
+function selectedConnectionIdsForAction(): string[] {
   const connectionIds = new Set(connectionStore.connections.map((connection) => connection.id));
   return connectionStore.selectedTreeNodeIds.filter((id) => connectionIds.has(id));
-});
+}
 
-const isConnectionSelectionChecked = computed(() => connectionStore.connectionMultiSelectActive && props.node.type === "connection" && !!props.node.connectionId && selectedConnectionIds.value.includes(props.node.connectionId));
+const isConnectionSelectionChecked = computed(() => {
+  if (!connectionStore.connectionMultiSelectActive || props.node.type !== "connection" || !props.node.connectionId) return false;
+  return connectionStore.selectedTreeNodeIds.includes(props.node.connectionId);
+});
 
 function toggleConnectionMultiSelection(event: MouseEvent) {
   event.preventDefault();
   event.stopPropagation();
   if (props.node.type !== "connection" || !props.node.connectionId) return;
 
-  const next = new Set(connectionStore.connectionMultiSelectActive ? selectedConnectionIds.value : []);
+  // Keep connection-id normalization off the row render path; this handler only
+  // runs when the checkbox is clicked, while the checked state updates often.
+  const next = new Set(connectionStore.connectionMultiSelectActive ? selectedConnectionIdsForAction() : []);
   if (next.has(props.node.connectionId)) next.delete(props.node.connectionId);
   else next.add(props.node.connectionId);
 
@@ -1629,6 +1636,9 @@ const truncateTablePreviewSql = ref("");
 const dropObjectPreviewSql = ref("");
 const dropTableChildObjectPreviewSql = ref("");
 const batchDropPreviewSql = ref("");
+const dropTableCascade = ref(false);
+const truncateTableCascade = ref(false);
+const batchDropCascade = ref(false);
 const dropDatabasePreviewSql = ref("");
 const dropSchemaPreviewSql = ref("");
 const showDuplicateDialog = ref(false);
@@ -1950,12 +1960,17 @@ function batchDropConfirmMessage(): string {
   return t("contextMenu.confirmBatchDropMessage", { count: selectedBatchDropTargets().length });
 }
 
-async function dropSqlForTreeNode(node: TreeNode): Promise<string | null> {
+function canUseDropCascadeForNode(node: TreeNode): boolean {
+  return node.type === "table" && supportsDropTableCascade(databaseTypeForNode(node));
+}
+
+async function dropSqlForTreeNode(node: TreeNode, options?: { cascade?: boolean }): Promise<string | null> {
   if (node.type === "table" && node.connectionId && node.database) {
     return buildDropTableSql({
       databaseType: databaseTypeForNode(node),
       schema: node.schema,
       tableName: node.label,
+      cascade: options?.cascade && canUseDropCascadeForNode(node),
     });
   }
   const objectOptions = dropObjectSqlOptionsForNode(node);
@@ -1968,8 +1983,9 @@ async function dropSqlForTreeNode(node: TreeNode): Promise<string | null> {
 async function refreshBatchDropPreviewSql() {
   const targets = selectedBatchDropTargets();
   const statements: string[] = [];
+  const useCascade = targets.length > 0 && targets.every(canUseDropCascadeForNode) && batchDropCascade.value;
   for (const target of targets) {
-    const sql = await dropSqlForTreeNode(target);
+    const sql = await dropSqlForTreeNode(target, { cascade: useCascade });
     if (sql) statements.push(sql);
   }
   batchDropPreviewSql.value = statements.join("\n");
@@ -1977,6 +1993,7 @@ async function refreshBatchDropPreviewSql() {
 
 function requestBatchDrop() {
   if (!selectedBatchDropTargets().length) return;
+  batchDropCascade.value = false;
   void refreshBatchDropPreviewSql();
   showBatchDropConfirm.value = true;
 }
@@ -2146,7 +2163,8 @@ async function confirmBatchDrop() {
     for (const target of targets) {
       if (!target.connectionId || !target.database) continue;
       await connectionStore.ensureConnected(target.connectionId);
-      const sql = await dropSqlForTreeNode(target);
+      const useCascade = targets.every(canUseDropCascadeForNode) && batchDropCascade.value;
+      const sql = await dropSqlForTreeNode(target, { cascade: useCascade });
       if (!sql) continue;
       await api.executeQuery(target.connectionId, target.database, sql, target.schema);
       closeDroppedTableObjectTabsForNode(target);
@@ -2163,6 +2181,13 @@ const isTableNotView = computed(() => props.node.type === "table" && !isSqlServe
 
 const supportsTruncate = computed(() => {
   return supportsTableTruncate(currentDatabaseType());
+});
+
+const canDropTableCascade = computed(() => props.node.type === "table" && supportsDropTableCascade(currentDatabaseType()));
+const canTruncateTableCascade = computed(() => props.node.type === "table" && supportsTruncateTableCascade(currentDatabaseType()));
+const canBatchDropCascade = computed(() => {
+  const targets = selectedBatchDropTargets();
+  return targets.length > 0 && targets.every(canUseDropCascadeForNode);
 });
 
 const canCreateTable = computed(() => {
@@ -2226,17 +2251,18 @@ const canEditSchemaComment = computed(() => {
   return props.node.type === "schema" && !!props.node.database && !config?.read_only && supportsSchemaComment(effectiveDatabaseTypeForConnection(config));
 });
 
-function tableAdminSqlOptions(): TableAdminSqlOptions {
+function tableAdminSqlOptions(options?: { cascade?: boolean }): TableAdminSqlOptions {
   return {
     databaseType: currentDatabaseType(),
     schema: props.node.schema,
     tableName: props.node.label,
+    cascade: options?.cascade,
   };
 }
 
 async function refreshDropTablePreviewSql() {
   dropTablePreviewSql.value = "";
-  dropTablePreviewSql.value = await buildDropTableSql(tableAdminSqlOptions()).catch(() => "");
+  dropTablePreviewSql.value = await buildDropTableSql(tableAdminSqlOptions({ cascade: canDropTableCascade.value && dropTableCascade.value })).catch(() => "");
 }
 
 async function refreshEmptyTablePreviewSql() {
@@ -2246,10 +2272,11 @@ async function refreshEmptyTablePreviewSql() {
 
 async function refreshTruncateTablePreviewSql() {
   truncateTablePreviewSql.value = "";
-  truncateTablePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions()).catch(() => "");
+  truncateTablePreviewSql.value = await buildTruncateTableSql(tableAdminSqlOptions({ cascade: canTruncateTableCascade.value && truncateTableCascade.value })).catch(() => "");
 }
 
 function dropTable() {
+  dropTableCascade.value = false;
   void refreshDropTablePreviewSql();
   showDropTableConfirm.value = true;
 }
@@ -2264,7 +2291,7 @@ async function confirmDropTable() {
   if (!node.connectionId || !node.database) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
-    const sql = dropTablePreviewSql.value || (await buildDropTableSql(tableAdminSqlOptions()));
+    const sql = dropTablePreviewSql.value || (await buildDropTableSql(tableAdminSqlOptions({ cascade: canDropTableCascade.value && dropTableCascade.value })));
     await api.executeQuery(node.connectionId, node.database, sql, node.schema);
     toast(t("contextMenu.dropTableSuccess", { name: node.label }), 3000);
     closeDroppedTableObjectTabsForNode(node);
@@ -2293,6 +2320,7 @@ async function confirmEmptyTable() {
 }
 
 function truncateTable() {
+  truncateTableCascade.value = false;
   void refreshTruncateTablePreviewSql();
   showTruncateTableConfirm.value = true;
 }
@@ -2302,7 +2330,7 @@ async function confirmTruncateTable() {
   if (!node.connectionId || !node.database) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
-    const sql = truncateTablePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptions()));
+    const sql = truncateTablePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptions({ cascade: canTruncateTableCascade.value && truncateTableCascade.value })));
     await api.executeQuery(node.connectionId, node.database, sql, node.schema);
     toast(t("contextMenu.truncateTableSuccess", { name: node.label }), 3000);
   } catch (e: any) {
@@ -3274,12 +3302,12 @@ function openDatabaseExport() {
 
 function openTableImport() {
   const node = props.node;
-  if (node.type !== "table" || !node.connectionId || !node.database) return;
+  if (!node.connectionId || !node.database) return;
   connectionStore.tableImportSource = {
     connectionId: node.connectionId,
     database: node.database,
     schema: node.schema,
-    tableName: node.label,
+    tableName: node.type === "table" ? node.label : undefined,
   };
 }
 
@@ -3322,7 +3350,9 @@ const canOpenObjectBrowser = computed(() => {
   return supportsObjectBrowserTreeNode(rawDatabaseType(), props.node.type);
 });
 const canOpenTableImport = computed(() => {
-  return props.node.type === "table" && !isSqlServerLinkedNode(props.node) && !!props.node.database && supportsTableImport(currentDatabaseType());
+  const node = props.node;
+  const supportedNode = node.type === "table" || ((node.type === "database" || node.type === "schema" || node.type === "group-tables") && canCreateTable.value);
+  return supportedNode && !isSqlServerLinkedNode(node) && !!node.connectionId && !!node.database && supportsTableImport(currentDatabaseType());
 });
 const canOpenStructureEditor = computed(() => {
   return props.node.type === "table" && !isSqlServerLinkedNode(props.node) && !!props.node.database && supportsTableStructureEditing(currentTableStructureDatabaseType());
@@ -3391,6 +3421,8 @@ const connectionColor = computed(() => {
 const isActiveConnectionScope = computed(() => !!props.node.connectionId && connectionStore.activeConnectionId === props.node.connectionId);
 const isSelected = computed(() => connectionStore.selectedTreeNodeId === props.node.id);
 const isMultiSelected = computed(() => connectionStore.selectedTreeNodeIds.includes(props.node.id));
+const isTreeRowSelected = computed(() => isSelected.value || isMultiSelected.value);
+const usesSelectionSetHighlight = computed(() => connectionStore.connectionMultiSelectActive || connectionStore.selectedTreeNodeIds.length > 1);
 const rowStyle = computed(() => {
   const color = connectionColor.value;
   const backgroundColor = hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08);
@@ -3941,6 +3973,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
     if (canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
     }
+    if (canOpenTableImport.value) {
+      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Upload });
+    }
     if (canCreateSchema.value) {
       items.push({ label: t("contextMenu.createSchema"), action: openCreateSchemaDialog, icon: Plus });
     }
@@ -4265,6 +4300,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
     }
+    if (canOpenTableImport.value) {
+      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Upload });
+    }
     if (node.type === "group-views" && node.connectionId && node.database) {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
     }
@@ -4325,9 +4363,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
               'tree-item-connection-tint': connectionColor,
               'hover:bg-accent': node.type !== 'connection',
               'hover:bg-secondary/60': node.type === 'connection',
-              rounded: !isSelected && !isMultiSelected,
-              'tree-item-active rounded-none': connectionColor && (isSelected || isMultiSelected),
-              'tree-item-active rounded-md': !connectionColor && (isSelected || isMultiSelected),
+              rounded: !isTreeRowSelected,
+              'tree-item-active': isTreeRowSelected,
+              'tree-item-active--selection-set': usesSelectionSetHighlight && isTreeRowSelected,
               'tree-item-highlight': highlighted,
             },
           ]"
@@ -4543,7 +4581,17 @@ function treeItemMenuItems(): ContextMenuItem[] {
     </DialogContent>
   </Dialog>
 
-  <DangerConfirmDialog v-model:open="showDropTableConfirm" :title="t('contextMenu.confirmDropTableTitle')" :message="t('contextMenu.confirmDropTableMessage', { name: node.label })" :sql="dropTablePreviewSql" :confirm-label="t('contextMenu.dropTable')" @confirm="confirmDropTable" />
+  <DangerConfirmDialog v-model:open="showDropTableConfirm" :title="t('contextMenu.confirmDropTableTitle')" :message="t('contextMenu.confirmDropTableMessage', { name: node.label })" :sql="dropTablePreviewSql" :confirm-label="t('contextMenu.dropTable')" @confirm="confirmDropTable">
+    <template v-if="canDropTableCascade" #options>
+      <label class="mt-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
+        <input v-model="dropTableCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshDropTablePreviewSql()" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.dropTableCascade") }}</span>
+          <span class="text-muted-foreground">{{ t("contextMenu.dropTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
 
   <DangerConfirmDialog v-model:open="showEmptyTableConfirm" :title="t('contextMenu.confirmEmptyTableTitle')" :message="t('contextMenu.confirmEmptyTableMessage', { name: node.label })" :sql="emptyTablePreviewSql" :confirm-label="t('contextMenu.emptyTable')" @confirm="confirmEmptyTable" />
 
@@ -4554,13 +4602,33 @@ function treeItemMenuItems(): ContextMenuItem[] {
     :sql="truncateTablePreviewSql"
     :confirm-label="t('contextMenu.truncateTable')"
     @confirm="confirmTruncateTable"
-  />
+  >
+    <template v-if="canTruncateTableCascade" #options>
+      <label class="mt-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
+        <input v-model="truncateTableCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshTruncateTablePreviewSql()" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.dropTableCascade") }}</span>
+          <span class="text-muted-foreground">{{ t("contextMenu.dropTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
 
   <DangerConfirmDialog v-model:open="showDropObjectConfirm" :title="dropObjectConfirmTitle()" :message="dropObjectConfirmMessage()" :sql="dropObjectPreviewSql" :confirm-label="dropObjectMenuLabel()" @confirm="confirmDropObject" />
 
   <DangerConfirmDialog v-model:open="showDropTableChildObjectConfirm" :title="dropTableChildObjectConfirmTitle()" :message="dropTableChildObjectConfirmMessage()" :sql="dropTableChildObjectPreviewSql" :confirm-label="dropTableChildObjectMenuLabel()" @confirm="confirmDropTableChildObject" />
 
-  <DangerConfirmDialog v-model:open="showBatchDropConfirm" :title="batchDropConfirmTitle()" :message="batchDropConfirmMessage()" :sql="batchDropPreviewSql" :confirm-label="batchDropMenuLabel()" @confirm="confirmBatchDrop" />
+  <DangerConfirmDialog v-model:open="showBatchDropConfirm" :title="batchDropConfirmTitle()" :message="batchDropConfirmMessage()" :sql="batchDropPreviewSql" :confirm-label="batchDropMenuLabel()" @confirm="confirmBatchDrop">
+    <template v-if="canBatchDropCascade" #options>
+      <label class="mt-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
+        <input v-model="batchDropCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchDropPreviewSql()" />
+        <span class="grid gap-0.5">
+          <span class="font-medium text-foreground">{{ t("contextMenu.dropTableCascade") }}</span>
+          <span class="text-muted-foreground">{{ t("contextMenu.dropTableCascadeHint") }}</span>
+        </span>
+      </label>
+    </template>
+  </DangerConfirmDialog>
 
   <ProcedureExecutionDialog
     v-if="node.type === 'procedure' && node.connectionId && node.database"
@@ -4803,6 +4871,10 @@ function treeItemMenuItems(): ContextMenuItem[] {
   background-color: var(--tree-connection-active-focus-bg, var(--tree-connection-active-bg));
 }
 
+.tree-item-connection-tint.tree-item-active--selection-set:focus::before {
+  background-color: var(--tree-connection-active-bg, var(--tree-connection-row-bg));
+}
+
 /* Unfocused: subtle gray */
 .tree-item-active {
   background-color: var(--tree-connection-active-bg, rgb(235 235 235)) !important;
@@ -4817,6 +4889,16 @@ function treeItemMenuItems(): ContextMenuItem[] {
 }
 :root.dark .tree-item-active:focus {
   background-color: var(--tree-connection-active-focus-bg, rgb(33 60 89)) !important;
+}
+
+/* Multi-selection treats every selected row as equal; keep focus neutral. */
+.tree-item-active--selection-set:focus {
+  background-color: var(--tree-connection-active-bg, rgb(235 235 235)) !important;
+  box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.14);
+}
+:root.dark .tree-item-active--selection-set:focus {
+  background-color: var(--tree-connection-active-bg, rgb(36 36 36)) !important;
+  box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.18);
 }
 
 /* Locate highlight: instant amber, then fade on removal */

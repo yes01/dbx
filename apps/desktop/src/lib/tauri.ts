@@ -1751,6 +1751,7 @@ export interface TableImportRequest {
   filePath: string;
   mappings: TableImportColumnMapping[];
   mode: TableImportMode;
+  createTable?: boolean;
   batchSize: number;
 }
 

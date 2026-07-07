@@ -40,7 +40,7 @@ export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activa
 
 export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetail: number): boolean {
   if (action === "none") return false;
-  return action === "toggle" || clickDetail <= 1;
+  return clickDetail <= 1;
 }
 
 export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false): TreeNodeRowDoubleClickAction {
