@@ -262,6 +262,21 @@ pub async fn connect_mysql_metadata_pool(
                     )
                     .await
                     .map(|pool| (pool, MysqlMode::Bare))
+                } else if let Some(db) = db_config.effective_database() {
+                    let mut unscoped_config = db_config.clone();
+                    unscoped_config.database = None;
+                    let unscoped_url = connection_url_for_endpoint(&unscoped_config, host, port);
+                    log::info!("MySQL connection with database in URL failed ({err}); retrying without database in URL and using USE statement.");
+                    connect_bare_mysql_pool_with_setup_database(
+                        &unscoped_config,
+                        &unscoped_url,
+                        connect_timeout,
+                        max_connections,
+                        db,
+                        &extra_setup_queries,
+                    )
+                    .await
+                    .map(|pool| (pool, MysqlMode::Bare))
                 } else {
                     Err(err)
                 }
@@ -295,6 +310,23 @@ pub async fn connect_mysql_metadata_pool(
                     connect_timeout,
                     max_connections,
                     idle_timeout_secs,
+                    &extra_setup_queries,
+                )
+                .await?;
+                let mode = detect_ob_oracle_mode(config, &pool).await;
+                Ok((pool, mode))
+            } else if let Some(db) = db_config.effective_database() {
+                let mut unscoped_config = db_config.clone();
+                unscoped_config.database = None;
+                let unscoped_url = connection_url_for_endpoint(&unscoped_config, host, port);
+                log::info!("MySQL connection with database in URL failed ({err}); retrying without database in URL and using USE statement.");
+                let pool = db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup_database(
+                    &unscoped_url,
+                    Some(&config.ca_cert_path),
+                    connect_timeout,
+                    max_connections,
+                    idle_timeout_secs,
+                    Some(db),
                     &extra_setup_queries,
                 )
                 .await?;
@@ -369,6 +401,64 @@ pub async fn connect_bare_metadata_pool(
                 )),
             },
         },
+    }
+}
+
+async fn connect_bare_mysql_pool_with_setup(
+    db_config: &ConnectionConfig,
+    url: &str,
+    connect_timeout: std::time::Duration,
+    max_connections: usize,
+    extra_setup_queries: &[String],
+) -> Result<db::mysql::MySqlPool, String> {
+    if db_config.bare_mysql_uses_tls() {
+        let idle_timeout_secs = Some(db_config.idle_timeout_secs);
+        db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup(
+            url,
+            Some(&db_config.ca_cert_path),
+            connect_timeout,
+            max_connections,
+            idle_timeout_secs,
+            extra_setup_queries,
+        )
+        .await
+    } else {
+        db::mysql::connect_bare_with_pool_limit_and_setup(url, connect_timeout, max_connections, extra_setup_queries)
+            .await
+    }
+}
+
+async fn connect_bare_mysql_pool_with_setup_database(
+    db_config: &ConnectionConfig,
+    url: &str,
+    connect_timeout: std::time::Duration,
+    max_connections: usize,
+    setup_database: &str,
+    extra_setup_queries: &[String],
+) -> Result<db::mysql::MySqlPool, String> {
+    // Some MySQL proxies reject the default database in the handshake; pass it
+    // separately so DB-layer setup keeps the normal charset/catalog/USE order.
+    if db_config.bare_mysql_uses_tls() {
+        let idle_timeout_secs = Some(db_config.idle_timeout_secs);
+        db::mysql::connect_with_ca_cert_pool_limit_idle_and_setup_database(
+            url,
+            Some(&db_config.ca_cert_path),
+            connect_timeout,
+            max_connections,
+            idle_timeout_secs,
+            Some(setup_database),
+            extra_setup_queries,
+        )
+        .await
+    } else {
+        db::mysql::connect_bare_with_pool_limit_and_setup_database(
+            url,
+            connect_timeout,
+            max_connections,
+            Some(setup_database),
+            extra_setup_queries,
+        )
+        .await
     }
 }
 
@@ -3187,7 +3277,7 @@ mod tests {
 
         assert_eq!(
             mysql_metadata_fallback_url(&config, &metadata, &config.host, config.port),
-            Some("mysql://root:secret@127.0.0.1:3306/app?ssl-mode=preferred&charset=utf8mb4".to_string())
+            Some("mysql://root:secret@127.0.0.1:3306/app?ssl-mode=disabled&charset=utf8mb4".to_string())
         );
     }
 

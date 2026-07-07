@@ -375,7 +375,8 @@ function parseCollectionMethodTarget(source: string, method: string): { collecti
 function normalizeJsonArgument(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return "{}";
-  const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(trimmed.replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}')));
+  const withExtendedJson = trimmed.replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}').replace(/(?:ISODate|new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$date":"$1"}');
+  const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(withExtendedJson));
   try {
     JSON.parse(preprocessed);
     return preprocessed;

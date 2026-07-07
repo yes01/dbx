@@ -521,6 +521,7 @@ const HIGH_FREQUENCY_KEYWORDS = new Set([
 const TABLE_TRIGGER_KEYWORDS = new Set(["from", "join", "update", "into", "table", "describe", "explain", "apply"]);
 const EXCLUSIVE_TABLE_TRIGGER_KEYWORDS = new Set(["from", "join", "update", "into", "apply"]);
 const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "full", "natural"]);
+const JOIN_MODIFIER_KEYWORD_PHRASES = ["LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN", "NATURAL JOIN", "LEFT OUTER JOIN", "RIGHT OUTER JOIN", "FULL OUTER JOIN"];
 const MAX_TABLE_COMPLETION_ITEMS = 200;
 
 // Keywords that only make sense in DDL / statement-start contexts (not inside SELECT/INSERT/UPDATE/DELETE)
@@ -1211,13 +1212,14 @@ class SqlCompletionProvider {
 
   build(): SqlCompletionItem[] {
     const { context } = this;
+    const pendingJoinKeyword = isPendingJoinKeywordContext(context);
 
     if (this.databaseType === "mongodb") {
       return dedupeAndSort(buildMongoCompletionItemsFromContext({ mode: "root", prefix: context.prefix, from: 0 }).map(mongoCompletionItemToSqlCompletionItem));
     }
 
     const preferReferencedColumns = hasMatchingReferencedColumnPrefix(context, this.input.columnsByTable);
-    if (!preferReferencedColumns && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
+    if (!pendingJoinKeyword && !preferReferencedColumns && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
       const snippets = this.databaseType === "manticoresearch" ? [...(this.input.snippets ?? DEFAULT_SQL_SNIPPETS), ...MANTICORESEARCH_SQL_SNIPPETS] : (this.input.snippets ?? DEFAULT_SQL_SNIPPETS);
       this.items.push(...buildSnippetItems(context.prefix, snippets, this.input.keywordCase));
       this.items.push(...buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType));
@@ -1249,7 +1251,8 @@ class SqlCompletionProvider {
       this.items.push(...buildJoinConditionItems(context, this.input.columnsByTable, this.input.foreignKeysByTable, this.dialect, this.input.keywordCase));
     }
 
-    if (context.suggestKeywords && !context.exclusiveRoutineSuggestions) {
+    if (context.suggestKeywords && !context.exclusiveRoutineSuggestions && !pendingJoinKeyword) {
+      this.items.push(...buildJoinModifierKeywordItems(context.prefix, this.input.keywordCase));
       this.items.push(...buildKeywordItems(context.prefix, context, this.databaseType, this.input.keywordCase));
     }
 
@@ -1258,7 +1261,8 @@ class SqlCompletionProvider {
       this.items.push(...buildSelectAllColumnItems(context, this.input.columnsByTable, this.t, this.dialect));
     }
 
-    if (context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
+    const emptyTableNameCompletion = !context.prefix && (context.suggestTables || context.exclusiveTableSuggestions);
+    if (!pendingJoinKeyword && !emptyTableNameCompletion && context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
       this.items.push(...buildAliasItems(context, this.databaseType));
     }
 
@@ -1295,13 +1299,28 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number): boolea
   const previousChar = sql[cursor - 1];
   if (!previousChar) return false;
   if (/\bon\s+$/i.test(sql.slice(0, cursor))) return true;
+  if (isAfterJoinModifierContext(sql.slice(0, cursor))) return true;
   if (/\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(sql.slice(0, cursor))) return true;
-  if (/[,;()[\]]/.test(previousChar)) return false;
   const context = getSqlCompletionContext(sql, cursor);
-  if (context.exclusiveTableSuggestions || context.exclusiveColumnSuggestions || context.exclusiveRoutineSuggestions || context.suggestTables) {
+  if (previousChar === "(" && context.insertTable) return true;
+  if (/[,;()[\]]/.test(previousChar)) return false;
+  if (context.exclusiveTableSuggestions || context.exclusiveRoutineSuggestions || context.suggestTables) {
     return true;
   }
-  return /[\w$.@]/.test(previousChar);
+  if (context.exclusiveColumnSuggestions || shouldAutoOpenColumnCompletion(context, sql, cursor)) return true;
+  return /[A-Za-z_$@.]/.test(previousChar);
+}
+
+function shouldAutoOpenColumnCompletion(context: SqlCompletionContext, sql: string, cursor: number): boolean {
+  if (!context.suggestColumns || context.referencedTables.length === 0) return false;
+  if (context.prefix.length > 0) return true;
+  return isColumnCompletionExpressionStart(sql.slice(0, cursor));
+}
+
+function isColumnCompletionExpressionStart(beforeCursor: string): boolean {
+  const cleaned = stripSqlLiterals(beforeCursor).trimEnd();
+  if (!cleaned) return false;
+  return /(?:\b(?:where|on|having|and|or|not|is|like|in|between|by)\b|[,(])$/i.test(cleaned);
 }
 
 export function isSqlCompletionSuppressedContext(sql: string, cursor: number): boolean {
@@ -1579,7 +1598,7 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
   const beforeToken = beforeCursor.slice(0, Math.max(0, bareStart)).trimEnd();
   const lastWord = /([A-Za-z_][\w$]*)$/.exec(beforeToken)?.[1]?.toLowerCase() ?? "";
 
-  const referencedTables = extractReferencedTables(fullStatement);
+  let referencedTables = extractReferencedTables(fullStatement);
 
   // Merge CTE definitions into referenced tables
   const cteDefs = extractCteDefinitions(fullStatement);
@@ -1612,6 +1631,10 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
   const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || isInTableListContext(beforeToken);
   const autoAliasTableCompletions = lastWord === "from" || lastWord === "join" || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || isInTableListContext(beforeToken);
   const exclusiveColumnSuggestions = !!qualifier && !exclusiveTableSuggestions && !insertInfo;
+  const activePrefixIsCte = cteDefs.some((cte) => normalizeIdentifierPart(cte.name) === normalizeIdentifierPart(prefix));
+  if (exclusiveTableSuggestions && prefix && !activePrefixIsCte && referencedTables.length > 1) {
+    referencedTables = removeActiveTableCompletionReference(referencedTables, prefix, qualifier);
+  }
 
   // Check if we're in a context where columns are expected
   const selectListColumnContext = isInSelectListContext(beforeCursor);
@@ -1620,12 +1643,12 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
   const prioritizeSelectAliases = isInOrderOrGroupByContext(beforeCursor);
   const inCallRoutineContext = isCallRoutineContext(beforeCursor);
   const inPotentialPackageMemberContext = !!qualifier && !exclusiveTableSuggestions && !insertInfo && !oracleTableFunctionContext;
-  const suggestColumns = !!qualifier || !!updateInfo?.inSetClause || (inColumnContext && referencedTables.length > 0);
+  const suggestColumns = !!qualifier || !!updateInfo?.inSetClause || !!insertInfo || (inColumnContext && referencedTables.length > 0);
   const preferColumnsOverGlobalRoutines = suggestColumns && referencedTables.length > 0 && !qualifier;
   const suggestRoutines = inCallRoutineContext || oracleTableFunctionContext || inPotentialPackageMemberContext || (!preferColumnsOverGlobalRoutines && !exclusiveTableSuggestions && !exclusiveColumnSuggestions && !insertInfo && prefix.length >= 2);
 
   const statementKind = detectStatementKind(beforeCursor || fullStatement);
-  const preferredKeywords = preferredKeywordsForCompletion(updateInfo, deleteInfo);
+  const preferredKeywords = preferredKeywordsForCompletion(beforeCursor, beforeToken, selectListColumnContext, exclusiveTableSuggestions, updateInfo, deleteInfo);
   const contextKind = detectCompletionContextKind({
     qualifier,
     exclusiveTableSuggestions,
@@ -1636,6 +1659,7 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
     oracleTableFunctionContext,
     afterTableTrigger,
     lastWord,
+    statementKind,
     suggestColumns,
     suggestRoutines,
   });
@@ -1673,6 +1697,17 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
   };
 }
 
+function removeActiveTableCompletionReference(referencedTables: SqlCompletionReferencedTable[], prefix: string, qualifier?: string): SqlCompletionReferencedTable[] {
+  const activeName = normalizeIdentifierPart(prefix);
+  const activeQualifier = qualifier ? normalizeIdentifierPart(qualifier) : undefined;
+  return referencedTables.filter((table) => {
+    if (table.alias) return true;
+    if (normalizeIdentifierPart(table.name) !== activeName) return true;
+    if (activeQualifier && table.schema && normalizeIdentifierPart(table.schema) !== activeQualifier) return true;
+    return false;
+  });
+}
+
 function detectCompletionContextKind(options: {
   qualifier?: string;
   exclusiveTableSuggestions: boolean;
@@ -1683,6 +1718,7 @@ function detectCompletionContextKind(options: {
   oracleTableFunctionContext: boolean;
   afterTableTrigger: boolean;
   lastWord: string;
+  statementKind: SqlStatementKind;
   suggestColumns: boolean;
   suggestRoutines: boolean;
 }): SqlCompletionContextKind {
@@ -1691,7 +1727,10 @@ function detectCompletionContextKind(options: {
   if (options.inCallRoutineContext) return "exec";
   if (options.qualifier && options.exclusiveColumnSuggestions) return "alias_column";
   if (options.oracleTableFunctionContext || options.suggestRoutines) return "routine";
-  if (options.exclusiveTableSuggestions || options.afterTableTrigger) return options.lastWord === "join" ? "join" : "table";
+  if (options.exclusiveTableSuggestions || options.afterTableTrigger) {
+    if (options.statementKind === "insert" && options.lastWord === "into") return "insert_target";
+    return options.lastWord === "join" ? "join" : "table";
+  }
   if (options.suggestColumns) return options.qualifier ? "alias_column" : "column";
   return "keyword";
 }
@@ -1793,9 +1832,10 @@ function isInColumnContext(beforeCursor: string): boolean {
 
   // Check the last 3 words for column-context keywords
   for (let i = lastWords.length - 1; i >= Math.max(0, lastWords.length - 3); i--) {
-    const word = lastWords[i]?.toLowerCase().replace(/[^a-z0-9.]/g, "") ?? "";
+    const rawWord = lastWords[i]?.toLowerCase() ?? "";
+    if (/^[=<>!+\-/(,]$/.test(rawWord)) return true;
+    const word = rawWord.replace(/[^a-z0-9.]/g, "");
     // Operators that indicate column context
-    if (/^[=<>!+\-*/(,]$/.test(word)) return true;
     // Keywords that directly precede column expressions
     if (["where", "on", "having", "set", "and", "or", "not", "is", "like", "in", "between", "select"].includes(word)) {
       return true;
@@ -1957,17 +1997,18 @@ function detectComparisonLeftColumn(beforeCursor: string): string | undefined {
 }
 
 function detectInsertColumnListContext(beforeCursor: string): { table: string; schema?: string } | null {
-  const cleaned = beforeCursor
-    .replace(/'[^']*'/g, "''")
-    .replace(/"[^"]*"/g, '""')
-    .toLowerCase();
-  const match = /\binsert\s+into\s+([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)\s*\([^)]*$/i.exec(cleaned);
+  // Keep quoted identifiers intact so schema/table targets resolve to their
+  // real names instead of placeholder string contents.
+  const cleaned = beforeCursor.replace(/'[^']*'/g, "''");
+  const identifier = '(?:"[^"]+"|`[^`]+`|[A-Za-z_][\\w$]*)';
+  const qualifiedIdentifier = `${identifier}(?:\\.${identifier}){0,2}`;
+  const match = new RegExp(`\\binsert\\s+into\\s+(${qualifiedIdentifier})\\s*\\([^)]*$`, "i").exec(cleaned);
   if (!match) return null;
   const fullTable = match[1];
   if (!fullTable) return null;
   const [first, second] = splitQualifiedName(fullTable);
-  if (second) return { table: second, schema: first! };
-  return { table: first! };
+  if (second) return { table: normalizeIdentifierPart(second), schema: normalizeIdentifierPart(first!) };
+  return { table: normalizeIdentifierPart(first!) };
 }
 
 function detectUpdateCompletionContext(beforeCursor: string): { target: { table: string; schema?: string }; afterTarget: boolean; inSetClause: boolean; afterSetAssignments: boolean } | null {
@@ -2002,12 +2043,121 @@ function detectOracleTableFunctionContext(beforeCursor: string): boolean {
   return /\b(?:from|join)\s+table\s*\(\s*(?:(?:"[^"]+"|`[^`]+`|[A-Za-z_][\w$]*)\.){0,2}[A-Za-z_][\w$]*$/i.test(cleaned);
 }
 
-function preferredKeywordsForCompletion(updateInfo: ReturnType<typeof detectUpdateCompletionContext>, deleteInfo: ReturnType<typeof detectDeleteCompletionContext>): string[] {
+function preferredKeywordsForCompletion(beforeCursor: string, beforeToken: string, selectListColumnContext: boolean, exclusiveTableSuggestions: boolean, updateInfo: ReturnType<typeof detectUpdateCompletionContext>, deleteInfo: ReturnType<typeof detectDeleteCompletionContext>): string[] {
   const keywords: string[] = [];
+  if (selectListColumnContext && hasSelectListExpression(beforeCursor)) keywords.push("FROM");
+  if (isAfterJoinModifierContext(beforeCursor)) keywords.push("JOIN");
+  if (!exclusiveTableSuggestions && isAfterSelectBodyExpression(beforeToken)) keywords.push("LIMIT");
+  if (isAfterConditionExpression(beforeToken)) keywords.push("AND", "OR");
   if (updateInfo?.afterTarget) keywords.push("SET");
   if (updateInfo?.afterSetAssignments) keywords.push("WHERE");
   if (deleteInfo?.afterTarget) keywords.push("WHERE");
   return keywords;
+}
+
+function hasSelectListExpression(beforeCursor: string): boolean {
+  const cleaned = stripSqlLiterals(beforeCursor).trimEnd();
+  const selectIndex = lastTopLevelKeywordIndex(cleaned, "select");
+  if (selectIndex < 0) return false;
+  const afterSelect = cleaned.slice(selectIndex + "select".length).trim();
+  return !!afterSelect && !/^distinct\s*$/i.test(afterSelect);
+}
+
+function isAfterSelectBodyExpression(beforeToken: string): boolean {
+  const cleaned = stripSqlLiterals(beforeToken).trimEnd();
+  if (!/^\s*(?:with\b[\s\S]*\bselect\b|select\b)/i.test(cleaned)) return false;
+  if (!/\bfrom\b/i.test(cleaned)) return false;
+  if (/\b(?:limit|offset|union|intersect|except)\b/i.test(cleaned)) return false;
+  if (/[,.(+\-*/%<>=!&|]$/.test(cleaned)) return false;
+  const lastKeyword = /\b([A-Za-z_][\w$]*)\s*$/.exec(cleaned)?.[1]?.toLowerCase();
+  if (lastKeyword && SELECT_BODY_INCOMPLETE_TAIL_KEYWORDS.has(lastKeyword)) return false;
+  return true;
+}
+
+const SELECT_BODY_INCOMPLETE_TAIL_KEYWORDS = new Set(["where", "and", "or", "not", "having", "group", "order", "by", "on", "is", "in", "like", "between", ...JOIN_MODIFIERS]);
+const CONDITION_INCOMPLETE_TAIL_KEYWORDS = new Set(["where", "and", "or", "not", "having", "on", "is", "in", "like", "between", "exists"]);
+
+function isAfterConditionExpression(beforeToken: string): boolean {
+  const cleaned = stripSqlLiterals(beforeToken).trimEnd();
+  if (!hasActiveConditionClause(cleaned)) return false;
+  const lastKeyword = /\b([A-Za-z_][\w$]*)\s*$/.exec(cleaned)?.[1]?.toLowerCase();
+  if (lastKeyword && CONDITION_INCOMPLETE_TAIL_KEYWORDS.has(lastKeyword)) return false;
+  return isExpressionTailComplete(cleaned);
+}
+
+function isAfterJoinModifierContext(beforeCursor: string): boolean {
+  const cleaned = stripSqlLiterals(beforeCursor).trimEnd();
+  const modifier = /\b([A-Za-z_][\w$]*)\s*$/.exec(cleaned)?.[1]?.toLowerCase();
+  if (!modifier || !JOIN_MODIFIERS.has(modifier)) return false;
+
+  const beforeModifier = cleaned.slice(0, cleaned.length - modifier.length).trimEnd();
+  const lastTableIntro = Math.max(lastTopLevelKeywordIndex(beforeModifier, "from"), lastTopLevelKeywordIndex(beforeModifier, "join"));
+  if (lastTableIntro < 0) return false;
+
+  const lastClauseBoundary = Math.max(
+    lastTopLevelKeywordIndex(beforeModifier, "where"),
+    lastTopLevelKeywordIndex(beforeModifier, "group"),
+    lastTopLevelKeywordIndex(beforeModifier, "order"),
+    lastTopLevelKeywordIndex(beforeModifier, "having"),
+    lastTopLevelKeywordIndex(beforeModifier, "limit"),
+    lastTopLevelKeywordIndex(beforeModifier, "offset"),
+    lastTopLevelKeywordIndex(beforeModifier, "union"),
+    lastTopLevelKeywordIndex(beforeModifier, "intersect"),
+    lastTopLevelKeywordIndex(beforeModifier, "except"),
+  );
+  if (lastClauseBoundary > lastTableIntro) return false;
+
+  const tableSegment = beforeModifier
+    .slice(lastTableIntro)
+    .replace(/^\s*(?:from|join)\b/i, "")
+    .trim();
+  return tableSegment.length > 0;
+}
+
+function hasActiveConditionClause(sql: string): boolean {
+  const lower = sql.toLowerCase();
+  const whereIndex = lastTopLevelKeywordIndex(lower, "where");
+  const havingIndex = lastTopLevelKeywordIndex(lower, "having");
+  const onIndex = lastTopLevelKeywordIndex(lower, "on");
+  const conditionIndex = Math.max(whereIndex, havingIndex, onIndex);
+  if (conditionIndex < 0) return false;
+  const afterCondition = lower.slice(conditionIndex);
+  return !/\b(?:group\s+by|order\s+by|limit|offset|union|intersect|except)\b/.test(afterCondition);
+}
+
+function isExpressionTailComplete(sql: string): boolean {
+  const trimmed = sql.trimEnd();
+  if (!trimmed) return false;
+  const lastChar = trimmed[trimmed.length - 1] ?? "";
+  if (/[,.(+\-*/%<>=!&|]$/.test(lastChar)) return false;
+  return /(?:\)|\]|\b(?:true|false|null)\b|`[^`]+`|"[^"]*"|''|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][\w$]*\b)$/i.test(trimmed);
+}
+
+function stripSqlLiterals(sql: string): string {
+  return sql.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+}
+
+function lastTopLevelKeywordIndex(sql: string, keyword: string): number {
+  const lower = sql.toLowerCase();
+  const target = keyword.toLowerCase();
+  let depth = 0;
+  let lastIndex = -1;
+  for (let index = 0; index < lower.length; index++) {
+    const ch = lower[index] ?? "";
+    if (ch === "(") {
+      depth++;
+      continue;
+    }
+    if (ch === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth === 0 && lower.startsWith(target, index) && !isIdentifierPart(lower[index - 1]) && !isIdentifierPart(lower[index + target.length])) {
+      lastIndex = index;
+      index += target.length - 1;
+    }
+  }
+  return lastIndex;
 }
 
 function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
@@ -2115,11 +2265,13 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
     "respect",
   ]);
 
-  const pattern = /\b(?:from|join|update|into|apply)\s+((?:"[^"]+"|`[^`]+`|[^\s,;()]+)(?:\.(?:"[^"]+"|`[^`]+`|[^\s,;()]+))?)(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?/gi;
+  const pattern = /\b(?:from|join|update|apply)\s+((?:"[^"]+"|`[^`]+`|[^\s,;()]+)(?:\.(?:"[^"]+"|`[^`]+`|[^\s,;()]+))?)(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?/gi;
   const referenced: SqlCompletionReferencedTable[] = [];
   for (const match of sql.matchAll(pattern)) {
     const rawName = match[1];
     const alias = match[2];
+    const quotedName = !!rawName && (rawName.startsWith('"') || rawName.startsWith("`"));
+    if (!quotedName && rawName && ALIAS_BLACKLIST.has(rawName.toLowerCase())) continue;
     // Filter out SQL keywords that accidentally matched as aliases
     const cleanAlias = alias && !ALIAS_BLACKLIST.has(alias.toLowerCase()) ? alias : undefined;
     if (isElasticsearchStyleIndexName(rawName)) {
@@ -2408,7 +2560,9 @@ function splitQualifiedName(input: string): [string | undefined, string | undefi
   if (current.trim()) parts.push(current.trim());
 
   const unquoted = parts.map((p) => unquoteIdentifier(p)).filter(Boolean);
-  if (unquoted.length >= 2) return [unquoted[0], unquoted[1]];
+  // For three-part names, the completion model can carry schema.table today;
+  // keep the table as the final segment instead of accidentally using catalog.schema.
+  if (unquoted.length >= 2) return [unquoted[unquoted.length - 2], unquoted[unquoted.length - 1]];
   return [unquoted[0], undefined];
 }
 
@@ -2509,7 +2663,7 @@ function buildSchemaItems(prefix: string, schemas: string[], dialect?: "mysql" |
       type: "schema" as const,
       detail: "schema",
       apply: `${quoteSqlIdentifier(schema, dialect)}.`,
-      boost: computeBoost(schema, prefix) + 1500,
+      boost: computeBoost(schema, prefix) + 700,
     }));
 }
 
@@ -2574,7 +2728,7 @@ function buildOracleTableFunctionItems(prefix: string): SqlCompletionItem[] {
     .map((item) => ({
       ...item,
       type: "function" as const,
-      boost: computeBoost(item.label, prefix) + 2200,
+      boost: computeBoost(item.label, prefix) + 600,
     }));
 }
 
@@ -3524,6 +3678,24 @@ function activeSqlKeywords(databaseType?: DatabaseType): string[] {
 
 function isOracleLikeDatabase(databaseType?: DatabaseType): boolean {
   return databaseType === "oracle" || databaseType === "oceanbase-oracle";
+}
+
+function buildJoinModifierKeywordItems(prefix: string, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
+  if (!prefix) return [];
+  return JOIN_MODIFIER_KEYWORD_PHRASES.filter((keyword) => matchesPrefix(keyword, prefix)).map((keyword) => {
+    const label = applySqlKeywordCase(keyword, keywordCase);
+    return {
+      label,
+      type: "keyword" as const,
+      apply: `${label} `,
+      detail: "join keyword",
+      boost: computeBoost(keyword, prefix) + 1300,
+    };
+  });
+}
+
+function isPendingJoinKeywordContext(context: SqlCompletionContext): boolean {
+  return !context.prefix && context.preferredKeywords.includes("JOIN") && !!context.tableTriggerWord && JOIN_MODIFIERS.has(context.tableTriggerWord);
 }
 
 function buildKeywordItems(prefix: string, context: SqlCompletionContext, databaseType?: DatabaseType, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {

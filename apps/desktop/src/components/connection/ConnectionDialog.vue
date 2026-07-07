@@ -36,6 +36,7 @@ import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/
 import { prestoSqlBuiltinDriverPaths } from "@/lib/prestoSqlBuiltinDriver";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connectionAttemptTimeout";
+import { appendConnectionErrorHints } from "@/lib/connectionErrorHints";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/visibleDatabases";
@@ -1379,7 +1380,7 @@ const postgresTlsMode = computed({
   },
   set: (value: string) => {
     form.value.ssl = value !== "disable";
-    form.value.url_params = setUrlParam(form.value.url_params, "sslmode", value === "prefer" ? "" : value);
+    form.value.url_params = setUrlParam(form.value.url_params, "sslmode", value);
   },
 });
 const postgresRootCertPath = computed({
@@ -1559,17 +1560,25 @@ async function testConnection() {
       mongoDriverMode.value = "legacy";
     }
     testResult.value = { ok: true, message: msg };
+    clearEditedConnectionErrorAfterSuccessfulTest();
   } catch (e: any) {
     if (runId !== testRunId) return;
-    const message = mongodbAuthFailureHint(String(e));
+    const message = appendConnectionErrorHints(config, mongodbAuthFailureHint(String(e)), t);
     const fallbackMessage = await tryNacosDockerConsoleFallback(config, message, runId);
     if (runId !== testRunId) return;
     testResult.value = fallbackMessage ? { ok: true, message: fallbackMessage } : { ok: false, message };
+    if (fallbackMessage) {
+      clearEditedConnectionErrorAfterSuccessfulTest();
+    }
   } finally {
     if (runId === testRunId) {
       isTesting.value = false;
     }
   }
+}
+
+function clearEditedConnectionErrorAfterSuccessfulTest() {
+  if (editingId.value) store.clearConnectionError(editingId.value);
 }
 
 function applyConnectionUrlToForm(input: string): boolean {
@@ -1972,7 +1981,7 @@ function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undef
       return "verify_identity";
   }
 
-  if (!ssl && getUrlParam(params, "require_ssl").toLowerCase() !== "true") return "preferred";
+  if (!ssl && getUrlParam(params, "require_ssl").toLowerCase() !== "true") return "disabled";
   if (getUrlParam(params, "verify_identity").toLowerCase() === "true") return "verify_identity";
   if (getUrlParam(params, "verify_ca").toLowerCase() === "true") return "verify_ca";
   return "required";
@@ -1984,7 +1993,7 @@ function applyMysqlTlsMode(params: string | undefined, mode: string): string {
     return setUrlParam(next, "ssl-mode", "disabled");
   }
   if (mode === "preferred") {
-    return next;
+    return setUrlParam(next, "ssl-mode", "preferred");
   }
 
   next = setUrlParam(next, "require_ssl", "true");
@@ -2573,7 +2582,7 @@ async function save() {
           const message = String(e?.message || e);
           if (config.one_time) void store.removeConnection(config.id);
           if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-          emit("connectFailed", mongodbAuthFailureHint(message));
+          emit("connectFailed", appendConnectionErrorHints(config, mongodbAuthFailureHint(message), t));
         });
       return;
     }
@@ -3936,8 +3945,8 @@ function openExternalUrl(url: string) {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="preferred">{{ t("connection.mysqlTlsModePreferred") }}</SelectItem>
                         <SelectItem value="disabled">{{ t("connection.mysqlTlsModeDisabled") }}</SelectItem>
+                        <SelectItem value="preferred">{{ t("connection.mysqlTlsModePreferred") }}</SelectItem>
                         <SelectItem value="required">{{ t("connection.mysqlTlsModeRequired") }}</SelectItem>
                         <SelectItem value="verify_ca">{{ t("connection.mysqlTlsModeVerifyCa") }}</SelectItem>
                         <SelectItem value="verify_identity">{{ t("connection.mysqlTlsModeVerifyIdentity") }}</SelectItem>

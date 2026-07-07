@@ -1097,6 +1097,10 @@ impl ConnectionConfig {
         self.ssl || self.host.to_ascii_lowercase().ends_with(".tidbcloud.com")
     }
 
+    pub fn bare_mysql_uses_tls(&self) -> bool {
+        self.mysql_uses_tls() || mysql_url_params_request_tls(self.url_params.as_deref())
+    }
+
     fn redis_tls_insecure_fragment(&self) -> &'static str {
         if self.ssl && self.redis_tls_insecure() {
             "#insecure"
@@ -1152,6 +1156,22 @@ fn mysql_url_param_value_is_true(value: &str) -> bool {
     matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
 }
 
+fn mysql_url_params_request_tls(params: Option<&str>) -> bool {
+    params.unwrap_or("").trim().trim_start_matches('?').split(['&', ';']).filter_map(|part| part.split_once('=')).any(
+        |(key, value)| {
+            let key = percent_decode_str(key.trim()).decode_utf8_lossy();
+            let value = percent_decode_str(value.trim()).decode_utf8_lossy().to_ascii_lowercase();
+            if key.eq_ignore_ascii_case("require_ssl") {
+                return mysql_url_param_value_is_true(&value);
+            }
+            if !key.eq_ignore_ascii_case("ssl-mode") && !key.eq_ignore_ascii_case("sslmode") {
+                return false;
+            }
+            !matches!(value.as_str(), "disabled" | "disable" | "false" | "0" | "off" | "no")
+        },
+    )
+}
+
 fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs: bool) -> String {
     let value = value.trim_start_matches('?');
     let mut parts: Vec<String> = value.split('&').filter(|part| !part.is_empty()).map(str::to_string).collect();
@@ -1185,7 +1205,9 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
     } else if !parts.iter().any(|part| {
         url_param_key_is(part, "ssl-mode") || url_param_key_is(part, "sslmode") || url_param_key_is(part, "require_ssl")
     }) {
-        parts.insert(0, "ssl-mode=preferred".to_string());
+        // Default MySQL connections keep TLS off unless the user explicitly
+        // enables a TLS mode.
+        parts.insert(0, "ssl-mode=disabled".to_string());
     }
 
     if !parts.iter().any(|part| url_param_key_is(part, "charset")) {
@@ -1906,7 +1928,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://user%40tenant%23cluster:secret@10.1.2.3:2883?ssl-mode=preferred&charset=utf8mb4"
+            "mysql://user%40tenant%23cluster:secret@10.1.2.3:2883?ssl-mode=disabled&charset=utf8mb4"
         );
     }
 
@@ -2031,7 +2053,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:p%40ss%3Aword%231@10.1.2.3:2883/db%2Fname?ssl-mode=preferred&charset=utf8mb4"
+            "mysql://root:p%40ss%3Aword%231@10.1.2.3:2883/db%2Fname?ssl-mode=disabled&charset=utf8mb4"
         );
     }
 
@@ -2040,10 +2062,7 @@ mod tests {
         let mut config = mysql_config("root", "secret", Some("test"));
         config.url_params = Some("charset=utf8mb4".to_string());
 
-        assert_eq!(
-            config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
-        );
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4");
     }
 
     #[test]
@@ -2053,7 +2072,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -2064,7 +2083,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -2076,7 +2095,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -2085,10 +2104,7 @@ mod tests {
         let mut config = mysql_config("root", "secret", Some("test"));
         config.url_params = Some("allowCleartextPasswords=false&enable_cleartext_plugin=&charset=utf8mb4".to_string());
 
-        assert_eq!(
-            config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
-        );
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4");
     }
 
     #[test]
@@ -2099,6 +2115,17 @@ mod tests {
         assert_eq!(
             config.connection_url(),
             "mysql://root:secret@10.1.2.3:2883/test?require_ssl=true&verify_ca=false&verify_identity=false&charset=utf8mb4"
+        );
+    }
+
+    #[test]
+    fn mysql_explicit_preferred_tls_mode_is_preserved() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("ssl-mode=preferred".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
         );
     }
 
@@ -2342,7 +2369,7 @@ mod tests {
 
         let url = config.redacted_connection_url();
 
-        assert_eq!(url, "mysql://10.1.2.3:2883/db%2Fname?ssl-mode=preferred&charset=utf8mb4");
+        assert_eq!(url, "mysql://10.1.2.3:2883/db%2Fname?ssl-mode=disabled&charset=utf8mb4");
         assert!(!url.contains("user"));
         assert!(!url.contains("p%40ss"));
         assert!(!url.contains("p@ss"));
