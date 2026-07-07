@@ -1,20 +1,110 @@
 <script setup lang="ts">
-import LiquidLoader from "@/components/ui/LiquidLoader.vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
+
+const VIDEO_SRC = "/assets/startup/donghua.mp4";
+const VIDEO_FADE_SECONDS = 0.5;
+const VIDEO_ERROR_DISMISS_MS = 900;
+
+const props = defineProps<{
+  ready: boolean;
+  exiting?: boolean;
+}>();
+
+const emit = defineEmits<{
+  dismiss: [];
+}>();
+
+const videoRef = ref<HTMLVideoElement | null>(null);
+const videoOpacity = ref(0);
+const videoFailed = ref(false);
+
+let animationFrame = 0;
+let errorDismissTimer: ReturnType<typeof setTimeout> | undefined;
+
+const statusText = computed(() => {
+  if (props.exiting) return "正在进入主界面";
+  return props.ready ? "主界面已就绪" : "正在准备主界面";
+});
+const ariaLabel = computed(() => `DBX 启动动画。${statusText.value}。点击任意位置可跳过。`);
+
+function requestDismiss() {
+  if (props.exiting) return;
+  emit("dismiss");
+}
+
+function clampOpacity(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function syncVideoOpacity() {
+  const video = videoRef.value;
+  if (!video || videoFailed.value) return;
+
+  const duration = video.duration;
+  if (Number.isFinite(duration) && duration > 0) {
+    const fadeIn = video.currentTime / VIDEO_FADE_SECONDS;
+    const fadeOut = (duration - video.currentTime) / VIDEO_FADE_SECONDS;
+    videoOpacity.value = clampOpacity(Math.min(1, fadeIn, fadeOut));
+  }
+
+  animationFrame = requestAnimationFrame(syncVideoOpacity);
+}
+
+function playVideo() {
+  const video = videoRef.value;
+  if (!video || videoFailed.value) return;
+  video.muted = true;
+  video.playsInline = true;
+  void video.play().catch(() => {
+    videoFailed.value = true;
+    videoOpacity.value = 0;
+  });
+}
+
+function completeVideo() {
+  videoOpacity.value = 0;
+  requestDismiss();
+}
+
+function onVideoError() {
+  videoFailed.value = true;
+  videoOpacity.value = 0;
+  if (animationFrame) cancelAnimationFrame(animationFrame);
+  if (errorDismissTimer) clearTimeout(errorDismissTimer);
+  errorDismissTimer = setTimeout(requestDismiss, VIDEO_ERROR_DISMISS_MS);
+}
+
+onMounted(() => {
+  playVideo();
+  animationFrame = requestAnimationFrame(syncVideoOpacity);
+});
+
+onUnmounted(() => {
+  if (animationFrame) cancelAnimationFrame(animationFrame);
+  if (errorDismissTimer) clearTimeout(errorDismissTimer);
+});
 </script>
 
 <template>
-  <div class="startup-splash" role="status" aria-live="polite" aria-label="DBX is starting">
-    <div class="startup-splash__panel">
-      <LiquidLoader />
-      <div class="startup-splash__copy">
-        <span class="startup-splash__label">TestTeam</span>
-        <span class="startup-splash__hero">DBX</span>
-        <div class="startup-splash__dots">
-          <span class="startup-splash__dot" />
-          <span class="startup-splash__dot" />
-          <span class="startup-splash__dot" />
-        </div>
-      </div>
+  <div
+    class="startup-splash"
+    :class="{ 'startup-splash--ready': ready, 'startup-splash--exiting': exiting, 'startup-splash--fallback': videoFailed }"
+    role="button"
+    tabindex="0"
+    aria-live="polite"
+    :aria-label="ariaLabel"
+    @click="requestDismiss"
+    @keydown.enter.prevent="requestDismiss"
+    @keydown.space.prevent="requestDismiss"
+  >
+    <video ref="videoRef" class="startup-splash__video" :style="{ opacity: videoOpacity }" :src="VIDEO_SRC" muted playsinline preload="auto" @ended="completeVideo" @error="onVideoError" @canplay="playVideo" />
+    <div class="startup-splash__overlay" aria-hidden="true" />
+
+    <div class="startup-splash__content">
+      <h1 class="startup-splash__title">DBX</h1>
+      <p class="startup-splash__tagline">让数据醒来</p>
+      <p class="startup-splash__enter">点击跳过</p>
+      <span class="startup-splash__sr">{{ statusText }}</span>
     </div>
   </div>
 </template>
@@ -24,127 +114,135 @@ import LiquidLoader from "@/components/ui/LiquidLoader.vue";
   position: fixed;
   inset: 0;
   z-index: 100000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: radial-gradient(circle at 50% 42%, color-mix(in oklch, var(--primary) 9%, transparent) 0, transparent 32%), linear-gradient(180deg, color-mix(in oklch, var(--background) 94%, var(--muted) 6%), var(--background));
-  color: var(--foreground);
+  overflow: hidden;
+  background: #fff;
+  color: #000;
+  cursor: pointer;
   pointer-events: auto;
 }
 
-.startup-splash__panel {
+.startup-splash__video {
+  position: absolute;
+  inset: 300px 0 0;
+  width: 100%;
+  height: calc(100% - 300px);
+  object-fit: cover;
+  object-position: center center;
+  transition: opacity 80ms linear;
+  pointer-events: none;
+}
+
+.startup-splash__overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: linear-gradient(to bottom, #fff 0%, rgb(255 255 255 / 0.88) 30%, rgb(255 255 255 / 0.24) 56%, #fff 100%), linear-gradient(90deg, #fff 0%, rgb(255 255 255 / 0.12) 22%, rgb(255 255 255 / 0.12) 78%, #fff 100%);
+  pointer-events: none;
+}
+
+.startup-splash--fallback .startup-splash__overlay {
+  background: linear-gradient(180deg, #fff, #f7f7f7 48%, #fff);
+}
+
+.startup-splash__content {
+  position: relative;
+  z-index: 2;
   display: flex;
-  min-width: 300px;
+  min-height: 100vh;
   flex-direction: column;
   align-items: center;
-  gap: 18px;
-}
-
-.startup-splash__copy {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.startup-splash__label {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--muted-foreground);
-}
-
-.startup-splash__hero {
-  font-size: 30px;
-  font-weight: 800;
-  letter-spacing: -0.01em;
-  line-height: 1.15;
-  background: linear-gradient(135deg, oklch(0.62 0.2 300), oklch(0.61 0.19 255), oklch(0.68 0.15 215), oklch(0.72 0.15 165), oklch(0.78 0.16 112), oklch(0.75 0.17 68), oklch(0.66 0.2 35));
-  background-size: 200% 200%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: startup-splash-gradient 4s ease-in-out infinite;
-}
-
-.startup-splash__dots {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 10px;
-}
-
-.startup-splash__dot {
-  display: block;
-  width: 4px;
-  height: 4px;
-  border-radius: 999px;
-  background: var(--muted-foreground);
-  opacity: 0.25;
-  animation: startup-splash-dot 1.4s ease-in-out infinite;
-}
-
-.startup-splash__dot:nth-child(2) {
-  animation-delay: 0.2s;
-}
-
-.startup-splash__dot:nth-child(3) {
-  animation-delay: 0.4s;
-}
-
-/* ── Keyframes ── */
-@keyframes startup-splash-gradient {
-  0%,
-  100% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-}
-
-@keyframes startup-splash-dot {
-  0%,
-  80%,
-  100% {
-    opacity: 0.2;
-    transform: scale(0.85);
-  }
-  40% {
-    opacity: 1;
-    transform: scale(1.2);
-  }
-}
-
-/* ── Leave transition (used by <Transition name="startup-splash"> in App.vue) ── */
-.startup-splash-leave-active {
+  justify-content: flex-start;
+  padding: clamp(72px, 12vh, 124px) 24px 0;
+  text-align: center;
   transition:
-    opacity 420ms cubic-bezier(0.22, 1, 0.36, 1),
-    transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+    opacity 620ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 620ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 620ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.startup-splash-leave-to {
+.startup-splash__title {
+  margin: 0;
+  color: #000;
+  font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
+  font-size: clamp(5.5rem, 11vw, 10.5rem);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 0.82;
+}
+
+.startup-splash__tagline {
+  margin: 20px 0 0;
+  color: rgb(0 0 0 / 0.78);
+  font-family: "Noto Serif SC", "Songti SC", "STSong", serif;
+  font-size: clamp(1.45rem, 3.3vw, 3.2rem);
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.05;
+}
+
+.startup-splash__enter {
+  min-height: 22px;
+  margin: 22px 0 0;
+  color: rgb(0 0 0 / 0.42);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.5;
+}
+
+.startup-splash__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.startup-splash--exiting {
+  pointer-events: none;
+}
+
+.startup-splash--exiting .startup-splash__content {
   opacity: 0;
-  transform: scale(1.01);
+  transform: translateY(-10px);
+  filter: blur(8px);
+}
+
+.startup-splash--exiting .startup-splash__video {
+  opacity: 0 !important;
+}
+
+@media (width <= 720px) {
+  .startup-splash__video {
+    inset: 260px 0 0;
+    height: calc(100% - 260px);
+  }
+
+  .startup-splash__title {
+    font-size: clamp(4.25rem, 22vw, 7rem);
+  }
+
+  .startup-splash__content {
+    padding-top: 76px;
+  }
+
+  .startup-splash__tagline {
+    margin-top: 18px;
+    font-size: clamp(1.35rem, 7vw, 2.3rem);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .startup-splash__hero {
-    animation: none;
+  .startup-splash__video {
+    display: none;
   }
 
-  .startup-splash__dot {
-    animation: none;
-    opacity: 0.5;
-  }
-
-  .startup-splash-leave-active {
+  .startup-splash__content,
+  .startup-splash--exiting .startup-splash__content {
     transition: opacity 160ms ease-out;
-  }
-
-  .startup-splash-leave-to {
     transform: none;
+    filter: none;
   }
 }
 </style>

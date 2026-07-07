@@ -11,6 +11,7 @@ import EditorToolbar from "@/components/layout/EditorToolbar.vue";
 import ContentArea from "@/components/layout/ContentArea.vue";
 import AppDialogs from "@/components/layout/AppDialogs.vue";
 import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
+import StartupSplash from "@/components/layout/StartupSplash.vue";
 
 import DdlViewDialog from "@/components/objects/DdlViewDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -107,11 +108,16 @@ const { checkingUpdates, updateInfo, updateCheckMessage, showUpdateDialog, isDow
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
-const STARTUP_SPLASH_TOTAL_MS = 3500;
+const PRELOAD_SPLASH_MIN_MS = 120;
+const STARTUP_SPLASH_SEEN_KEY = "dbx-startup-splash-seen";
 const needsAuth = ref(!isDesktop);
 const authenticated = ref(isDesktop);
 const setupRequired = ref(false);
 let preloadDismissTimer: ReturnType<typeof setTimeout> | undefined;
+
+const startupSplashVisible = ref(isDesktop);
+const startupSplashReady = ref(false);
+const startupSplashExiting = ref(false);
 
 const showConnectionDialog = ref(false);
 const connectionDialogPrefill = ref<ConnectionDeepLinkDraft | null>(null);
@@ -1332,13 +1338,13 @@ function onLoginSuccess() {
   setupRequired.value = false;
   needsAuth.value = true;
   window.history.replaceState(null, "", "/");
-  initApp();
+  void initApp();
 }
 
 function initApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
-  settingsStore
+  const ready = settingsStore
     .initDesktopSettings()
     .catch(() => {})
     .then(() => savedSqlStore.initFromStorage())
@@ -1354,6 +1360,24 @@ function initApp() {
       toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
     });
   settingsStore.initAiConfig();
+  return ready;
+}
+
+function removePreloadSplash() {
+  const el = document.getElementById("preload-splash");
+  if (!el) return;
+  el.classList.add("dismiss");
+  el.addEventListener("transitionend", () => el.remove(), { once: true });
+  setTimeout(() => el.remove(), 700);
+}
+
+function dismissStartupSplash() {
+  if (!isDesktop || !startupSplashVisible.value || startupSplashExiting.value) return;
+  startupSplashExiting.value = true;
+  safeLocalStorageSet(STARTUP_SPLASH_SEEN_KEY, "true");
+  setTimeout(() => {
+    startupSplashVisible.value = false;
+  }, 620);
 }
 
 function restoreActiveConnectionContext() {
@@ -1419,20 +1443,14 @@ watch(updateNotificationsEnabled, (enabled) => {
 onMounted(async () => {
   console.log("[STARTUP] onMounted begin");
   const mountStart = performance.now();
-  if (isDesktop) {
-    const preloadStart = (window as unknown as Record<string, unknown>).__DBX_PRELOAD_START;
-    const elapsed = typeof preloadStart === "number" ? Date.now() - preloadStart : 0;
-    const remaining = Math.max(800, STARTUP_SPLASH_TOTAL_MS - elapsed);
-    preloadDismissTimer = setTimeout(() => {
-      const el = document.getElementById("preload-splash");
-      if (el) {
-        el.classList.add("dismiss");
-        el.addEventListener("transitionend", () => el.remove(), { once: true });
-        setTimeout(() => el.remove(), 700);
-      }
-      preloadDismissTimer = undefined;
-    }, remaining);
-  }
+  const preloadStart = (window as unknown as Record<string, unknown>).__DBX_PRELOAD_START;
+  const preloadElapsed = typeof preloadStart === "number" ? Date.now() - preloadStart : 0;
+  const preloadRemaining = Math.max(120, PRELOAD_SPLASH_MIN_MS - preloadElapsed);
+  preloadDismissTimer = setTimeout(() => {
+    removePreloadSplash();
+    preloadDismissTimer = undefined;
+  }, preloadRemaining);
+
   requestAnimationFrame(() => {
     aiPanelReady.value = true;
   });
@@ -1475,7 +1493,9 @@ onMounted(async () => {
       .catch(() => {});
     return;
   }
-  initApp();
+  void initApp().finally(() => {
+    startupSplashReady.value = true;
+  });
   setupFileDrop().catch(() => {});
   setTimeout(() => {
     runUpdateNotificationChecks();
@@ -1809,6 +1829,9 @@ onUnmounted(() => {
       <DdlViewDialog v-if="queryEditorDdlTarget" v-model:open="showQueryEditorDdlDialog" :connection-id="queryEditorDdlTarget.connectionId" :database="queryEditorDdlTarget.database" :schema="queryEditorDdlTarget.schema" :table-name="queryEditorDdlTarget.tableName" :dialect="queryEditorDdlDialect" />
     </TooltipProvider>
   </div>
+  <Teleport to="body">
+    <StartupSplash v-if="isDesktop && startupSplashVisible" :ready="startupSplashReady" :exiting="startupSplashExiting" @dismiss="dismissStartupSplash" />
+  </Teleport>
 </template>
 
 <style scoped>
