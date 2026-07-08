@@ -1209,6 +1209,72 @@ fn sqlserver_add_column_with_identity() {
 }
 
 #[test]
+fn sqlserver_strips_mysql_display_width_from_fixed_integer_types() {
+    let mut id = column("id");
+    id.data_type = "int(11)".to_string();
+    id.is_nullable = false;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "users".to_string(),
+        columns: vec![id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[users] ADD [id] int NOT NULL;"]);
+}
+
+#[test]
+fn sqlserver_strips_scale_from_float() {
+    let mut amount = column("amount");
+    amount.data_type = "float(10,2)".to_string();
+    amount.is_nullable = true;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![amount],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[orders] ADD [amount] float;"]);
+}
+
+#[test]
+fn sqlserver_preserves_float_mantissa_bits() {
+    let mut value = column("value");
+    value.data_type = "float(53)".to_string();
+    value.is_nullable = false;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "measurements".to_string(),
+        columns: vec![value],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[measurements] ADD [value] float(53) NOT NULL;"]);
+}
+
+#[test]
 fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
     let mut user_fk = foreign_key("fk_orders_user_id", "user_id", "accounts", "id");
     user_fk.ref_schema = "dbo".to_string();

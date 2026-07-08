@@ -1,12 +1,52 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { activeTabSidebarTarget, findSidebarNodeForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebarActiveTabTarget.ts";
+import { activeTabSidebarTarget, findNodePathForTarget, findSidebarNodeForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebarActiveTabTarget.ts";
 import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function flat(node: TreeNode, depth = 0): FlatTreeNode {
   return { id: node.id, node, depth, type: node.type };
 }
+
+test("findNodePathForTarget falls back to database when table schema is not stored separately", () => {
+  const table: TreeNode = {
+    id: "conn-1:app:__tables:users",
+    label: "users",
+    type: "table",
+    connectionId: "conn-1",
+    database: "app",
+    children: [],
+  };
+  const tableGroup: TreeNode = {
+    id: "conn-1:app:__tables",
+    label: "Tables",
+    type: "group-tables",
+    connectionId: "conn-1",
+    database: "app",
+    children: [table],
+  };
+  const database: TreeNode = {
+    id: "conn-1:app",
+    label: "app",
+    type: "database",
+    connectionId: "conn-1",
+    database: "app",
+    children: [tableGroup],
+  };
+
+  const path = findNodePathForTarget(
+    {
+      type: "table",
+      connectionId: "conn-1",
+      database: "app",
+      schema: "app",
+      tableName: "users",
+    },
+    [database],
+  );
+
+  assert.deepEqual(path?.map((node) => node.id), ["conn-1:app", "conn-1:app:__tables", "conn-1:app:__tables:users"]);
+});
 
 test("data tabs target the matching visible table or view node", () => {
   const tab: QueryTab = {
@@ -258,6 +298,13 @@ test("sidebar node scrolling keeps visible rows in place and reveals hidden rows
   assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140 }), 448);
   assert.equal(scrollTopForSidebarNode({ index: 1, currentScrollTop: 280, viewportHeight: 140 }), 28);
   assert.equal(scrollTopForSidebarNode({ index: 11, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28 }), 280);
+});
+
+test("sidebar node scrolling supports top and smart locate alignment", () => {
+  assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140, align: "top" }), 560);
+  assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140, align: "smart" }), 523);
+  assert.equal(scrollTopForSidebarNode({ index: 11, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28, align: "smart" }), 252);
+  assert.equal(scrollTopForSidebarNode({ index: 0, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28, align: "smart" }), 0);
 });
 
 test("active sidebar selection only scrolls on tab or setting changes", () => {

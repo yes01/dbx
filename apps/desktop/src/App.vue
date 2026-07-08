@@ -109,15 +109,12 @@ const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
 const PRELOAD_SPLASH_MIN_MS = 0;
-const STARTUP_SPLASH_SEEN_KEY = "dbx-startup-splash-seen";
 const needsAuth = ref(!isDesktop);
 const authenticated = ref(isDesktop);
 const setupRequired = ref(false);
 let preloadDismissTimer: ReturnType<typeof setTimeout> | undefined;
 
 const startupSplashVisible = ref(isDesktop);
-const startupSplashReady = ref(false);
-const startupSplashExiting = ref(false);
 
 const showConnectionDialog = ref(false);
 const connectionDialogPrefill = ref<ConnectionDeepLinkDraft | null>(null);
@@ -1375,12 +1372,8 @@ function removePreloadSplash() {
 }
 
 function dismissStartupSplash() {
-  if (!isDesktop || !startupSplashVisible.value || startupSplashExiting.value) return;
-  startupSplashExiting.value = true;
-  safeLocalStorageSet(STARTUP_SPLASH_SEEN_KEY, "true");
-  setTimeout(() => {
-    startupSplashVisible.value = false;
-  }, 620);
+  if (!isDesktop || !startupSplashVisible.value) return;
+  startupSplashVisible.value = false;
 }
 
 function restoreActiveConnectionContext() {
@@ -1496,9 +1489,7 @@ onMounted(async () => {
       .catch(() => {});
     return;
   }
-  void initApp().finally(() => {
-    startupSplashReady.value = true;
-  });
+  void initApp();
   setupFileDrop().catch(() => {});
   setTimeout(() => {
     runUpdateNotificationChecks();
@@ -1833,7 +1824,7 @@ onUnmounted(() => {
     </TooltipProvider>
   </div>
   <Teleport to="body">
-    <StartupSplash v-if="isDesktop && startupSplashVisible" :ready="startupSplashReady" :exiting="startupSplashExiting" @dismiss="dismissStartupSplash" />
+    <StartupSplash v-if="isDesktop && startupSplashVisible" @dismiss="dismissStartupSplash" />
   </Teleport>
 </template>
 

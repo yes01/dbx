@@ -16,7 +16,6 @@ use crate::token_usage::TokenUsage;
 
 /// Maximum number of agent loop turns to prevent infinite loops.
 const MAX_AGENT_TURNS: u32 = 30;
-const AGENT_CANCELLED_ERROR: &str = "Agent loop cancelled";
 const MAX_TOOL_RESULT_CONTEXT_CHARS: usize = 12_000;
 const TOOL_RESULT_HEAD_CHARS: usize = 4_000;
 const TOOL_RESULT_TAIL_CHARS: usize = 4_000;
@@ -238,7 +237,7 @@ pub async fn run_agent_loop(
                     }
                     break;
                 }
-                Err(err) if err == AGENT_CANCELLED_ERROR => {
+                Err(err) if err == ai::AGENT_CANCELLED_ERROR => {
                     final_text = take_text(&accumulated_text);
                     loop_exit = LoopExit::Cancelled;
                     break;
@@ -263,6 +262,12 @@ pub async fn run_agent_loop(
 
         if let Some(usage) = turn_usage {
             total_usage.add(&usage);
+        }
+
+        if cancelled.notified().now_or_never().is_some() {
+            final_text = accumulated_text;
+            loop_exit = LoopExit::Cancelled;
+            break;
         }
 
         on_event(AgentEvent::TurnEnd { turn });
@@ -612,7 +617,7 @@ async fn stream_with_tools(
 ) -> Result<(Vec<ToolCall>, Option<TokenUsage>), String> {
     // Return early if the user cancelled before the LLM call started.
     if cancelled.notified().now_or_never().is_some() {
-        return Err(AGENT_CANCELLED_ERROR.to_string());
+        return Err(ai::AGENT_CANCELLED_ERROR.to_string());
     }
 
     ai::stream_with_tools(config, request, session_id, tools, cancelled, on_chunk).await
@@ -646,7 +651,7 @@ async fn run_agent_loop_text_only(
     messages: &[AiMessage],
     agent_ctx: &AgentLoopContext,
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
-    _cancelled: &Notify,
+    cancelled: &Notify,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
     task_contract: Option<&AiTaskContract>,
@@ -654,6 +659,11 @@ async fn run_agent_loop_text_only(
     // Build a schema-enriched system prompt so the LLM can answer schema questions
     // even without tool access.
     let enriched_prompt = build_schema_prompt(agent_ctx, system_prompt).await;
+
+    if cancelled.notified().now_or_never().is_some() {
+        on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+        return Ok("Agent run was cancelled before producing output.".to_string());
+    }
 
     let mut request = AiCompletionRequest {
         config: config.clone(),
@@ -666,7 +676,13 @@ async fn run_agent_loop_text_only(
 
     for attempt in 0..=MAX_CONTRACT_REPAIR_ATTEMPTS {
         // Use non-streaming completions so contract repair can suppress incomplete drafts.
-        let result = ai::complete(&request).await?;
+        let result = tokio::select! {
+            result = ai::complete(&request) => result?,
+            _ = cancelled.notified() => {
+                on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+                return Ok("Agent run was cancelled before producing output.".to_string());
+            }
+        };
         match validate_final_answer(task_contract, &result) {
             FinalAnswerCheck::Satisfied => {
                 on_event(AgentEvent::TextDelta { delta: result.clone() });

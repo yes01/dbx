@@ -2407,6 +2407,7 @@ const isInfiniteScrollPaginating = ref(false);
 let lastInfiniteScrollPage = 0;
 let infiniteScrollCheckScheduled = false;
 let infiniteScrollAllLoaded = false;
+const isRefreshingData = ref(false);
 watch(pageSize, (value) => {
   customPageSizeInput.value = String(value);
 });
@@ -2494,6 +2495,20 @@ const canGoNextPage = computed(() => {
     allRowsLoaded: allRowsLoaded.value,
   });
 });
+watch(
+  () => props.loading,
+  (loading, prevLoading) => {
+    if (loading || !prevLoading || !isRefreshingData.value) return;
+    isRefreshingData.value = false;
+    const total = displayedTotalRowCount.value;
+    if (typeof total !== "number" || total <= 0) return;
+    const lastPageNum = Math.max(1, Math.ceil(total / pageSize.value));
+    if (currentPage.value <= lastPageNum) return;
+    currentPage.value = lastPageNum;
+    resetGridVerticalScroll(true);
+    emit("paginate", (lastPageNum - 1) * pageSize.value, pageSize.value, currentWhereInput(), currentOrderBy());
+  },
+);
 const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
 const canCalculateTotalRowCount = computed(() => !isResultsContext.value && !!props.connectionId && (!!props.tableMeta || !!props.countSql));
@@ -2977,11 +2992,13 @@ function temporalEditorKindForColumn(columnIndex: number): TemporalCellEditorKin
 }
 
 function enumValuesForGridColumn(columnIndex: number): string[] {
-  return enumValuesForColumn(tableColumnForGridColumn(columnIndex));
+  const column = tableColumnForGridColumn(columnIndex);
+  return column?.enum_values?.length ? column.enum_values : enumValuesForColumn(column);
 }
 
 function isEnumGridColumn(columnIndex: number): boolean {
-  return isEnumColumn(tableColumnForGridColumn(columnIndex));
+  const column = tableColumnForGridColumn(columnIndex);
+  return (column?.enum_values?.length ?? 0) > 0 || isEnumColumn(column);
 }
 
 function isEnumGridColumnNullable(columnIndex: number): boolean {
@@ -3030,7 +3047,8 @@ async function onToolbarRefresh() {
     resetInfiniteScrollState();
   }
   preserveTransposeOnNextResult.value = showTranspose.value;
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, 0);
+  isRefreshingData.value = true;
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
 async function onToolbarCommit() {
@@ -3044,7 +3062,8 @@ function onToolbarRollback() {
   if (infiniteScrollEnabled.value) {
     resetInfiniteScrollState();
   }
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, 0);
+  isRefreshingData.value = true;
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value);
 }
 
 function addRow() {

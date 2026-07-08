@@ -236,6 +236,7 @@ pub fn duckdb_query_columns_in_database_with_attached(
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1653,6 +1654,7 @@ fn presto_like_columns_from_query_result(result: &db::QueryResult) -> Vec<db::Co
                 numeric_precision: presto_like_numeric_precision(&data_type),
                 numeric_scale: presto_like_numeric_scale(&data_type),
                 character_maximum_length: presto_like_character_maximum_length(&data_type),
+                enum_values: None,
             })
         })
         .collect()
@@ -1752,6 +1754,7 @@ mod tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
         }
     }
 
@@ -4579,6 +4582,7 @@ mod object_source_tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
         };
         let mut ignored = column.clone();
         ignored.name = "EMPTY_COMMENT".to_string();
@@ -4611,6 +4615,7 @@ mod object_source_tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
         };
 
         let ddl = append_oracle_comments_to_ddl(
@@ -4644,6 +4649,7 @@ mod ddl_tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
         }
     }
 
@@ -4723,6 +4729,18 @@ mod ddl_tests {
         assert!(ddl.contains(
             "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'User''s display name', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'users', @level2type=N'COLUMN', @level2name=N'display]name';"
         ));
+    }
+
+    #[test]
+    fn sqlserver_table_ddl_includes_identity_clause() {
+        let mut id = column("FIDS", "int");
+        id.is_nullable = false;
+        id.is_primary_key = true;
+        id.extra = Some("identity(1,1)".to_string());
+
+        let ddl = render_sqlserver_table_ddl("dbo", "ZHLSBS", &[id], &[], &[]);
+
+        assert!(ddl.contains("[FIDS] int IDENTITY(1,1) NOT NULL"), "ddl: {ddl}");
     }
 
     #[test]
@@ -4884,6 +4902,23 @@ pub fn render_postgres_table_ddl(
     ddl
 }
 
+fn sqlserver_identity_clause(extra: Option<&str>) -> Option<String> {
+    let extra = extra?.trim();
+    let lower = extra.to_ascii_lowercase();
+    if !lower.starts_with("identity") {
+        return None;
+    }
+
+    let rest = extra["identity".len()..].trim_start();
+    if rest.is_empty() {
+        return Some("IDENTITY".to_string());
+    }
+
+    let args = rest.strip_prefix('(')?;
+    let end = args.find(')')?;
+    Some(format!("IDENTITY({})", args[..end].trim()))
+}
+
 fn group_foreign_keys_by_name(fkeys: &[db::ForeignKeyInfo]) -> Vec<Vec<&db::ForeignKeyInfo>> {
     let mut groups: Vec<Vec<&db::ForeignKeyInfo>> = Vec::new();
     for fk in fkeys {
@@ -4921,6 +4956,9 @@ pub fn render_sqlserver_table_ddl(
         .iter()
         .map(|c| {
             let mut line = format!("  {} {}", sqlserver_ident(&c.name), c.data_type);
+            if let Some(identity) = sqlserver_identity_clause(c.extra.as_deref()) {
+                line.push_str(&format!(" {identity}"));
+            }
             if !c.is_nullable {
                 line.push_str(" NOT NULL");
             }

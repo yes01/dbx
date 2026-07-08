@@ -374,6 +374,10 @@ pub async fn uninstall_agent_driver(am: &AgentManager, db_type: &str) -> Result<
     Ok(())
 }
 
+pub fn clear_agent_download_cache(am: &AgentManager) -> Result<(), String> {
+    remove_download_cache_entries(am, |_| true, "download cache")
+}
+
 pub async fn uninstall_agent_jre(am: &AgentManager, jre_key: &str) -> Result<(), String> {
     let local_state = am.load_state();
     let dependents: Vec<&str> = local_state
@@ -750,27 +754,35 @@ fn prune_download_cache(am: &AgentManager) -> Result<(), String> {
 }
 
 fn prune_driver_download_cache(am: &AgentManager, db_type: &str) -> Result<(), String> {
+    let prefix = format!("driver-{}-", cache_file_token(db_type));
+    remove_download_cache_entries(am, |name| name.starts_with(&prefix), "cached driver download")
+}
+
+fn remove_download_cache_entries(
+    am: &AgentManager,
+    should_remove: impl Fn(&str) -> bool,
+    context: &str,
+) -> Result<(), String> {
     let cache_dir = am.download_cache_dir();
     let Ok(entries) = std::fs::read_dir(&cache_dir) else {
         return Ok(());
     };
-    let prefix = format!("driver-{}-", cache_file_token(db_type));
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        if name.starts_with(&prefix) {
-            let meta = match entry.metadata() {
-                Ok(meta) => meta,
-                Err(_) => continue,
-            };
-            if meta.is_dir() {
-                std::fs::remove_dir_all(&path)
-                    .map_err(|err| format!("Failed to remove cached driver download: {err}"))?;
-            } else {
-                std::fs::remove_file(&path).map_err(|err| format!("Failed to remove cached driver download: {err}"))?;
-            }
+        if !should_remove(name) {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|err| format!("Failed to remove {context}: {err}"))?;
+        } else {
+            std::fs::remove_file(&path).map_err(|err| format!("Failed to remove {context}: {err}"))?;
         }
     }
     Ok(())

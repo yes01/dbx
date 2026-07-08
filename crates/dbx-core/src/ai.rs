@@ -34,6 +34,9 @@ pub async fn unregister_stream(session_id: &str) {
     AI_STREAMS.write().await.remove(session_id);
 }
 
+/// Error returned by tool-streaming functions when the user cancels mid-stream.
+pub const AGENT_CANCELLED_ERROR: &str = "Agent loop cancelled";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -1836,7 +1839,9 @@ async fn stream_claude_with_tools(
 
                 if finished { break; }
             }
-            _ = cancelled.notified() => { break; }
+            _ = cancelled.notified() => {
+                return Err(AGENT_CANCELLED_ERROR.to_string());
+            }
         }
     }
 
@@ -1974,7 +1979,9 @@ async fn stream_openai_with_tools(
 
                 if finished { break; }
             }
-            _ = cancelled.notified() => { break; }
+            _ = cancelled.notified() => {
+                return Err(AGENT_CANCELLED_ERROR.to_string());
+            }
         }
     }
 
@@ -2101,7 +2108,9 @@ async fn stream_responses_with_tools(
 
                 if finished { break; }
             }
-            _ = cancelled.notified() => { break; }
+            _ = cancelled.notified() => {
+                return Err(AGENT_CANCELLED_ERROR.to_string());
+            }
         }
     }
 
@@ -2247,7 +2256,9 @@ async fn stream_gemini_with_tools(
                     }
                 }
             }
-            _ = cancelled.notified() => { break; }
+            _ = cancelled.notified() => {
+                return Err(AGENT_CANCELLED_ERROR.to_string());
+            }
         }
     }
 

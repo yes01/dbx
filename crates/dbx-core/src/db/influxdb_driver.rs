@@ -226,6 +226,7 @@ pub async fn get_columns(client: &InfluxdbClient, database: &str, table: &str) -
         numeric_precision: None,
         numeric_scale: None,
         character_maximum_length: None,
+        enum_values: None,
     };
 
     let cols: Vec<ColumnInfo> = std::iter::once(time_col)
@@ -240,6 +241,7 @@ pub async fn get_columns(client: &InfluxdbClient, database: &str, table: &str) -
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
         }))
         .chain(field_series.first().into_iter().flat_map(|s| s.values.iter()).map(|row| {
             let data_type = row.get(1).and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
@@ -254,6 +256,7 @@ pub async fn get_columns(client: &InfluxdbClient, database: &str, table: &str) -
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             }
         }))
         .collect();

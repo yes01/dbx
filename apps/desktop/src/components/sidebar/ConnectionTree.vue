@@ -13,7 +13,7 @@ import { connectionPasteTargetGroupId, selectedConnectionClipboardNodes, selecte
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebarTypeSearch";
 import { usesTreeSchemaMode } from "@/lib/databaseFeatureSupport";
 import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
-import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget } from "@/lib/sidebarActiveTabTarget";
+import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget, type SidebarNodeScrollAlign } from "@/lib/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/queryCursorTableTarget";
 import { SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
 import { sidebarTreeContextKey } from "@/lib/sidebarTreeContext";
@@ -425,13 +425,31 @@ const pendingRenameGroupId = ref<string | null>(null);
 const highlightedNodeId = ref<string | null>(null);
 let highlightTimer: number | undefined;
 
+function waitForSidebarRenderFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
+async function flashSidebarNode(nodeId: string) {
+  window.clearTimeout(highlightTimer);
+  highlightedNodeId.value = null;
+  await nextTick();
+  await waitForSidebarRenderFrame();
+
+  highlightedNodeId.value = nodeId;
+  highlightTimer = window.setTimeout(() => {
+    if (highlightedNodeId.value === nodeId) highlightedNodeId.value = null;
+  }, 1800);
+}
+
 function topOcclusionHeightForSidebarNode(nodeId: string): number {
   const sticky = stickyNode.value;
   if (!useVirtualTree.value || !sticky || sticky.id === nodeId) return 0;
   return SIDEBAR_TREE_ROW_HEIGHT;
 }
 
-async function scrollToSidebarNode(nodeId: string) {
+async function scrollToSidebarNode(nodeId: string, options?: { align?: SidebarNodeScrollAlign }) {
   await nextTick();
 
   const index = flatNodes.value.findIndex((item) => item.id === nodeId);
@@ -443,6 +461,7 @@ async function scrollToSidebarNode(nodeId: string) {
     currentScrollTop: scroller.scrollTop,
     viewportHeight: scroller.clientHeight,
     topOcclusionHeight: topOcclusionHeightForSidebarNode(nodeId),
+    ...(options?.align ? { align: options.align } : {}),
   });
   if (nextScrollTop !== scroller.scrollTop) {
     scroller.scrollTop = nextScrollTop;
@@ -549,13 +568,8 @@ async function locateActiveTabInSidebar() {
   store.treeSelectionAnchorId = match.id;
   await nextTick();
 
-  window.clearTimeout(highlightTimer);
-  highlightedNodeId.value = match.id;
-  highlightTimer = window.setTimeout(() => {
-    highlightedNodeId.value = null;
-  }, 1800);
-
-  await scrollToSidebarNode(match.id);
+  await scrollToSidebarNode(match.id, { align: "smart" });
+  await flashSidebarNode(match.id);
 }
 
 function tableTargetFromCandidate(candidate: QueryCursorTableCandidate): ActiveTabSidebarTarget {

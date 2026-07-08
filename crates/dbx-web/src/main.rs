@@ -246,6 +246,7 @@ async fn main() {
         .route("/agents/installed-local", get(routes::agents::list_installed_agents_local))
         .route("/agents/installed", get(routes::agents::list_installed_agents))
         .route("/agents/storage-usage", get(routes::agents::get_driver_store_usage))
+        .route("/agents/clear-download-cache", post(routes::agents::clear_driver_download_cache))
         .route("/agents/runtime", get(routes::agents::get_driver_runtime_summary))
         .route("/agents/runtime/stop", post(routes::agents::stop_driver_runtime))
         .route("/agents/runtime/restart", post(routes::agents::restart_driver_runtime))

@@ -75,6 +75,22 @@ WHERE o.OWNER = :2
   AND o.OBJECT_TYPE = 'VIEW'
 )
 ORDER BY OBJECT_NAME`
+const oracleListSessionUserTablesSQL = `
+SELECT OBJECT_NAME, TABLE_TYPE, COMMENTS
+FROM (
+SELECT t.TABLE_NAME AS OBJECT_NAME,
+       'TABLE' AS TABLE_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_TABLES t
+WHERE t.NESTED = 'NO'
+UNION ALL
+SELECT o.OBJECT_NAME,
+       'VIEW' AS TABLE_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_OBJECTS o
+WHERE o.OBJECT_TYPE = 'VIEW'
+)
+ORDER BY OBJECT_NAME`
 const oracleListObjectsSQL = `
 SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
 FROM (
@@ -91,6 +107,28 @@ SELECT o.OBJECT_NAME,
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
   AND o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE')
+)
+ORDER BY CASE OBJECT_TYPE
+  WHEN 'TABLE' THEN 0
+  WHEN 'VIEW' THEN 1
+  WHEN 'PROCEDURE' THEN 2
+  WHEN 'FUNCTION' THEN 3
+  ELSE 4
+END, OBJECT_NAME`
+const oracleListSessionUserObjectsSQL = `
+SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
+FROM (
+SELECT t.TABLE_NAME AS OBJECT_NAME,
+       'TABLE' AS OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_TABLES t
+WHERE t.NESTED = 'NO'
+UNION ALL
+SELECT o.OBJECT_NAME,
+       o.OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_OBJECTS o
+WHERE o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE')
 )
 ORDER BY CASE OBJECT_TYPE
   WHEN 'TABLE' THEN 0
@@ -772,12 +810,35 @@ func (s *server) normalizeSchema(schema string) (string, error) {
 	return strings.ToUpper(schema), nil
 }
 
+func (s *server) sessionUser() (string, error) {
+	db, err := s.requireDB()
+	if err != nil {
+		return "", err
+	}
+	var username string
+	if err := db.QueryRow("SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') FROM DUAL").Scan(&username); err != nil {
+		return "", err
+	}
+	return strings.ToUpper(username), nil
+}
+
+func (s *server) schemaIsSessionUser(schema string) bool {
+	username, err := s.sessionUser()
+	return err == nil && strings.EqualFold(schema, username)
+}
+
 func (s *server) listTables(schema string) ([]tableInfo, error) {
 	schema, err := s.normalizeSchema(schema)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.queryRows(oracleListTablesSQL, []any{schema, schema})
+	query := oracleListTablesSQL
+	args := []any{schema, schema}
+	if s.schemaIsSessionUser(schema) {
+		query = oracleListSessionUserTablesSQL
+		args = nil
+	}
+	rows, err := s.queryRows(query, args)
 	if err != nil {
 		if isOraclePGALimitError(err) {
 			return []tableInfo{}, nil
@@ -801,7 +862,13 @@ func (s *server) listObjects(schema string) ([]objectInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.queryRows(oracleListObjectsSQL, []any{schema, schema})
+	query := oracleListObjectsSQL
+	args := []any{schema, schema}
+	if s.schemaIsSessionUser(schema) {
+		query = oracleListSessionUserObjectsSQL
+		args = nil
+	}
+	rows, err := s.queryRows(query, args)
 	if err != nil {
 		if isOraclePGALimitError(err) {
 			return []objectInfo{}, nil

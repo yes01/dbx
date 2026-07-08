@@ -5,7 +5,7 @@ describe("sqlInListPaste", () => {
   it("builds an IN condition from line-separated values", () => {
     expect(buildSqlInConditionFromPasteSource("1\n2\nabc")).toEqual({
       ok: true,
-      sql: "IN (1, 2, 'abc')",
+      sql: "IN ('1', '2', 'abc')",
       valueCount: 3,
     });
   });

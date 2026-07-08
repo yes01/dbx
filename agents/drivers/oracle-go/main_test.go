@@ -447,6 +447,20 @@ func TestListTablesSQLUsesSplitDictionaryQuery(t *testing.T) {
 	}
 }
 
+func TestListSessionUserTablesSQLUsesUserDictionary(t *testing.T) {
+	sqlText := strings.ToUpper(oracleListSessionUserTablesSQL)
+
+	if !strings.Contains(sqlText, "USER_TABLES") || !strings.Contains(sqlText, "USER_OBJECTS") {
+		t.Fatalf("session-user table listing should use USER_* dictionaries, got: %s", oracleListSessionUserTablesSQL)
+	}
+	if strings.Contains(sqlText, "ALL_TABLES") || strings.Contains(sqlText, "ALL_OBJECTS") {
+		t.Fatalf("session-user table listing should avoid ALL_* dictionaries, got: %s", oracleListSessionUserTablesSQL)
+	}
+	if strings.Contains(sqlText, "OWNER =") {
+		t.Fatalf("session-user table listing should not add owner predicates, got: %s", oracleListSessionUserTablesSQL)
+	}
+}
+
 func TestListObjectsSQLUsesSplitDictionaryQuery(t *testing.T) {
 	sqlText := strings.ToUpper(oracleListObjectsSQL)
 
@@ -458,6 +472,20 @@ func TestListObjectsSQLUsesSplitDictionaryQuery(t *testing.T) {
 	}
 	if strings.Contains(sqlText, "ALL_TAB_COMMENTS") {
 		t.Fatalf("object listing should not load comments during refresh, got: %s", oracleListObjectsSQL)
+	}
+}
+
+func TestListSessionUserObjectsSQLUsesUserDictionary(t *testing.T) {
+	sqlText := strings.ToUpper(oracleListSessionUserObjectsSQL)
+
+	if !strings.Contains(sqlText, "USER_TABLES") || !strings.Contains(sqlText, "USER_OBJECTS") {
+		t.Fatalf("session-user object listing should use USER_* dictionaries, got: %s", oracleListSessionUserObjectsSQL)
+	}
+	if strings.Contains(sqlText, "ALL_TABLES") || strings.Contains(sqlText, "ALL_OBJECTS") {
+		t.Fatalf("session-user object listing should avoid ALL_* dictionaries, got: %s", oracleListSessionUserObjectsSQL)
+	}
+	if strings.Contains(sqlText, "OWNER =") {
+		t.Fatalf("session-user object listing should not add owner predicates, got: %s", oracleListSessionUserObjectsSQL)
 	}
 }
 
