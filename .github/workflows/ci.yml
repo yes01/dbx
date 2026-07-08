@@ -56,7 +56,8 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/.ghcup || true
           docker system prune -af || true
-          mkdir -p /mnt/dbx-clippy-target /mnt/dbx-test-target
+          sudo mkdir -p /mnt/dbx-ci/clippy-target /mnt/dbx-ci/test-target
+          sudo chown -R "$USER:$USER" /mnt/dbx-ci
           df -h / /mnt
 
       - name: Install system dependencies
@@ -80,17 +81,17 @@ jobs:
 
       - name: Cargo clippy
         env:
-          CARGO_TARGET_DIR: /mnt/dbx-clippy-target
+          CARGO_TARGET_DIR: /mnt/dbx-ci/clippy-target
         run: cargo clippy --workspace --locked --all-targets
 
       - name: Clear clippy build artifacts
         run: |
-          rm -rf /mnt/dbx-clippy-target
+          rm -rf /mnt/dbx-ci/clippy-target
           df -h / /mnt
 
       - name: Cargo test
         env:
-          CARGO_TARGET_DIR: /mnt/dbx-test-target
+          CARGO_TARGET_DIR: /mnt/dbx-ci/test-target
         run: cargo test --workspace --locked
 
   jdbc:
