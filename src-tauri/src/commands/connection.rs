@@ -543,6 +543,25 @@ pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Opti
     state.storage.load_sidebar_layout().await
 }
 
+fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqlite::SqliteExtensionSpec> {
+    db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
+        .into_iter()
+        .map(|mut extension| {
+            extension.path = expand_tilde(&extension.path);
+            extension
+        })
+        .collect()
+}
+
+async fn connect_sqlite_from_config(config: &ConnectionConfig) -> Result<db::sqlite::SqliteHandle, String> {
+    db::sqlite::connect_path_with_cipher_key_and_extensions(
+        &expand_tilde(&config.host),
+        &config.password,
+        sqlite_extension_specs_from_config(config),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn test_connection(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
     let tunnel_id = format!("{}:test", config.id);
@@ -597,19 +616,10 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 }
                 Err(e) => Err(e),
             },
-            DatabaseType::Sqlite => {
-                let extensions = db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
-                    .into_iter()
-                    .map(|mut extension| {
-                        extension.path = expand_tilde(&extension.path);
-                        extension
-                    })
-                    .collect();
-                match db::sqlite::connect_path_with_extensions(&expand_tilde(&config.host), extensions).await {
-                    Ok(_) => Ok("Connection successful".to_string()),
-                    Err(e) => Err(e),
-                }
-            }
+            DatabaseType::Sqlite => match connect_sqlite_from_config(&config).await {
+                Ok(_) => Ok("Connection successful".to_string()),
+                Err(e) => Err(e),
+            },
             DatabaseType::Redis => {
                 let con = if config.uses_redis_cluster() {
                     state.connect_redis_cluster(&tunnel_id, &config).await?;
@@ -692,6 +702,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 &config.username,
                 &config.password,
                 config.database.as_deref(),
+                config.url_params.as_deref(),
                 connect_timeout,
             )
             .await
@@ -872,18 +883,7 @@ pub async fn connect_db(
         | DatabaseType::Kwdb
         | DatabaseType::Questdb
         | DatabaseType::OpenGauss => PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?),
-        DatabaseType::Sqlite => {
-            let extensions = db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
-                .into_iter()
-                .map(|mut extension| {
-                    extension.path = expand_tilde(&extension.path);
-                    extension
-                })
-                .collect();
-            PoolKind::Sqlite(
-                db::sqlite::connect_path_with_extensions(&expand_tilde(&db_config.host), extensions).await?,
-            )
-        }
+        DatabaseType::Sqlite => PoolKind::Sqlite(connect_sqlite_from_config(&db_config).await?),
         DatabaseType::Redis => {
             let con = if db_config.uses_redis_cluster() {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Cluster(
@@ -995,6 +995,7 @@ pub async fn connect_db(
                 &db_config.username,
                 &db_config.password,
                 db_config.database.as_deref(),
+                db_config.url_params.as_deref(),
                 connect_timeout,
             )
             .await?;

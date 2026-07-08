@@ -15,7 +15,19 @@ import type { KvCreateMode, KvGetResponse, KvKeySummary, KvListPrefixOptions, Kv
 import { buildKvKeyTree, flattenVisibleKvKeyTree, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kvKeyTree";
 import { refreshedKvSelectionKey } from "@/lib/kvRefreshSelection";
 import { formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kvValueDisplay";
-import { createLazyKvKeyTreeState, flattenLazyKvKeyTree, lazyExpandedKeyFromId, normalizeZooKeeperPath, parentZooKeeperPath, replaceLazyKvChildren, replaceLazyKvFocusedRoot, resetLazyKvKeyTree, type LazyKvKeyTreeNode, type LazyKvKeyTreeRow } from "@/lib/zookeeperLazyKeyTree";
+import {
+  createLazyKvKeyTreeState,
+  createZooKeeperChildPathDraft,
+  flattenLazyKvKeyTree,
+  lazyExpandedKeyFromId,
+  normalizeZooKeeperPath,
+  parentZooKeeperPath,
+  replaceLazyKvChildren,
+  replaceLazyKvFocusedRoot,
+  resetLazyKvKeyTree,
+  type LazyKvKeyTreeNode,
+  type LazyKvKeyTreeRow,
+} from "@/lib/zookeeperLazyKeyTree";
 import { useToast } from "@/composables/useToast";
 
 interface KvKeyBrowserLabels {
@@ -33,6 +45,7 @@ interface KvKeyBrowserLabels {
   deleteTitle: string;
   keyPlaceholder: string;
   keyRequired: string;
+  rootReadonly?: string;
   saved: string;
   deleted: string;
   base64Readonly: string;
@@ -377,7 +390,8 @@ function onRowDoubleClick(node: BrowserTreeNode) {
 }
 
 function createKeyPrefix(parentPath?: string): string {
-  const path = props.lazyHierarchy ? normalizeZooKeeperPath(parentPath ?? prefix.value) : (parentPath ?? prefix.value.trim());
+  if (props.lazyHierarchy) return createZooKeeperChildPathDraft(parentPath ?? prefix.value);
+  const path = parentPath ?? prefix.value.trim();
   if (!path) return "";
   if (path === "/") return "/";
   return path.endsWith("/") ? path : `${path}/`;
@@ -410,11 +424,16 @@ function putOptions(): KvPutOptions | undefined {
 }
 
 async function saveKey() {
-  const key = editKey.value.trim();
-  if (!key) {
+  const rawKey = editKey.value.trim();
+  if (!rawKey) {
     editError.value = props.labels.keyRequired;
     return;
   }
+  if (props.lazyHierarchy && normalizeZooKeeperPath(rawKey) === "/") {
+    editError.value = props.labels.rootReadonly || props.labels.keyRequired;
+    return;
+  }
+  const key = props.lazyHierarchy ? normalizeZooKeeperPath(rawKey) : rawKey;
   saving.value = true;
   editError.value = "";
   try {

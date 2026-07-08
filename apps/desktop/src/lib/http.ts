@@ -53,6 +53,7 @@ import type {
   UpdateInfo,
   RedisDatabaseInfo,
   RedisValue,
+  RedisCollectionPage,
   RedisScanResult,
   RedisCommandResult,
   RedisSlowlogEntry,
@@ -1574,8 +1575,8 @@ export async function redisExecuteCommand(connectionId: string, db: number, comm
   return post("/api/redis/execute-command", { connectionId, db, command, skipSafetyCheck: skipSafetyCheck ?? false });
 }
 
-export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filterQuery?: string): Promise<RedisValue> {
-  return post("/api/redis/load-more", { connectionId, db, keyRaw, keyType, cursor, count, filterQuery });
+export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filter?: string): Promise<RedisCollectionPage> {
+  return post("/api/redis/load-more", { connectionId, db, keyRaw, keyType, cursor, count, filter });
 }
 
 export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {

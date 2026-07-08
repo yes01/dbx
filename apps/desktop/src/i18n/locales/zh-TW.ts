@@ -162,6 +162,8 @@ export default {
     sqliteExtensionsPlaceholder: "/path/to/regexp.dylib\n/path/to/text.dylib|sqlite3_text_init",
     sqliteExtensionsHint: "每行一個 .dylib/.so/.dll；需要入口函式時使用「路徑|入口函式」。連線時載入，載入後會關閉 load_extension。",
     sqliteExtensionBrowse: "選擇 SQLite 擴充庫",
+    sqliteCipherKey: "SQLCipher 密碼（密鑰）",
+    sqliteCipherKeyPlaceholder: "未加密 SQLite 留空",
     user: "使用者名稱",
     password: "密碼",
     database: "資料庫",

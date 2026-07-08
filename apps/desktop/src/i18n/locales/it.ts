@@ -162,6 +162,8 @@ export default {
     sqliteExtensionsPlaceholder: "/percorso/per/regexp.dylib\n/percorso/per/text.dylib|sqlite3_text_init",
     sqliteExtensionsHint: "Una .dylib/.so/.dll per riga. Usa “percorso|punto di ingresso” quando è richiesto un punto di ingresso. Caricata alla connessione, poi load_extension viene disabilitata.",
     sqliteExtensionBrowse: "Seleziona estensione SQLite",
+    sqliteCipherKey: "Chiave SQLCipher",
+    sqliteCipherKeyPlaceholder: "Lascia vuoto per SQLite non cifrato",
     user: "Utente",
     password: "Password",
     database: "Database",

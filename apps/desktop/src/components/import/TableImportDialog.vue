@@ -11,7 +11,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Check, FileUp, Loader2, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
-import { autoMapImportColumns } from "@/lib/tableImport";
+import { autoMapImportColumns, suggestImportTargetDataTypes } from "@/lib/tableImport";
+import { tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
+import { getDataTypeOptions } from "@/lib/tableStructureEditorState";
 import type { ColumnInfo } from "@/types/database";
 import * as api from "@/lib/api";
 
@@ -35,6 +37,7 @@ const targetMode = ref<ImportTargetMode>(props.prefillTable ? "existing" : "crea
 const newTableName = ref("");
 const preview = ref<api.TableImportPreview | null>(null);
 const columnMapping = ref<Record<string, string>>({});
+const columnDataTypes = ref<Record<string, string>>({});
 const loadingTarget = ref(false);
 const loadingPreview = ref(false);
 const importMode = ref<api.TableImportMode>("append");
@@ -47,6 +50,8 @@ const errorMessage = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
 
 const selectedConnection = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined));
+const structureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(selectedConnection.value));
+const dataTypeOptions = computed(() => mergeDataTypeOptions(getDataTypeOptions(structureDatabaseType.value), Object.values(columnDataTypes.value)));
 const targetTableName = computed(() => (targetMode.value === "create" ? newTableName.value.trim() : props.prefillTable || ""));
 const targetColumnNames = computed(() => targetColumns.value.map((column) => column.name));
 const mappingTargetOptions = computed(() => (targetMode.value === "create" ? (preview.value?.columns ?? []) : targetColumnNames.value));
@@ -54,10 +59,14 @@ const mappedColumns = computed<api.TableImportColumnMapping[]>(() => {
   const currentPreview = preview.value;
   if (!currentPreview) return [];
   return currentPreview.columns
-    .map((sourceColumn) => ({
-      sourceColumn,
-      targetColumn: columnMapping.value[sourceColumn] ?? "",
-    }))
+    .map((sourceColumn) => {
+      const targetDataType = targetMode.value === "create" ? String(columnDataTypes.value[sourceColumn] ?? "").trim() : undefined;
+      return {
+        sourceColumn,
+        targetColumn: columnMapping.value[sourceColumn] ?? "",
+        ...(targetMode.value === "create" ? { targetDataType } : {}),
+      };
+    })
     .filter((mapping) => mapping.targetColumn);
 });
 const mappedCount = computed(() => mappedColumns.value.length);
@@ -78,6 +87,7 @@ function resetState() {
   newTableName.value = "";
   preview.value = null;
   columnMapping.value = {};
+  columnDataTypes.value = {};
   importMode.value = "append";
   batchSize.value = 500;
   running.value = false;
@@ -92,9 +102,16 @@ function applyAutoMapping() {
   if (!currentPreview) return;
   if (targetMode.value === "create") {
     columnMapping.value = Object.fromEntries(currentPreview.columns.map((source) => [source, source]));
+    columnDataTypes.value = suggestImportTargetDataTypes(currentPreview.columns, currentPreview.rows, structureDatabaseType.value);
     return;
   }
   columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value);
+  columnDataTypes.value = {};
+}
+
+function mergeDataTypeOptions(base: string[], selected: string[]): string[] {
+  const seen = new Set<string>();
+  return [...selected, ...base].map((value) => String(value || "").trim()).filter((value) => value && !seen.has(value.toLowerCase()) && seen.add(value.toLowerCase()));
 }
 
 async function loadTargetColumns() {
@@ -325,7 +342,7 @@ watch(targetMode, (mode) => {
           <div class="rounded-md border">
             <div class="border-b px-3 py-2 text-xs font-medium">{{ t("tableImport.mapping") }}</div>
             <div class="max-h-[280px] overflow-auto p-2">
-              <div v-for="sourceColumn in preview.columns" :key="sourceColumn" class="grid grid-cols-[1fr_1fr] items-center gap-2 py-1">
+              <div v-for="sourceColumn in preview.columns" :key="sourceColumn" class="grid items-center gap-2 py-1" :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)]' : 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)]'">
                 <div class="truncate font-mono text-xs" :title="sourceColumn">
                   {{ sourceColumn }}
                 </div>
@@ -337,6 +354,16 @@ watch(targetMode, (mode) => {
                     <SelectItem :value="SKIP_VALUE">{{ t("tableImport.skipColumn") }}</SelectItem>
                     <SelectItem v-for="column in mappingTargetOptions" :key="column" :value="column">
                       {{ column }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select v-if="targetMode === 'create'" :model-value="columnDataTypes[sourceColumn] || 'TEXT'" @update:model-value="(value: any) => (columnDataTypes[sourceColumn] = String(value))">
+                  <SelectTrigger class="h-7 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="dataType in dataTypeOptions" :key="dataType" :value="dataType">
+                      {{ dataType }}
                     </SelectItem>
                   </SelectContent>
                 </Select>

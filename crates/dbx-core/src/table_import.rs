@@ -31,6 +31,8 @@ pub struct ImportSqlBatch {
 pub struct TableImportColumnMapping {
     pub source_column: String,
     pub target_column: String,
+    #[serde(default)]
+    pub target_data_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -528,7 +530,14 @@ pub fn build_import_create_table_plan(
     for (source_index, target_column) in mapped {
         let source_column = data.columns.get(source_index).ok_or_else(|| "Source column not found".to_string())?;
         let values = import_column_sample_values(data, source_column)?;
-        let data_type = import_data_type(import_inferred_kind(&values), db_type);
+        let data_type = mappings
+            .iter()
+            .find(|mapping| mapping.source_column == *source_column && mapping.target_column == target_column)
+            .and_then(|mapping| mapping.target_data_type.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| import_data_type(import_inferred_kind(&values), db_type));
         columns.push(ImportCreateTableColumn { name: target_column, data_type });
     }
     if columns.is_empty() {
@@ -800,8 +809,16 @@ mod tests {
     #[test]
     fn builds_import_insert_batches_from_mapped_columns() {
         let mappings = vec![
-            TableImportColumnMapping { source_column: "id".to_string(), target_column: "user_id".to_string() },
-            TableImportColumnMapping { source_column: "name".to_string(), target_column: "display_name".to_string() },
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "user_id".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "display_name".to_string(),
+                target_data_type: None,
+            },
         ];
         let data = ParsedImportFile {
             columns: vec!["id".to_string(), "name".to_string(), "ignored".to_string()],
@@ -859,7 +876,11 @@ mod tests {
         let mappings = data
             .columns
             .iter()
-            .map(|column| TableImportColumnMapping { source_column: column.clone(), target_column: column.clone() })
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+            })
             .collect::<Vec<_>>();
 
         let plan =
@@ -887,8 +908,13 @@ mod tests {
             TableImportColumnMapping {
                 source_column: "start".to_string(),
                 target_column: "insurance_start_time".to_string(),
+                target_data_type: None,
             },
-            TableImportColumnMapping { source_column: "raw".to_string(), target_column: "raw_text".to_string() },
+            TableImportColumnMapping {
+                source_column: "raw".to_string(),
+                target_column: "raw_text".to_string(),
+                target_data_type: None,
+            },
         ];
         let data = ParsedImportFile {
             columns: vec!["start".to_string(), "raw".to_string()],
@@ -921,8 +947,11 @@ mod tests {
 
     #[test]
     fn import_insert_batches_preserve_sqlserver_unicode_text() {
-        let mappings =
-            vec![TableImportColumnMapping { source_column: "name".to_string(), target_column: "name".to_string() }];
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "name".to_string(),
+            target_column: "name".to_string(),
+            target_data_type: None,
+        }];
         let data = ParsedImportFile {
             columns: vec!["name".to_string()],
             rows: vec![vec![serde_json::json!("Tiếng Việt")]],

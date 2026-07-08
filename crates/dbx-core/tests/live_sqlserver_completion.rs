@@ -66,7 +66,7 @@ async fn live_sqlserver_execute_query_creates_schema() {
     let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
     let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
     let mut client =
-        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
             .await
             .expect("connect SQL Server");
 
@@ -97,7 +97,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
     let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
     let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
     let mut client =
-        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
             .await
             .expect("connect SQL Server");
 
@@ -201,7 +201,7 @@ async fn live_sqlserver_stream_first_result_set_exports_cte_query_rows() {
     let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
     let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
     let mut client =
-        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
             .await
             .expect("connect SQL Server");
 
@@ -259,11 +259,11 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
     let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
     let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
     let mut setup_client =
-        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
             .await
             .expect("connect SQL Server");
     let export_client =
-        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
             .await
             .expect("connect export SQL Server");
 
@@ -347,7 +347,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
     let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
     let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
     let mut setup_client =
-        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
             .await
             .expect("connect SQL Server");
     let mut target_client = dbx_core::db::sqlserver::connect(
@@ -356,6 +356,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         &user,
         &password,
         Some(&target_database),
+        None,
         Duration::from_secs(10),
     )
     .await
@@ -436,7 +437,7 @@ async fn live_sqlserver_completion_assistant_searches_metadata_before_limiting()
     let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
     let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
     let mut client =
-        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), Duration::from_secs(10))
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
             .await
             .expect("connect SQL Server");
 

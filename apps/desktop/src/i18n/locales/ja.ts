@@ -163,6 +163,8 @@ export default {
     sqliteExtensionsPlaceholder: "/path/to/regexp.dylib\n/path/to/text.dylib|sqlite3_text_init",
     sqliteExtensionsHint: "1行に1つの.dylib/.so/.dllファイルを指定します。エントリポイントが必要な場合は「パス|エントリポイント」形式で指定します。接続時に読み込まれ、その後load_extensionは無効になります。",
     sqliteExtensionBrowse: "SQLite拡張を選択",
+    sqliteCipherKey: "SQLCipherキー",
+    sqliteCipherKeyPlaceholder: "暗号化されていないSQLiteでは空のまま",
     user: "ユーザー",
     password: "パスワード",
     database: "データベース",

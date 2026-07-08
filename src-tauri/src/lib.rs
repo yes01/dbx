@@ -74,15 +74,18 @@ fn native_window_decorations_override(target_os: &str) -> Option<bool> {
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_webkit_rendering_workarounds() -> &'static [(&'static str, &'static str)] {
-    &[
-        // WebKitGTK's DMABUF renderer can produce a blank AppImage window or
-        // Wayland protocol errors on Fedora/Wayland/NVIDIA systems.
-        ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
-        // Tauri's Linux graphics guidance recommends this for Wayland explicit
-        // sync issues that can prevent WebKitGTK from creating a usable surface.
-        ("__NV_DISABLE_EXPLICIT_SYNC", "1"),
-    ]
+fn linux_has_nvidia_gpu() -> bool {
+    std::path::Path::new("/dev/nvidiactl").exists() || std::path::Path::new("/proc/driver/nvidia/version").exists()
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_webkit_rendering_workarounds(has_nvidia: bool) -> &'static [(&'static str, &'static str)] {
+    if has_nvidia {
+        // NVIDIA + Wayland can hit blank-window / explicit-sync issues in WebKitGTK.
+        &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
+    } else {
+        &[]
+    }
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -143,7 +146,8 @@ fn linux_appimage_system_gtk_immodules_cache(
 
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
-    for (key, value) in linux_webkit_rendering_workarounds() {
+    let has_nvidia = linux_has_nvidia_gpu();
+    for (key, value) in linux_webkit_rendering_workarounds(has_nvidia) {
         if std::env::var_os(key).is_none() {
             std::env::set_var(key, value);
         }
@@ -330,9 +334,10 @@ mod tests {
     #[test]
     fn applies_linux_webkit_rendering_workarounds_before_webkit_starts() {
         assert_eq!(
-            linux_webkit_rendering_workarounds(),
+            linux_webkit_rendering_workarounds(true),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1"), ("__NV_DISABLE_EXPLICIT_SYNC", "1")]
         );
+        assert_eq!(linux_webkit_rendering_workarounds(false), &[]);
     }
 
     #[test]

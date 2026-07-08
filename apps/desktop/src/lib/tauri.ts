@@ -1165,16 +1165,61 @@ export interface RedisDatabaseInfo {
   keys: number;
 }
 
+export type RedisBlobEncoding = "utf8" | "binary";
+
+export interface RedisBlob {
+  raw_base64: string;
+  encoding: RedisBlobEncoding;
+}
+
+export interface RedisListItem {
+  index: number;
+  value: RedisBlob;
+}
+
+export interface RedisSetItem {
+  member: RedisBlob;
+}
+
+export interface RedisHashItem {
+  field: RedisBlob;
+  value: RedisBlob;
+}
+
+export interface RedisZsetItem {
+  score: string;
+  member: RedisBlob;
+}
+
+export interface RedisStreamField {
+  field: string;
+  value: string;
+}
+
+export interface RedisStreamEntry {
+  id: string;
+  fields: RedisStreamField[];
+}
+
+export type RedisValueData =
+  | { kind: "string"; content: RedisBlob }
+  | { kind: "json"; value: unknown }
+  | { kind: "list"; items: RedisListItem[]; total: number; scan_cursor?: number }
+  | { kind: "set"; items: RedisSetItem[]; total: number; scan_cursor?: number }
+  | { kind: "hash"; items: RedisHashItem[]; total: number; scan_cursor?: number }
+  | { kind: "zset"; items: RedisZsetItem[]; total: number; scan_cursor?: number }
+  | { kind: "stream"; entries: RedisStreamEntry[] }
+  | { kind: "unknown" };
+
 export interface RedisValue {
   key_display: string;
   key_raw: string;
-  key_type: string;
   ttl: number;
-  value_is_binary: boolean;
-  value: any;
-  total?: number;
-  scan_cursor?: number;
+  redis_type: string;
+  data: RedisValueData;
 }
+
+export type RedisCollectionPage = { kind: "list"; items: RedisListItem[]; scan_cursor?: number } | { kind: "set"; items: RedisSetItem[]; scan_cursor?: number } | { kind: "hash"; items: RedisHashItem[]; scan_cursor?: number } | { kind: "zset"; items: RedisZsetItem[]; scan_cursor?: number };
 
 export interface RedisScanResult {
   cursor: number;
@@ -1296,8 +1341,8 @@ export async function redisExecuteCommand(connectionId: string, db: number, comm
   return invoke("redis_execute_command", { connectionId, db, command, skipSafetyCheck: skipSafetyCheck ?? false });
 }
 
-export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filterQuery?: string): Promise<RedisValue> {
-  return invoke("redis_load_more", { connectionId, db, keyRaw, keyType, cursor, count, filterQuery });
+export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filter?: string): Promise<RedisCollectionPage> {
+  return invoke("redis_load_more", { connectionId, db, keyRaw, keyType, cursor, count, filter });
 }
 
 export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {
@@ -1730,6 +1775,7 @@ export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export interface TableImportColumnMapping {
   sourceColumn: string;
   targetColumn: string;
+  targetDataType?: string | null;
 }
 
 export interface TableImportPreview {

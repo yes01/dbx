@@ -3225,6 +3225,10 @@ function openExternalUrl(url: string) {
                       </p>
                     </div>
                   </div>
+                  <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-center gap-4">
+                    <Label class="text-right">{{ t("connection.sqliteCipherKey") }}</Label>
+                    <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.sqliteCipherKeyPlaceholder')" />
+                  </div>
                   <template v-if="form.db_type === 'h2' || form.db_type === 'access'">
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label class="text-right">{{ t("connection.user") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>

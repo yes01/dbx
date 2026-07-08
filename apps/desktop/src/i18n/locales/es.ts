@@ -157,6 +157,8 @@ export default {
     h2FilePathRequired: "La ruta del archivo H2 no puede estar vacía",
     createDuckDbFile: "Crear archivo DuckDB",
     createSqliteFile: "Crear base de datos SQLite",
+    sqliteCipherKey: "Clave SQLCipher",
+    sqliteCipherKeyPlaceholder: "Dejar vacío para SQLite sin cifrar",
     user: "Usuario",
     password: "Contraseña",
     database: "Base de datos",

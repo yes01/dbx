@@ -26,7 +26,7 @@ import { buildRedisKeyTree, collectExpandedGroupIds, collectRedisGroupKeyRaws, f
 import { classifyRedisCommandSafety } from "@/lib/redisCommandSafety";
 import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
 import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "@/lib/redisCommandSession";
-import { formatRedisConsoleValue, formatRedisStringValue } from "@/lib/redisValuePresentation";
+import { formatRedisConsoleValue, formatRedisStringValue, redisValuePreview, redisValueSize } from "@/lib/redisValuePresentation";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
@@ -388,10 +388,10 @@ function redisValueToKeyInfo(value: RedisValue): RedisKeyInfo {
   return {
     key_display: value.key_display,
     key_raw: value.key_raw,
-    key_type: value.key_type,
+    key_type: value.redis_type,
     ttl: value.ttl,
-    size: typeof value.value === "string" ? value.value.length : (value.total ?? 0),
-    value_preview: createdKeyPreview(value.value),
+    size: redisValueSize(value),
+    value_preview: redisValuePreview(value),
   };
 }
 
