@@ -23,6 +23,12 @@
   <body>
     <script>
       window.__DBX_PRELOAD_START = Date.now();
+      window.__DBX_PRELOAD_FALLBACK = window.setTimeout(() => {
+        const preload = document.getElementById("preload-splash");
+        if (!preload) return;
+        preload.classList.add("dismiss");
+        window.setTimeout(() => preload.remove(), 700);
+      }, 4000);
     </script>
 
     <div id="preload-splash" aria-hidden="true"></div>

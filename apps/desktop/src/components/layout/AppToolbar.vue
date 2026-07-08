@@ -100,7 +100,7 @@ const collapsibleRightItemDefs = computed(() => {
       label: t("updates.check"),
       icon: CloudDownload,
       action: () => emit("check-updates"),
-      disabled: checkingUpdates.value,
+      disabled: props.checkingUpdates,
     });
   }
   items.push({

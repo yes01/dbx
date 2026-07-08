@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 const VIDEO_SRC = "/assets/startup/donghua.mp4";
 const VIDEO_FADE_SECONDS = 0.5;
 const VIDEO_ERROR_DISMISS_MS = 900;
+const VIDEO_STALL_DISMISS_MS = 18_000;
 
 const props = defineProps<{
   ready: boolean;
@@ -20,6 +21,7 @@ const videoFailed = ref(false);
 
 let animationFrame = 0;
 let errorDismissTimer: ReturnType<typeof setTimeout> | undefined;
+let stallDismissTimer: ReturnType<typeof setTimeout> | undefined;
 
 const statusText = computed(() => {
   if (props.exiting) return "正在进入主界面";
@@ -56,8 +58,7 @@ function playVideo() {
   video.muted = true;
   video.playsInline = true;
   void video.play().catch(() => {
-    videoFailed.value = true;
-    videoOpacity.value = 0;
+    onVideoError();
   });
 }
 
@@ -77,11 +78,13 @@ function onVideoError() {
 onMounted(() => {
   playVideo();
   animationFrame = requestAnimationFrame(syncVideoOpacity);
+  stallDismissTimer = setTimeout(requestDismiss, VIDEO_STALL_DISMISS_MS);
 });
 
 onUnmounted(() => {
   if (animationFrame) cancelAnimationFrame(animationFrame);
   if (errorDismissTimer) clearTimeout(errorDismissTimer);
+  if (stallDismissTimer) clearTimeout(stallDismissTimer);
 });
 </script>
 

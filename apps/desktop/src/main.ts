@@ -15,6 +15,7 @@ function startupErrorMessage(error: unknown): string {
 function renderStartupError(error: unknown) {
   const message = startupErrorMessage(error);
   console.error("[STARTUP] bootstrap failed", error);
+  document.getElementById("preload-splash")?.remove();
   const root = document.querySelector<HTMLDivElement>("#root");
   if (!root) return;
   root.innerHTML = "";

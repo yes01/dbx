@@ -1364,6 +1364,11 @@ function initApp() {
 }
 
 function removePreloadSplash() {
+  const fallbackTimer = (window as unknown as Record<string, unknown>).__DBX_PRELOAD_FALLBACK;
+  if (typeof fallbackTimer === "number") {
+    window.clearTimeout(fallbackTimer);
+    (window as unknown as Record<string, unknown>).__DBX_PRELOAD_FALLBACK = undefined;
+  }
   const el = document.getElementById("preload-splash");
   if (!el) return;
   el.classList.add("dismiss");
