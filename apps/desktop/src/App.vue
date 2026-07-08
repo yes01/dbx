@@ -108,7 +108,7 @@ const { checkingUpdates, updateInfo, updateCheckMessage, showUpdateDialog, isDow
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
-const PRELOAD_SPLASH_MIN_MS = 120;
+const PRELOAD_SPLASH_MIN_MS = 0;
 const STARTUP_SPLASH_SEEN_KEY = "dbx-startup-splash-seen";
 const needsAuth = ref(!isDesktop);
 const authenticated = ref(isDesktop);
@@ -1371,9 +1371,7 @@ function removePreloadSplash() {
   }
   const el = document.getElementById("preload-splash");
   if (!el) return;
-  el.classList.add("dismiss");
-  el.addEventListener("transitionend", () => el.remove(), { once: true });
-  setTimeout(() => el.remove(), 700);
+  el.remove();
 }
 
 function dismissStartupSplash() {
@@ -1450,7 +1448,7 @@ onMounted(async () => {
   const mountStart = performance.now();
   const preloadStart = (window as unknown as Record<string, unknown>).__DBX_PRELOAD_START;
   const preloadElapsed = typeof preloadStart === "number" ? Date.now() - preloadStart : 0;
-  const preloadRemaining = Math.max(120, PRELOAD_SPLASH_MIN_MS - preloadElapsed);
+  const preloadRemaining = Math.max(0, PRELOAD_SPLASH_MIN_MS - preloadElapsed);
   preloadDismissTimer = setTimeout(() => {
     removePreloadSplash();
     preloadDismissTimer = undefined;

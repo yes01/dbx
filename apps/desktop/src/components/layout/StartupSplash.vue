@@ -17,6 +17,8 @@ const emit = defineEmits<{
 
 const videoRef = ref<HTMLVideoElement | null>(null);
 const videoOpacity = ref(0);
+const videoArmed = ref(false);
+const contentVisible = ref(false);
 const videoFailed = ref(false);
 
 let animationFrame = 0;
@@ -47,6 +49,9 @@ function syncVideoOpacity() {
     const fadeIn = video.currentTime / VIDEO_FADE_SECONDS;
     const fadeOut = (duration - video.currentTime) / VIDEO_FADE_SECONDS;
     videoOpacity.value = clampOpacity(Math.min(1, fadeIn, fadeOut));
+    if (!contentVisible.value && videoOpacity.value >= 0.12) {
+      contentVisible.value = true;
+    }
   }
 
   animationFrame = requestAnimationFrame(syncVideoOpacity);
@@ -62,6 +67,13 @@ function playVideo() {
   });
 }
 
+function armVideo() {
+  if (videoFailed.value) return;
+  videoArmed.value = true;
+  contentVisible.value = true;
+  playVideo();
+}
+
 function completeVideo() {
   videoOpacity.value = 0;
   requestDismiss();
@@ -69,6 +81,7 @@ function completeVideo() {
 
 function onVideoError() {
   videoFailed.value = true;
+  contentVisible.value = true;
   videoOpacity.value = 0;
   if (animationFrame) cancelAnimationFrame(animationFrame);
   if (errorDismissTimer) clearTimeout(errorDismissTimer);
@@ -91,7 +104,7 @@ onUnmounted(() => {
 <template>
   <div
     class="startup-splash"
-    :class="{ 'startup-splash--ready': ready, 'startup-splash--exiting': exiting, 'startup-splash--fallback': videoFailed }"
+    :class="{ 'startup-splash--ready': ready, 'startup-splash--exiting': exiting, 'startup-splash--armed': videoArmed, 'startup-splash--content-visible': contentVisible, 'startup-splash--fallback': videoFailed }"
     role="button"
     tabindex="0"
     aria-live="polite"
@@ -100,7 +113,7 @@ onUnmounted(() => {
     @keydown.enter.prevent="requestDismiss"
     @keydown.space.prevent="requestDismiss"
   >
-    <video ref="videoRef" class="startup-splash__video" :style="{ opacity: videoOpacity }" :src="VIDEO_SRC" muted playsinline preload="auto" @ended="completeVideo" @error="onVideoError" @canplay="playVideo" />
+    <video ref="videoRef" class="startup-splash__video" :style="{ opacity: videoOpacity }" :src="VIDEO_SRC" muted playsinline preload="auto" @ended="completeVideo" @error="onVideoError" @loadeddata="armVideo" @canplay="armVideo" />
     <div class="startup-splash__overlay" aria-hidden="true" />
 
     <div class="startup-splash__content">
@@ -139,7 +152,7 @@ onUnmounted(() => {
   position: absolute;
   inset: 0;
   z-index: 1;
-  background: linear-gradient(to bottom, #fff 0%, #fff 28%, rgb(255 255 255 / 0.48) 34%, transparent 44%, transparent 86%, rgb(255 255 255 / 0.72) 100%);
+  background: linear-gradient(to bottom, #fff 0, #fff 300px, rgb(255 255 255 / 0) 390px), linear-gradient(to bottom, rgb(255 255 255 / 0) calc(100% - 150px), rgb(255 255 255 / 0.62) 100%);
   pointer-events: none;
 }
 
@@ -156,11 +169,19 @@ onUnmounted(() => {
   align-items: center;
   justify-content: flex-start;
   padding: clamp(72px, 12vh, 124px) 24px 0;
+  opacity: 0;
   text-align: center;
+  transform: translateY(8px);
   transition:
     opacity 620ms cubic-bezier(0.16, 1, 0.3, 1),
     transform 620ms cubic-bezier(0.16, 1, 0.3, 1),
     filter 620ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.startup-splash--content-visible .startup-splash__content,
+.startup-splash--fallback .startup-splash__content {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .startup-splash__title {
@@ -220,6 +241,10 @@ onUnmounted(() => {
   .startup-splash__video {
     inset: 260px 0 0;
     height: calc(100% - 260px);
+  }
+
+  .startup-splash__overlay {
+    background: linear-gradient(to bottom, #fff 0, #fff 260px, rgb(255 255 255 / 0) 340px), linear-gradient(to bottom, rgb(255 255 255 / 0) calc(100% - 120px), rgb(255 255 255 / 0.58) 100%);
   }
 
   .startup-splash__title {
