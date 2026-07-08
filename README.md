@@ -17,6 +17,15 @@ TestTeam DBX 是 TestTeam 内部使用的数据库管理工具。它用 Tauri、
 - MCP 集成：通过 MCP Server 把 DBX 的连接能力开放给编程助手，适合在开发流程里查询结构或辅助生成 SQL。
 - 配置迁移：连接配置可导入导出，敏感字段和普通连接信息分开存储；导出时可使用 AES-GCM 加密。
 
+## 近期调整
+
+- 迁移上游高、中优先级修复，覆盖数据表格刷新分页、列宽拖拽、侧边栏定位、SQL 导航和 IN 列表粘贴等日常操作体验。
+- 补齐 Driver Store 清理下载缓存能力，并优化驱动更新提示，方便处理本地驱动包缓存和 Agent/JDBC 组件更新。
+- 修复 MySQL enum 元数据、数值导出、SQL Server `sql_variant` 和 IDENTITY DDL、Postgres 元数据读取、Oracle Agent schema 查询等数据库兼容问题。
+- 优化 AI Agent 取消流程、AI 历史编辑宽度、Redis string 编辑动作显示，以及多个表结构编辑和导入导出细节。
+- 启动页改为纯视频播放：点击视频任意区域可立即跳过，播放完成后自动进入主界面，不再叠加文字、蒙层或额外退场动画。
+- 本轮调整不修改 GitHub workflow、Tauri 应用配置、版本号、更新地址、公钥和在线更新逻辑。
+
 ## 常用操作
 
 ### 创建连接
