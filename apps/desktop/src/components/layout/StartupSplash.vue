@@ -136,7 +136,7 @@ onUnmounted(() => {
   position: absolute;
   inset: 0;
   z-index: 1;
-  background: linear-gradient(to bottom, #fff 0%, rgb(255 255 255 / 0.88) 30%, rgb(255 255 255 / 0.24) 56%, #fff 100%), linear-gradient(90deg, #fff 0%, rgb(255 255 255 / 0.12) 22%, rgb(255 255 255 / 0.12) 78%, #fff 100%);
+  background: linear-gradient(to bottom, #fff 0%, #fff 28%, rgb(255 255 255 / 0.48) 34%, transparent 44%, transparent 86%, rgb(255 255 255 / 0.72) 100%);
   pointer-events: none;
 }
 
