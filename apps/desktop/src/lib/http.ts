@@ -93,6 +93,7 @@ import type {
   ExplainSqlBuildResult,
   DroppedFilePreviewSqlOptions,
   MongoGridFsFileInfo,
+  AppSupportInfo,
 } from "./tauri";
 import type { QueryEditability } from "@/lib/sqlAnalysis";
 import type { DataGridColumnValueFilterConditionOptions, DataGridContextFilterConditionOptions, DataGridCountSqlOptions, DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridSaveStatementOptions, HiveTablePropertiesSqlOptions } from "@/lib/dataGridSql";
@@ -1891,6 +1892,17 @@ export async function getSystemProxyUrl(): Promise<string | null> {
 export async function getAppVersion(): Promise<string> {
   const res: { version: string } = await get("/api/version");
   return res.version;
+}
+
+export async function getAppSupportInfo(): Promise<AppSupportInfo> {
+  const appVersion = await getAppVersion();
+  return {
+    appVersion,
+    runtime: "web",
+    osName: navigator.platform || "web",
+    osVersion: null,
+    arch: "",
+  };
 }
 
 // ---------------------------------------------------------------------------

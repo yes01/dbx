@@ -597,6 +597,7 @@ pub fn run() {
             commands::app_settings::load_pinned_tree_node_ids,
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_native_debug_logs,
+            commands::support_info::get_app_support_info,
             commands::cloud_sync::webdav_sync_test,
             commands::cloud_sync::webdav_password_status,
             commands::cloud_sync::save_webdav_saved_password,

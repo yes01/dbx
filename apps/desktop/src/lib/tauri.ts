@@ -182,6 +182,19 @@ export interface WebDavPasswordStatus {
   hasSavedPassword: boolean;
 }
 
+export interface WebDavSyncSecretsStatus {
+  enabled: boolean;
+  hasSavedPassphrase: boolean;
+}
+
+export interface AppSupportInfo {
+  appVersion: string;
+  runtime: "desktop" | "web";
+  osName: string;
+  osVersion?: string | null;
+  arch: string;
+}
+
 export interface QueryPagination {
   limit: number;
   offset: number;
@@ -1152,6 +1165,10 @@ export async function getSystemProxyUrl(): Promise<string | null> {
 export async function getAppVersion(): Promise<string> {
   const { getVersion } = await import("@tauri-apps/api/app");
   return getVersion();
+}
+
+export async function getAppSupportInfo(): Promise<AppSupportInfo> {
+  return invoke<AppSupportInfo>("get_app_support_info");
 }
 
 // --- Redis ---
