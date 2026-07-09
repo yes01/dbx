@@ -2339,6 +2339,8 @@ export default {
     showExecutionTargetPickerDescription: "Quando ativado, executar sem seleção permite escolher entre a instrução atual e todo o SQL.",
     wordWrap: "Quebra de linha",
     wordWrapDescription: "Quebrar linhas SQL longas dentro da largura do editor",
+    autoCloseBrackets: "Auto-close brackets",
+    autoCloseBracketsDescription: "Automatically insert closing brackets and quotes when typing an opening one",
     confirmDangerousSqlExecution: "Confirmar antes de SQL perigoso",
     confirmDangerousSqlExecutionDescription: "Quando desativado, ALTER, DROP, DELETE, TRUNCATE e outros SQL perigosos são executados sem a caixa de diálogo de aviso.",
     autoAliasTables: "Adicionar alias de tabela automaticamente",

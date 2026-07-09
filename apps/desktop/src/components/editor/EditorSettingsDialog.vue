@@ -191,6 +191,7 @@ const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
+const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
@@ -477,6 +478,7 @@ watch(
       editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
       editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
       editWordWrap.value = settingsStore.editorSettings.wordWrap;
+      editAutoCloseBrackets.value = settingsStore.editorSettings.autoCloseBrackets;
       editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
       editAppLayout.value = settingsStore.editorSettings.appLayout;
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
@@ -540,6 +542,7 @@ function hasChanges(): boolean {
     editShowExecutionTargetPicker.value !== settingsStore.editorSettings.showExecutionTargetPicker ||
     editAutoAliasTables.value !== settingsStore.editorSettings.autoAliasTables ||
     editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
+    editAutoCloseBrackets.value !== settingsStore.editorSettings.autoCloseBrackets ||
     editConfirmDangerousSqlExecution.value !== settingsStore.editorSettings.confirmDangerousSqlExecution ||
     editAppLayout.value !== settingsStore.editorSettings.appLayout ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
@@ -589,6 +592,7 @@ async function persistSettings() {
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     autoAliasTables: editAutoAliasTables.value,
     wordWrap: editWordWrap.value,
+    autoCloseBrackets: editAutoCloseBrackets.value,
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
     appLayout: editAppLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
@@ -649,6 +653,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+    editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
     editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
   } else if (tab === "formatter") {
     editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
@@ -706,6 +711,7 @@ function resetAllDefaults() {
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+  editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
@@ -2130,6 +2136,14 @@ watch(
                     <p class="text-xs text-muted-foreground">{{ t("settings.wordWrapDescription") }}</p>
                   </div>
                   <Switch id="editor-word-wrap" v-model="editWordWrap" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-auto-close-brackets">{{ t("settings.autoCloseBrackets") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.autoCloseBracketsDescription") }}</p>
+                  </div>
+                  <Switch id="editor-auto-close-brackets" v-model="editAutoCloseBrackets" class="mt-0.5" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

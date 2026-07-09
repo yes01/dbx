@@ -192,6 +192,9 @@ let codeMirrorEditorSelection: typeof import("@codemirror/state").EditorSelectio
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
+let closeBracketsComp: import("@codemirror/state").Compartment | null = null;
+let codeMirrorCloseBrackets: typeof import("@codemirror/autocomplete").closeBrackets | null = null;
+let codeMirrorCloseBracketsKeymap: readonly import("@codemirror/view").KeyBinding[] | null = null;
 let readOnlyComp: import("@codemirror/state").Compartment | null = null;
 let runKeymapComp: import("@codemirror/state").Compartment | null = null;
 let completionComp: import("@codemirror/state").Compartment | null = null;
@@ -266,6 +269,7 @@ const queryEditorAppearanceSettings = computed(() => {
     customThemes: settings.customThemes,
     activeCustomThemeId: settings.activeCustomThemeId,
     wordWrap: settings.wordWrap,
+    autoCloseBrackets: settings.autoCloseBrackets,
     shortcuts: settings.shortcuts,
   };
 });
@@ -916,6 +920,15 @@ function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
 function wordWrapExtension() {
   if (!editorViewModule) return [];
   return props.forceWordWrap || settingsStore.editorSettings.wordWrap ? editorViewModule.EditorView.lineWrapping : [];
+}
+
+function closeBracketsExtension(enabled = settingsStore.editorSettings.autoCloseBrackets) {
+  if (!enabled || !codeMirrorCloseBrackets) return [];
+  const exts: import("@codemirror/state").Extension[] = [codeMirrorCloseBrackets()];
+  if (codeMirrorCloseBracketsKeymap?.length && codeMirrorPrec && editorViewModule) {
+    exts.push(codeMirrorPrec.highest(editorViewModule.keymap.of([...codeMirrorCloseBracketsKeymap])));
+  }
+  return exts;
 }
 
 function indentExtension() {
@@ -2307,6 +2320,9 @@ onMounted(async () => {
   fontThemeComp = new Compartment();
   codeMirrorTheme = new Compartment();
   wordWrapComp = new Compartment();
+  closeBracketsComp = new Compartment();
+  codeMirrorCloseBrackets = closeBrackets;
+  codeMirrorCloseBracketsKeymap = closeBracketsKeymap;
   readOnlyComp = new Compartment();
   runKeymapComp = new Compartment();
   completionComp = new Compartment();
@@ -2526,7 +2542,7 @@ onMounted(async () => {
       completionComp.of(buildSqlCompletionExtension()),
       sqlCompletionTheme(EditorView),
       codeMirrorTheme.of(theme),
-      closeBrackets(),
+      closeBracketsComp.of(closeBracketsExtension(initialSettings.autoCloseBrackets)),
       bracketMatching(),
       hoverTooltip((currentView, pos) => resolveSqlHoverTooltip(currentView, pos)),
       buildSqlSignatureExtension(),
@@ -2535,7 +2551,6 @@ onMounted(async () => {
       Prec.highest(
         keymap.of([
           { key: "'", run: handleSqlSingleQuote },
-          ...closeBracketsKeymap,
           { key: "Tab", run: handleTab },
           {
             key: "Escape",
@@ -2858,7 +2873,7 @@ function getCurrentCustomThemeColors() {
 watch(
   [queryEditorAppearanceSettings, () => isDark.value],
   async ([ss]) => {
-    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !runKeymapComp || !editorViewModule) {
+    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !closeBracketsComp || !runKeymapComp || !editorViewModule) {
       return;
     }
     if (!isGestureZooming.value && !zoomCommitScheduler.hasPendingCommit() && liveFontSize.value !== ss.fontSize) {
@@ -2868,7 +2883,12 @@ watch(
     const themeColors = getCurrentCustomThemeColors();
     const themeExt = await loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors);
     view.value.dispatch({
-      effects: [codeMirrorTheme.reconfigure(themeExt), wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []), runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap))],
+      effects: [
+        codeMirrorTheme.reconfigure(themeExt),
+        wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
+        closeBracketsComp.reconfigure(closeBracketsExtension(settingsStore.editorSettings.autoCloseBrackets)),
+        runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)),
+      ],
     });
   },
   { deep: true },

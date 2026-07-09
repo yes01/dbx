@@ -2599,6 +2599,8 @@ export default {
     showExecutionTargetPickerDescription: "有効にすると、選択なしで実行するときに現在の文とすべてのSQLを一時的に選べます。",
     wordWrap: "折り返し",
     wordWrapDescription: "長いSQL行をエディタ幅内で折り返します",
+    autoCloseBrackets: "Auto-close brackets",
+    autoCloseBracketsDescription: "Automatically insert closing brackets and quotes when typing an opening one",
     confirmDangerousSqlExecution: "危険なSQLの前に確認",
     confirmDangerousSqlExecutionDescription: "無効時、ALTER、DROP、DELETE、TRUNCATEなどの危険なSQLが警告ダイアログなしで実行されます。",
     autoAliasTables: "テーブル別名を自動追加",

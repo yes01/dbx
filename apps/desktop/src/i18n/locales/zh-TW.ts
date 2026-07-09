@@ -2391,6 +2391,8 @@ export default {
     showExecutionTargetPickerDescription: "啟用後，無選取執行時可在目前語句與全部 SQL 之間臨時選擇。",
     wordWrap: "自動換行",
     wordWrapDescription: "長 SQL 在編輯器寬度內自動折行顯示",
+    autoCloseBrackets: "自動成對補全",
+    autoCloseBracketsDescription: "輸入左括號或左引號時自動補全對應的右括號或右引號",
     confirmDangerousSqlExecution: "執行危險 SQL 前彈出確認",
     confirmDangerousSqlExecutionDescription: "關閉後，ALTER、DROP、DELETE、TRUNCATE 等危險 SQL 會直接執行。",
     autoAliasTables: "自動加入資料表別名",

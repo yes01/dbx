@@ -2328,6 +2328,8 @@ export default {
     showExecutionTargetPickerDescription: "Se attivo, l'esecuzione senza selezione permette di scegliere tra istruzione corrente e tutto l'SQL.",
     wordWrap: "A capo automatico",
     wordWrapDescription: "Incolonna le righe SQL lunghe entro la larghezza dell'editor",
+    autoCloseBrackets: "Auto-close brackets",
+    autoCloseBracketsDescription: "Automatically insert closing brackets and quotes when typing an opening one",
     confirmDangerousSqlExecution: "Conferma prima di SQL pericoloso",
     confirmDangerousSqlExecutionDescription: "Se disattivato, ALTER, DROP, DELETE, TRUNCATE e altri SQL pericolosi verranno eseguiti senza la finestra di avviso.",
     autoAliasTables: "Aggiungi alias tabella automaticamente",

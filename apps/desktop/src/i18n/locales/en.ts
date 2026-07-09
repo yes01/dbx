@@ -2760,6 +2760,8 @@ export default {
     showExecutionTargetPickerDescription: "When enabled, running without a selection lets you choose between the current statement and all SQL.",
     wordWrap: "Word wrap",
     wordWrapDescription: "Wrap long SQL lines within the editor width",
+    autoCloseBrackets: "Auto-close brackets",
+    autoCloseBracketsDescription: "Automatically insert closing brackets and quotes when typing an opening one",
     confirmDangerousSqlExecution: "Confirm before dangerous SQL",
     confirmDangerousSqlExecutionDescription: "When disabled, ALTER, DROP, DELETE, TRUNCATE, and other dangerous SQL run without the warning dialog.",
     autoAliasTables: "Automatically add table aliases",
