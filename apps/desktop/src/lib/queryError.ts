@@ -1,7 +1,7 @@
 export function isQueryTimeoutErrorMessage(message: string): boolean {
   const lower = message.toLowerCase();
   if (lower.includes("query timed out") || lower.includes("查询超时") || lower.includes("查詢逾時")) return true;
-  if (lower.startsWith("agent rpc call timed out")) return true;
+  if (/\bagent rpc call timed out\b/.test(lower)) return true;
   if (/\b(?:canceling|cancelling|canceled|cancelled)\b[\s\S]{0,80}\bstatement\b[\s\S]{0,80}\btimeout\b/.test(lower)) return true;
   if (/\b(?:connection|connect|pool|checkout|metadata|loading|health check|cancel request|ssh|tunnel)\b/.test(lower)) return false;
   return (

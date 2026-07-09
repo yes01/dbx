@@ -25,6 +25,13 @@ export function initialVisibleDatabaseSelection(databaseNames: string[], visible
   return filterDatabaseNamesForConnection(databaseNames, connection);
 }
 
+export function appendVisibleDatabaseSelection(visibleDatabases: string[] | undefined, databaseName: string): string[] | undefined {
+  if (!Array.isArray(visibleDatabases)) return undefined;
+  const name = databaseName.trim();
+  if (!name || visibleDatabases.includes(name)) return visibleDatabases;
+  return [...visibleDatabases, name];
+}
+
 export function visibleDatabaseSelectionIsStale(previous: VisibleDatabaseConnectionFields, current: VisibleDatabaseConnectionFields): boolean {
   return visibleDatabaseFingerprint(previous) !== visibleDatabaseFingerprint(current);
 }

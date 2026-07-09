@@ -38,8 +38,11 @@ public final class AgentProtocol {
     public static final String MONGO_METHOD_LIST_COLLECTIONS = "list_collections";
     public static final String MONGO_METHOD_FIND_DOCUMENTS = "find_documents";
     public static final String MONGO_METHOD_SERVER_VERSION = "server_version";
+    public static final String MONGO_METHOD_CREATE_INDEX = "create_index";
+    public static final String MONGO_METHOD_DROP_INDEXES = "drop_indexes";
     public static final String MONGO_METHOD_INSERT_DOCUMENT = "insert_document";
     public static final String MONGO_METHOD_UPDATE_DOCUMENT = "update_document";
+    public static final String MONGO_METHOD_UPDATE_DOCUMENTS = "update_documents";
     public static final String MONGO_METHOD_DELETE_DOCUMENT = "delete_document";
     public static final String MONGO_METHOD_DELETE_DOCUMENTS = "delete_documents";
 
@@ -112,6 +115,8 @@ public final class AgentProtocol {
         MONGO_METHOD_LIST_COLLECTIONS,
         MONGO_METHOD_FIND_DOCUMENTS,
         MONGO_METHOD_SERVER_VERSION,
+        MONGO_METHOD_CREATE_INDEX,
+        MONGO_METHOD_DROP_INDEXES,
         MONGO_METHOD_INSERT_DOCUMENT,
         MONGO_METHOD_UPDATE_DOCUMENT,
         MONGO_METHOD_UPDATE_DOCUMENTS,

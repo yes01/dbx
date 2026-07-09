@@ -104,6 +104,10 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return t("tabs.users");
     return `${t("tabs.users")}@${connectionDisplayName(tab.connectionId)}`;
   }
+  if (tab.mode === "jobs") {
+    if (compact) return t("tabs.jobs");
+    return `${t("tabs.jobs")}@${connectionDisplayName(tab.connectionId)}`;
+  }
   return tab.title;
 }
 
@@ -205,5 +209,6 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "nacos") return "Nacos";
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
+  if (tab.mode === "jobs") return t("tabs.jobs");
   return tab.mode;
 }

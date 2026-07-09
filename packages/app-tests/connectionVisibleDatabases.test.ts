@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connectionVisibleDatabases.ts";
+import { appendVisibleDatabaseSelection, buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connectionVisibleDatabases.ts";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection } from "../../apps/desktop/src/lib/visibleDatabases.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
@@ -47,6 +47,17 @@ test("initial selection uses configured visible databases when available", () =>
 
 test("initial selection uses default visible database names when no filter is configured", () => {
   assert.deepEqual(initialVisibleDatabaseSelection(["app", "mysql", "sys"], undefined, config()), ["app"]);
+});
+
+test("append visible database selection only when filter is enabled", () => {
+  assert.deepEqual(appendVisibleDatabaseSelection(["app"], "analytics"), ["app", "analytics"]);
+  assert.deepEqual(appendVisibleDatabaseSelection(["app", "analytics"], "analytics"), ["app", "analytics"]);
+  assert.equal(appendVisibleDatabaseSelection(undefined, "analytics"), undefined);
+});
+
+test("append visible database selection trims new database names and ignores empty names", () => {
+  assert.deepEqual(appendVisibleDatabaseSelection(["app"], " analytics "), ["app", "analytics"]);
+  assert.deepEqual(appendVisibleDatabaseSelection(["app"], "   "), ["app"]);
 });
 
 test("ZooKeeper connections do not offer visible database selection", () => {

@@ -22,6 +22,12 @@ pub struct CancelTransferRequest {
     pub transfer_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewTransferOwnershipRequest {
+    pub request: TransferRequest,
+}
+
 pub async fn start_transfer(
     State(state): State<Arc<WebState>>,
     Json(body): Json<StartTransferRequest>,
@@ -200,6 +206,31 @@ pub async fn start_transfer(
     });
 
     Ok(Json(serde_json::json!({ "transferId": transfer_id })))
+}
+
+pub async fn preview_transfer_ownership(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<PreviewTransferOwnershipRequest>,
+) -> Result<Json<dbx_core::transfer::TransferOwnershipPreview>, AppError> {
+    let req = body.request;
+    transfer::validate_transfer_target_table_names(&req).map_err(AppError)?;
+    let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError)?;
+    let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError)?;
+    let source_pool_key =
+        state.app.get_or_create_pool(&req.source_connection_id, Some(&req.source_database)).await.map_err(AppError)?;
+    let target_pool_key =
+        state.app.get_or_create_pool(&req.target_connection_id, Some(&req.target_database)).await.map_err(AppError)?;
+    let preview = transfer::preview_transfer_ownership(
+        &state.app,
+        &req,
+        &source_db_type,
+        &target_db_type,
+        &source_pool_key,
+        &target_pool_key,
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(preview))
 }
 
 pub async fn transfer_progress(

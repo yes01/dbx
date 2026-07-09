@@ -60,6 +60,7 @@ import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/compl
 import { kvRootNodeLabel } from "@/lib/kvRootPresentation";
 import { MetadataTaskLimiter } from "@/lib/metadataTaskLimiter";
 import { appendConnectionErrorHints } from "@/lib/connectionErrorHints";
+import { appendVisibleDatabaseSelection } from "@/lib/connectionVisibleDatabases";
 import i18n from "@/i18n";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
@@ -818,10 +819,25 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  function buildDamengJobAdminNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
+    const config = getConfig(connectionId);
+    if (effectiveDatabaseTypeForConnection(config) !== "dameng") return undefined;
+    const existing = existingConnectionNode?.children?.find((child) => child.type === "dameng-job-admin");
+    return {
+      id: `${connectionId}:__dameng_job_admin`,
+      label: "tree.damengJobAdmin",
+      type: "dameng-job-admin",
+      connectionId,
+      database: "",
+      isExpanded: existing?.isExpanded ?? false,
+    };
+  }
+
   function withConnectionUtilityNodes(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
-    const nonUtilityChildren = children.filter((child) => child.type !== "user-admin");
+    const nonUtilityChildren = children.filter((child) => child.type !== "user-admin" && child.type !== "dameng-job-admin");
     const userAdminNode = buildUserAdminNode(connectionId, existingConnectionNode);
-    return [...nonUtilityChildren, userAdminNode].filter(Boolean) as TreeNode[];
+    const damengJobAdminNode = buildDamengJobAdminNode(connectionId, existingConnectionNode);
+    return [...nonUtilityChildren, userAdminNode, damengJobAdminNode].filter(Boolean) as TreeNode[];
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
@@ -1328,6 +1344,14 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!config || !Array.isArray(config.visible_databases)) return;
     await updateVisibleDatabasesConfig(connectionId, undefined);
     await reloadConnectionDatabaseChildren(connectionId);
+  }
+
+  async function ensureVisibleDatabase(connectionId: string, databaseName: string) {
+    const config = getConfig(connectionId);
+    if (!config) return;
+    const visibleDatabases = appendVisibleDatabaseSelection(config.visible_databases, databaseName);
+    if (visibleDatabases === config.visible_databases) return;
+    await updateVisibleDatabasesConfig(connectionId, visibleDatabases);
   }
 
   async function updateVisibleDatabasesConfig(connectionId: string, visibleDatabases: string[] | undefined) {
@@ -4193,6 +4217,7 @@ export const useConnectionStore = defineStore("connection", () => {
     isDefaultDatabase,
     setVisibleDatabases,
     clearVisibleDatabases,
+    ensureVisibleDatabase,
     setVisibleSchemas,
     clearVisibleSchemas,
     removeConnection,

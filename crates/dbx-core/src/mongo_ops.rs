@@ -1,7 +1,7 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::mongo_document_id_params;
 use crate::db::elasticsearch_driver;
-use crate::db::mongo_driver::{self, MongoDocumentResult};
+use crate::db::mongo_driver::{self, MongoDocumentResult, MongoDropIndexesResult};
 use crate::db::vector_driver;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -406,6 +406,65 @@ pub async fn mongo_aggregate_documents_core(
             mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows).await
         }
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support aggregate".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_create_index_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    keys_json: &str,
+    options_json: Option<&str>,
+) -> Result<String, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::create_index(client, database, collection, keys_json, options_json).await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let result: serde_json::Value = client
+                .mongo_create_index(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "keys_json": keys_json,
+                    "options_json": options_json,
+                }))
+                .await?;
+            Ok(result.get("name").and_then(|value| value.as_str()).unwrap_or("").to_string())
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_drop_indexes_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    indexes_json: Option<&str>,
+    single: bool,
+) -> Result<MongoDropIndexesResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::drop_indexes(client, database, collection, indexes_json, single).await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            client
+                .mongo_drop_indexes(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "indexes_json": indexes_json,
+                    "single": single,
+                }))
+                .await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }

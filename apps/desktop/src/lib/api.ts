@@ -253,6 +253,7 @@ export const nacosRawRequest = forward("nacosRawRequest");
 
 // Data Transfer
 export const startTransfer = forward("startTransfer");
+export const previewTransferOwnership = forward("previewTransferOwnership");
 export const cancelTransfer = forward("cancelTransfer");
 export const sortTablesByFkDependency = forward("sortTablesByFkDependency");
 
@@ -477,6 +478,8 @@ export type {
   TransferProgress,
   TransferMode,
   TransferTableNameCase,
+  TransferOwnershipPolicy,
+  TransferOwnershipPreview,
   TableImportMode,
   TableImportStatus,
   TableImportColumnMapping,

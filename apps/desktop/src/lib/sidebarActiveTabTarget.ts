@@ -50,6 +50,10 @@ export type ActiveTabSidebarTarget =
       schema?: string;
     }
   | {
+      type: "dameng-job-admin";
+      connectionId: string;
+    }
+  | {
       type: "saved-sql-file";
       savedSqlId: string;
     };
@@ -122,6 +126,10 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     return { type: "nacos-namespace", connectionId: tab.connectionId, namespace: tab.nacosNamespace || "" };
   }
 
+  if (tab.mode === "jobs") {
+    return { type: "dameng-job-admin", connectionId: tab.connectionId };
+  }
+
   if (tab.savedSqlId) {
     return { type: "saved-sql-file", savedSqlId: tab.savedSqlId };
   }
@@ -182,6 +190,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
 
   if (target.type === "nacos-namespace") {
     return node.type === "nacos-namespace" && node.connectionId === target.connectionId && (node.nacosNamespace || "") === target.namespace;
+  }
+
+  if (target.type === "dameng-job-admin") {
+    return node.type === "dameng-job-admin" && node.connectionId === target.connectionId;
   }
 
   if (target.type === "saved-sql-file") {

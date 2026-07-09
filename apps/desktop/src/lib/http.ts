@@ -72,6 +72,7 @@ import type {
   SqlFilePreview,
   SqlFileProgress,
   TransferRequest,
+  TransferOwnershipPreview,
   TransferProgress,
   TableImportPreview,
   TableImportRequest,
@@ -1175,6 +1176,10 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
       reject(new Error("Transfer SSE connection failed"));
     };
   });
+}
+
+export async function previewTransferOwnership(request: TransferRequest): Promise<TransferOwnershipPreview> {
+  return post("/api/transfer/ownership-preview", { request });
 }
 
 export async function cancelTransfer(transferId: string): Promise<void> {

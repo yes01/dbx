@@ -1742,7 +1742,7 @@ const allNullColumnCount = computed(() => allNullColumnIndexesForResult.value.le
 const canToggleAllNullColumns = computed(() => nullColumnsHidden.value || (allNullColumnCount.value > 0 && displayableColumnCount.value > 1));
 function filteredColumnVisibilityOptions(query: string) {
   const displayable = new Set(displayableColumnIndexes.value);
-  return filterColumnVisibilityOptions(props.result.columns, query).filter((option) => displayable.has(option.index));
+  return filterColumnVisibilityOptions(props.result.columns, query, { sourceColumns: props.sourceColumns, commentByColumn: columnCommentMap.value }).filter((option) => displayable.has(option.index));
 }
 function isColumnVisible(columnIndex: number): boolean {
   return !hiddenColumnIndexes.value.has(columnIndex);

@@ -19,6 +19,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "vector-collection",
   "elasticsearch-index",
   "user-admin",
+  "dameng-job-admin",
   "saved-sql-file",
   "load-more",
 ]);

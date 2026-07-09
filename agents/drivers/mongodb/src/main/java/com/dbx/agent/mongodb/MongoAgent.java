@@ -36,9 +36,11 @@ import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -398,6 +400,137 @@ public final class MongoAgent {
         return version;
     }
 
+    private static Object createIndex(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        Document keys = requiredDocument(params, "keys_json", "Index keys");
+        if (keys.isEmpty()) {
+            throw new IllegalArgumentException("Index keys are required");
+        }
+
+        Document index = new Document("key", keys);
+        Document options = documentOrNull(params, "options_json");
+        if (options != null) {
+            index.putAll(options);
+        }
+        String name = index.getString("name");
+        if (name == null || name.isBlank()) {
+            name = defaultIndexName(keys);
+            index.put("name", name);
+        }
+
+        c.getDatabase(database).runCommand(
+            new Document("createIndexes", collection)
+                .append("indexes", Collections.singletonList(index))
+        );
+        return Collections.singletonMap("name", name);
+    }
+
+    private static Document requiredDocument(JsonObject params, String key, String label) {
+        Document document = documentOrNull(params, key);
+        if (document == null) {
+            throw new IllegalArgumentException(label + " are required");
+        }
+        return document;
+    }
+
+    private static String defaultIndexName(Document keys) {
+        List<String> parts = new ArrayList<>();
+        for (Map.Entry<String, Object> entry : keys.entrySet()) {
+            parts.add(entry.getKey() + "_" + String.valueOf(entry.getValue()));
+        }
+        return String.join("_", parts);
+    }
+
+    private static Object dropIndexes(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        String indexesJson = stringOrNull(params, "indexes_json");
+        boolean single = params.has("single") && !params.get("single").isJsonNull() && params.get("single").getAsBoolean();
+        Object index = parseDropIndexesValue(indexesJson, single);
+
+        List<IndexInfo> before = listIndexInfos(c, database, collection);
+        c.getDatabase(database).runCommand(new Document("dropIndexes", collection).append("index", index));
+        List<IndexInfo> after = listIndexInfos(c, database, collection);
+        List<String> droppedNames = diffDroppedIndexNames(before, after);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("dropped_names", droppedNames);
+        result.put("affected_rows", droppedNames.size());
+        return result;
+    }
+
+    private static Object parseDropIndexesValue(String indexesJson, boolean single) {
+        if (indexesJson == null || indexesJson.isBlank()) {
+            if (single) {
+                throw new IllegalArgumentException("dropIndex requires a string index name or JSON document");
+            }
+            return "*";
+        }
+
+        JsonElement value = JsonParser.parseString(indexesJson);
+        if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()) {
+            String name = value.getAsString();
+            if (name.isBlank()) {
+                throw new IllegalArgumentException("Index name is required");
+            }
+            if (single && "*".equals(name)) {
+                throw new IllegalArgumentException("dropIndex does not accept \"*\"; use dropIndexes() or dropIndexes(\"*\") instead");
+            }
+            return name;
+        }
+        if (value.isJsonObject()) {
+            JsonObject object = value.getAsJsonObject();
+            if (object.size() == 0) {
+                throw new IllegalArgumentException("Index specification is required");
+            }
+            return Document.parse(indexesJson);
+        }
+        if (value.isJsonArray()) {
+            if (single) {
+                throw new IllegalArgumentException("dropIndex only accepts a string index name or JSON document; arrays are not supported");
+            }
+            List<String> names = new ArrayList<>();
+            value.getAsJsonArray().forEach(item -> {
+                if (!item.isJsonPrimitive() || !item.getAsJsonPrimitive().isString() || item.getAsString().isBlank()) {
+                    throw new IllegalArgumentException("dropIndexes only accepts arrays of string index names");
+                }
+                names.add(item.getAsString());
+            });
+            if (names.isEmpty()) {
+                throw new IllegalArgumentException("dropIndexes only accepts non-empty string arrays");
+            }
+            return names;
+        }
+        if (single) {
+            throw new IllegalArgumentException("dropIndex only accepts a string index name or JSON document");
+        }
+        throw new IllegalArgumentException("dropIndexes only accepts a string index name, JSON document, or string array");
+    }
+
+    private static List<IndexInfo> listIndexInfos(MongoClient c, String database, String collection) {
+        List<IndexInfo> result = new ArrayList<>();
+        for (Document index : c.getDatabase(database).getCollection(collection).listIndexes()) {
+            result.add(indexInfoFromDocument(index));
+        }
+        return result;
+    }
+
+    private static List<String> diffDroppedIndexNames(List<IndexInfo> before, List<IndexInfo> after) {
+        Set<String> remaining = new HashSet<>();
+        for (IndexInfo index : after) {
+            remaining.add(index.getName());
+        }
+        List<String> droppedNames = new ArrayList<>();
+        for (IndexInfo index : before) {
+            if (!remaining.contains(index.getName())) {
+                droppedNames.add(index.getName());
+            }
+        }
+        return droppedNames;
+    }
+
     private static Object insertDocument(JsonObject params) {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
@@ -434,6 +567,22 @@ public final class MongoAgent {
         return Collections.singletonMap("modified_count", result.getModifiedCount());
     }
 
+    private static Object updateDocuments(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        String filterJson = params.get("filter_json").getAsString();
+        String updateJson = params.get("update_json").getAsString();
+        boolean many = params.get("many").getAsBoolean();
+
+        var col = c.getDatabase(database).getCollection(collection);
+        Document filter = documentForWrite(filterJson);
+        Document update = documentForWrite(updateJson);
+        requireBulkUpdateOperatorDocument(update);
+        var result = many ? col.updateMany(filter, update) : col.updateOne(filter, update);
+        return Collections.singletonMap("modified_count", result.getModifiedCount());
+    }
+
     static Document documentForWrite(String docJson) {
         Document doc = Document.parse(docJson);
         convertMongoShellDates(doc);
@@ -456,6 +605,12 @@ public final class MongoAgent {
             }
         }
         return true;
+    }
+
+    static void requireBulkUpdateOperatorDocument(Document doc) {
+        if (!isUpdateOperatorDocument(doc)) {
+            throw new IllegalArgumentException("Bulk update requires update operators such as $set");
+        }
     }
 
     private static Object deleteDocument(JsonObject params) {
@@ -601,8 +756,11 @@ public final class MongoAgent {
             case AgentProtocol.METHOD_LIST_INDEXES -> listIndexes(params);
             case AgentProtocol.MONGO_METHOD_FIND_DOCUMENTS -> findDocuments(params);
             case AgentProtocol.MONGO_METHOD_SERVER_VERSION -> serverVersion(params);
+            case AgentProtocol.MONGO_METHOD_CREATE_INDEX -> createIndex(params);
+            case AgentProtocol.MONGO_METHOD_DROP_INDEXES -> dropIndexes(params);
             case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENT -> insertDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENT -> updateDocument(params);
+            case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENTS -> updateDocuments(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENT -> deleteDocument(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENTS -> deleteDocuments(params);
             case AgentProtocol.METHOD_DISCONNECT, AgentProtocol.METHOD_SHUTDOWN -> {

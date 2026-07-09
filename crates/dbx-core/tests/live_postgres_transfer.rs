@@ -210,6 +210,7 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
         create_table: true,
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        ownership_policy: dbx_core::transfer::TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };
 
