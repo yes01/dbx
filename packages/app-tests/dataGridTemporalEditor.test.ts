@@ -51,3 +51,10 @@ test("wraps stepped time values", () => {
   assert.equal(stepTemporalInputValue("23:59:59", "time", "minute", 1), "23:00:59");
   assert.equal(stepTemporalInputValue("23:59:59", "time", "second", 1), "23:59:00");
 });
+
+test("parses directly typed datetime values for MySQL-compatible editing", () => {
+  assert.equal(parseTemporalInputValue("2026-07-08 12:34:56", "datetime"), "2026-07-08 12:34:56");
+  assert.equal(parseTemporalInputValue("2026-07-08T12:34", "datetime"), "2026-07-08 12:34:00");
+  assert.equal(parseTemporalInputValue("not-a-date", "datetime"), "not-a-date");
+  assert.equal(parseTemporalInputValue("not-a-dateT12:34", "datetime"), "not-a-dateT12:34");
+});
