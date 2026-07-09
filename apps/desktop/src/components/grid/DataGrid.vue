@@ -1662,13 +1662,17 @@ const gridVerticalScrollbarThumbHeightPercent = ref(100);
 const gridHorizontalScrollbarDragging = ref(false);
 const gridVerticalScrollbarDragging = ref(false);
 let gridHorizontalScrollbarFrame = 0;
+let gridHorizontalScrollbarDragFrame = 0;
+let gridHorizontalScrollbarPendingClientX = 0;
 let gridHorizontalScrollbarResizeObserver: ResizeObserver | null = null;
 let dataGridTopbarResizeObserver: ResizeObserver | null = null;
 let cellEditResizeObserver: ResizeObserver | null = null;
 let resetCellEditTextareaScrollOnResize = false;
 let gridHorizontalScrollbarDragState: {
+  scroller: HTMLElement;
   trackRect: DOMRect;
   thumbOffsetPx: number;
+  maxScrollLeft: number;
 } | null = null;
 let gridVerticalScrollbarDragState: {
   trackRect: DOMRect;
@@ -1960,33 +1964,47 @@ function observeDataGridTopbarWidth() {
   }
 }
 
-function applyGridHorizontalScrollbarDrag(clientX: number) {
-  const scroller = gridScrollerElement();
+function applyPendingGridHorizontalScrollbarDrag() {
+  gridHorizontalScrollbarDragFrame = 0;
   const dragState = gridHorizontalScrollbarDragState;
-  if (!scroller || !dragState) return;
-
-  const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-  if (maxScrollLeft <= 1) return;
+  if (!dragState) return;
 
   const thumbWidthPx = dragState.trackRect.width * (gridHorizontalScrollbarThumbWidthPercent.value / 100);
   const maxThumbLeftPx = Math.max(1, dragState.trackRect.width - thumbWidthPx);
-  const thumbLeftPx = Math.min(maxThumbLeftPx, Math.max(0, clientX - dragState.trackRect.left - dragState.thumbOffsetPx));
-  scroller.scrollLeft = (thumbLeftPx / maxThumbLeftPx) * maxScrollLeft;
+  const thumbLeftPx = Math.min(maxThumbLeftPx, Math.max(0, gridHorizontalScrollbarPendingClientX - dragState.trackRect.left - dragState.thumbOffsetPx));
+  const scroller = dragState.scroller;
+  const nextScrollLeft = (thumbLeftPx / maxThumbLeftPx) * dragState.maxScrollLeft;
+  if (Math.abs(scroller.scrollLeft - nextScrollLeft) < 0.5) return;
+  scroller.scrollLeft = nextScrollLeft;
   updateGridHorizontalViewport(scroller);
   if (headerRef.value) headerRef.value.scrollLeft = scroller.scrollLeft;
   if (useCanvasGridRows.value) {
-    syncCanvasViewport();
+    drawCanvasGridNow();
   }
+}
+
+function scheduleGridHorizontalScrollbarDrag(clientX: number) {
+  gridHorizontalScrollbarPendingClientX = clientX;
+  if (gridHorizontalScrollbarDragFrame) return;
+  // Pointermove can fire faster than paint; keep expensive canvas/layout work to one frame.
+  gridHorizontalScrollbarDragFrame = requestAnimationFrame(applyPendingGridHorizontalScrollbarDrag);
+}
+
+function flushGridHorizontalScrollbarDrag() {
+  if (!gridHorizontalScrollbarDragFrame) return;
+  cancelAnimationFrame(gridHorizontalScrollbarDragFrame);
+  applyPendingGridHorizontalScrollbarDrag();
 }
 
 function onGridHorizontalScrollbarPointerMove(event: PointerEvent) {
   if (!gridHorizontalScrollbarDragState) return;
   event.preventDefault();
-  applyGridHorizontalScrollbarDrag(event.clientX);
+  scheduleGridHorizontalScrollbarDrag(event.clientX);
 }
 
 function stopGridHorizontalScrollbarDrag() {
   if (!gridHorizontalScrollbarDragState) return;
+  flushGridHorizontalScrollbarDrag();
   gridHorizontalScrollbarDragState = null;
   gridHorizontalScrollbarDragging.value = false;
   window.removeEventListener("pointermove", onGridHorizontalScrollbarPointerMove, true);
@@ -2010,6 +2028,8 @@ function startGridHorizontalScrollbarDrag(event: PointerEvent) {
   const track = gridHorizontalScrollbarTrackRef.value;
   if (!scroller || !track || !hasGridHorizontalOverflow.value) return;
 
+  const maxScrollLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+  if (maxScrollLeft <= 1) return;
   const trackRect = track.getBoundingClientRect();
   const thumbLeftPx = trackRect.width * (gridHorizontalScrollbarThumbLeftPercent.value / 100);
   const thumbWidthPx = trackRect.width * (gridHorizontalScrollbarThumbWidthPercent.value / 100);
@@ -2017,8 +2037,10 @@ function startGridHorizontalScrollbarDrag(event: PointerEvent) {
   const pointerInsideThumb = pointerX >= thumbLeftPx && pointerX <= thumbLeftPx + thumbWidthPx;
 
   gridHorizontalScrollbarDragState = {
+    scroller,
     trackRect,
     thumbOffsetPx: pointerInsideThumb ? pointerX - thumbLeftPx : thumbWidthPx / 2,
+    maxScrollLeft,
   };
   gridHorizontalScrollbarDragging.value = true;
   document.body.style.userSelect = "none";
@@ -2026,7 +2048,7 @@ function startGridHorizontalScrollbarDrag(event: PointerEvent) {
   window.addEventListener("pointerup", stopGridHorizontalScrollbarDrag, true);
   window.addEventListener("pointercancel", stopGridHorizontalScrollbarDrag, true);
   event.preventDefault();
-  applyGridHorizontalScrollbarDrag(event.clientX);
+  scheduleGridHorizontalScrollbarDrag(event.clientX);
 }
 
 function applyGridVerticalScrollbarDrag(clientY: number) {
