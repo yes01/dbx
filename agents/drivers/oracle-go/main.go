@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -605,6 +606,7 @@ func buildDSN(params connectParams) string {
 	if strings.HasPrefix(strings.ToLower(connectionString), "oracle://") {
 		return connectionString
 	}
+	username := oracleAuthUsername(params.Username)
 	options := parseURLParams(params.URLParams)
 	if params.SysDBA {
 		options["AUTH TYPE"] = "SYSDBA"
@@ -612,7 +614,7 @@ func buildDSN(params connectParams) string {
 
 	if jdbc := parseOracleJDBCURL(connectionString); jdbc.Kind != "" {
 		if jdbc.Descriptor != "" {
-			return go_ora.BuildJDBC(params.Username, params.Password, jdbc.Descriptor, options)
+			return buildGoOraJDBC(username, params.Password, jdbc.Descriptor, options)
 		}
 		host := jdbc.Host
 		port := jdbc.Port
@@ -621,9 +623,9 @@ func buildDSN(params connectParams) string {
 		}
 		if jdbc.Kind == "sid" {
 			options["SID"] = jdbc.Database
-			return go_ora.BuildUrl(host, port, "", params.Username, params.Password, options)
+			return buildGoOraURL(host, port, "", username, params.Password, options)
 		}
-		return go_ora.BuildUrl(host, port, jdbc.Database, params.Username, params.Password, options)
+		return buildGoOraURL(host, port, jdbc.Database, username, params.Password, options)
 	}
 
 	service := strings.TrimSpace(params.Database)
@@ -634,7 +636,78 @@ func buildDSN(params connectParams) string {
 	if port == 0 {
 		port = 1521
 	}
-	return go_ora.BuildUrl(params.Host, port, service, params.Username, params.Password, options)
+	return buildGoOraURL(params.Host, port, service, username, params.Password, options)
+}
+
+func oracleAuthUsername(username string) string {
+	if username == "" || isQuotedOracleUsername(username) || !oracleUsernameRequiresQuoting(username) {
+		return username
+	}
+	// Oracle logon accepts quoted identifiers for users that cannot be
+	// represented as regular identifiers, such as bastion usernames with ':'.
+	return `"` + strings.ReplaceAll(username, `"`, `""`) + `"`
+}
+
+func isQuotedOracleUsername(username string) bool {
+	return len(username) >= 2 && strings.HasPrefix(username, `"`) && strings.HasSuffix(username, `"`)
+}
+
+func oracleUsernameRequiresQuoting(username string) bool {
+	for index, ch := range username {
+		if index == 0 {
+			if !isAsciiLetter(ch) {
+				return true
+			}
+			continue
+		}
+		if !isAsciiLetter(ch) && !isAsciiDigit(ch) && ch != '_' && ch != '$' && ch != '#' {
+			return true
+		}
+	}
+	return false
+}
+
+func isAsciiLetter(ch rune) bool {
+	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
+}
+
+func isAsciiDigit(ch rune) bool {
+	return ch >= '0' && ch <= '9'
+}
+
+func buildGoOraJDBC(user, password, connStr string, options map[string]string) string {
+	if options == nil {
+		options = make(map[string]string)
+	}
+	options["connStr"] = connStr
+	return buildGoOraURL("", 0, "", user, password, options)
+}
+
+func buildGoOraURL(server string, port int, service, user, password string, options map[string]string) string {
+	// go-ora v2.9.0 uses path escaping for user/password, leaving ':' unescaped.
+	// Userinfo escaping keeps usernames such as "9008888:reader" intact.
+	ret := fmt.Sprintf(
+		"oracle://%s@%s/%s",
+		url.UserPassword(user, password).String(),
+		net.JoinHostPort(server, strconv.Itoa(port)),
+		url.PathEscape(service),
+	)
+	if options != nil {
+		ret += "?"
+		for key, val := range options {
+			val = strings.TrimSpace(val)
+			for _, temp := range strings.Split(val, ",") {
+				temp = strings.TrimSpace(temp)
+				if strings.ToUpper(key) == "SERVER" {
+					ret += fmt.Sprintf("%s=%s&", key, temp)
+				} else {
+					ret += fmt.Sprintf("%s=%s&", key, url.QueryEscape(temp))
+				}
+			}
+		}
+		ret = strings.TrimRight(ret, "&")
+	}
+	return ret
 }
 
 type jdbcURLInfo struct {
