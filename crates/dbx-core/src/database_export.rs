@@ -182,6 +182,9 @@ fn format_export_sql_literal_typed(
     if is_postgres_json_export_column(database_type, column_type) {
         return format_postgres_json_export_literal(value);
     }
+    if is_postgres_vector_export_column(database_type, column_type) {
+        return format_postgres_vector_export_literal(value);
+    }
     if matches!(database_type, Some(DatabaseType::Mysql)) && column_type.is_some_and(is_mysql_bit_type) {
         return format_mysql_bit_literal(value);
     }
@@ -202,6 +205,35 @@ fn format_postgres_json_export_literal(value: &Value) -> String {
     }
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
     postgres_string_literal(&text)
+}
+
+fn format_postgres_vector_export_literal(value: &Value) -> String {
+    if value.is_null() {
+        return "NULL".to_string();
+    }
+    let text = match value {
+        // pgvector vector/halfvec are scalar extension types whose importable
+        // literal grammar uses square brackets, unlike PostgreSQL arrays.
+        Value::Array(arr) => format_postgres_vector_export_text(arr),
+        Value::String(text) => text.to_string(),
+        _ => value.to_string(),
+    };
+    postgres_string_literal(&text)
+}
+
+fn format_postgres_vector_export_text(arr: &[Value]) -> String {
+    let elements = arr.iter().map(format_postgres_vector_export_element).collect::<Vec<_>>();
+    format!("[{}]", elements.join(","))
+}
+
+fn format_postgres_vector_export_element(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.trim().to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => "NULL".to_string(),
+        _ => value.to_string(),
+    }
 }
 
 fn quote_export_sql_string(text: &str) -> String {
@@ -506,6 +538,17 @@ fn is_postgres_json_export_column(database_type: Option<DatabaseType>, column_ty
                 matches!(normalized.as_str(), "json" | "jsonb")
                     || normalized.ends_with(".json")
                     || normalized.ends_with(".jsonb")
+            })
+            .unwrap_or(false)
+}
+
+fn is_postgres_vector_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
+    database_type == Some(DatabaseType::Postgres)
+        && column_type
+            .map(|column_type| {
+                let normalized = column_type.trim().trim_matches('"').to_ascii_lowercase();
+                let base = normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or("").trim_matches('"');
+                matches!(base, "vector" | "halfvec") || base.ends_with(".vector") || base.ends_with(".halfvec")
             })
             .unwrap_or(false)
 }
@@ -1403,6 +1446,39 @@ mod tests {
             statements,
             vec![
                 r#"INSERT INTO "public"."events" ("payload") VALUES ('{"text":"say \"hi\"","path":"C:\\tmp","quote":"O''Hara"}');"#
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_vector_export_preserves_pgvector_bracket_literals() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: Some("items".to_string()),
+            qualified_table_name: None,
+            columns: vec![
+                "id".to_string(),
+                "embedding".to_string(),
+                "qualified_embedding".to_string(),
+                "labels".to_string(),
+            ],
+            column_types: vec![
+                Some("integer".to_string()),
+                Some("vector(2)".to_string()),
+                Some("public.vector".to_string()),
+                Some("text[]".to_string()),
+            ],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(1), json!([1.2, 3.4]), json!(["5", "6"]), json!(["x", "y"])]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                r#"INSERT INTO "public"."items" ("id", "embedding", "qualified_embedding", "labels") VALUES (1, '[1.2,3.4]', '[5,6]', '{"x","y"}');"#
             ]
         );
     }
