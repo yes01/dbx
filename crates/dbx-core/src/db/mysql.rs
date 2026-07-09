@@ -445,8 +445,28 @@ pub async fn connect_with_ca_cert_pool_limit_idle_and_setup_database(
     extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool = create_pool(url, ca_cert_path, max_connections, idle_timeout_secs, setup_database, extra_setup_queries)?;
-    let result = verify_pool_connection(&pool, timeout).await;
+    let setup_mode = MySqlSetupMode::Standard;
+    let pool = create_pool(
+        url,
+        ca_cert_path,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        setup_mode,
+    )?;
+    let result = verify_pool_connection_with_setup_fallback(
+        pool,
+        timeout,
+        url,
+        ca_cert_path,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        setup_mode,
+    )
+    .await;
 
     if let Err(ref e) = result {
         if mysql_error_should_retry_without_ssl(e) {
@@ -459,22 +479,85 @@ pub async fn connect_with_ca_cert_pool_limit_idle_and_setup_database(
                     idle_timeout_secs,
                     setup_database,
                     extra_setup_queries,
+                    setup_mode,
                 )?;
-                return match verify_pool_connection(&fallback_pool, timeout).await {
-                    Ok(()) => Ok(fallback_pool),
-                    Err(e) => Err(e),
-                };
+                return verify_pool_connection_with_setup_fallback(
+                    fallback_pool,
+                    timeout,
+                    &fallback_url,
+                    None,
+                    max_connections,
+                    idle_timeout_secs,
+                    setup_database,
+                    extra_setup_queries,
+                    setup_mode,
+                )
+                .await;
             }
         }
     }
 
-    result.map(|_| pool)
+    result
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct MySqlTlsFiles {
     sslcert: Option<String>,
     sslkey: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MySqlSetupMode {
+    Standard,
+    Compatible,
+}
+
+impl MySqlSetupMode {
+    fn set_group_concat_max_len(self) -> bool {
+        self == Self::Standard
+    }
+}
+
+async fn verify_pool_connection_with_setup_fallback(
+    pool: MySqlPool,
+    timeout: Duration,
+    url: &str,
+    ca_cert_path: Option<&str>,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
+) -> Result<MySqlPool, String> {
+    match verify_pool_connection(&pool, timeout).await {
+        Ok(()) => Ok(pool),
+        Err(err) => {
+            let Some(fallback_mode) = mysql_setup_mode_retry_without_group_concat(setup_mode, &err) else {
+                return Err(err);
+            };
+            log::info!(
+                "MySQL server rejected optional group_concat_max_len setup; retrying without that session setting"
+            );
+            let fallback_pool = create_pool(
+                url,
+                ca_cert_path,
+                max_connections,
+                idle_timeout_secs,
+                setup_database,
+                extra_setup_queries,
+                fallback_mode,
+            )?;
+            verify_pool_connection(&fallback_pool, timeout).await.map(|_| fallback_pool)
+        }
+    }
+}
+
+fn mysql_setup_mode_retry_without_group_concat(setup_mode: MySqlSetupMode, error: &str) -> Option<MySqlSetupMode> {
+    // group_concat_max_len improves real MySQL metadata reads, but some MySQL-compatible proxies reject the variable.
+    if setup_mode.set_group_concat_max_len() && mysql_error_should_retry_without_group_concat_max_len(error) {
+        return Some(MySqlSetupMode::Compatible);
+    }
+    None
 }
 
 fn create_pool(
@@ -484,6 +567,7 @@ fn create_pool(
     idle_timeout_secs: Option<u64>,
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
 ) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let opts =
@@ -500,10 +584,8 @@ fn create_pool(
         .with_constraints(mysql_async::PoolConstraints::new(1, max_connections).unwrap())
         .with_inactive_connection_ttl(inactive_ttl)
         .with_reset_connection(max_connections > 1);
-    let setup_queries = match setup_database {
-        Some(database) => mysql_setup_queries_for_database(url, Some(database), extra_setup_queries),
-        None => mysql_setup_queries(url, extra_setup_queries),
-    };
+    let setup_queries =
+        mysql_setup_queries_for_database_with_mode(url, setup_database, extra_setup_queries, setup_mode);
     let mut builder = mysql_async::OptsBuilder::from_opts(opts)
         .ip_or_hostname(tcp_host)
         .stmt_cache_size(0)
@@ -624,13 +706,26 @@ fn mysql_ssl_opts(
 }
 
 fn mysql_setup_queries(url: &str, extra_setup_queries: &[String]) -> Vec<String> {
-    mysql_setup_queries_for_database(url, None, extra_setup_queries)
+    mysql_setup_queries_with_mode(url, extra_setup_queries, MySqlSetupMode::Standard)
+}
+
+fn mysql_setup_queries_with_mode(url: &str, extra_setup_queries: &[String], setup_mode: MySqlSetupMode) -> Vec<String> {
+    mysql_setup_queries_for_database_with_mode(url, None, extra_setup_queries, setup_mode)
 }
 
 fn mysql_setup_queries_for_database(
     url: &str,
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
+) -> Vec<String> {
+    mysql_setup_queries_for_database_with_mode(url, setup_database, extra_setup_queries, MySqlSetupMode::Standard)
+}
+
+fn mysql_setup_queries_for_database_with_mode(
+    url: &str,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
 ) -> Vec<String> {
     let charset = mysql_connection_charset(url).unwrap_or("utf8mb4");
     let catalog = mysql_connection_catalog(url);
@@ -643,7 +738,9 @@ fn mysql_setup_queries_for_database(
         queries.push(format!("SET time_zone = {}", quote_value(&time_zone)));
     }
     queries.push(format!("SET NAMES {charset}"));
-    queries.push("SET @@group_concat_max_len = 1048576".to_string());
+    if setup_mode.set_group_concat_max_len() {
+        queries.push("SET @@group_concat_max_len = 1048576".to_string());
+    }
     // StarRocks/Doris expose external storage (Paimon, Hive, ...) through a
     // catalog. `SET catalog` must run *before* `USE <database>` (the database
     // lives in the external catalog and is unknown to the default one).
@@ -887,6 +984,11 @@ fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
         || lower.contains("buf doesn't have enough data")
         || lower.contains("prepared statement protocol")
         || lower.contains("this command is not supported in the prepared statement protocol yet")
+}
+
+fn mysql_error_should_retry_without_group_concat_max_len(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("group_concat_max_len") && (lower.contains("1193") || lower.contains("unknown system variable"))
 }
 
 fn ssl_fallback_url(url: &str) -> Option<String> {
@@ -1207,7 +1309,8 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
     extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool = create_pool(url, None, max_connections, None, setup_database, extra_setup_queries)?;
+    let pool =
+        create_pool(url, None, max_connections, None, setup_database, extra_setup_queries, MySqlSetupMode::Standard)?;
     verify_pool_connection(&pool, timeout).await.map(|_| pool)
 }
 
@@ -3483,6 +3586,31 @@ mod tests {
         let error = "Server error: ERROR HY000 (1615): Prepared statement needs to be re-prepared";
 
         assert!(mysql_error_should_retry_with_text_protocol(error));
+    }
+
+    #[test]
+    fn mysql_group_concat_setup_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR HY000 (1193): Unknown system variable,stmt:SET @@group_concat_max_len = 1048576'";
+
+        assert!(mysql_error_should_retry_without_group_concat_max_len(error));
+        assert_eq!(
+            mysql_setup_mode_retry_without_group_concat(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_group_concat_setup_retry_is_narrow() {
+        assert!(!mysql_error_should_retry_without_group_concat_max_len(
+            "MySQL connection failed: Server error: `ERROR HY000 (1193): Unknown system variable,stmt:SET @@sql_mode = ANSI'"
+        ));
+        assert_eq!(
+            mysql_setup_mode_retry_without_group_concat(
+                MySqlSetupMode::Compatible,
+                "Server error: ERROR HY000 (1193): Unknown system variable,stmt:SET @@group_concat_max_len = 1048576"
+            ),
+            None
+        );
     }
 
     #[test]
