@@ -1101,7 +1101,12 @@ function triggerAction(action: AiAction, instruction?: string) {
   send();
 }
 
-defineExpose({ triggerAction });
+function setPrompt(text: string) {
+  prompt.value = text;
+  nextTick(() => promptTextareaRef.value?.focus());
+}
+
+defineExpose({ triggerAction, setPrompt });
 
 const markedInstance = new Marked({
   breaks: true,

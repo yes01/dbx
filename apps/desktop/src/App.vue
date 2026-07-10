@@ -61,6 +61,7 @@ import {
   isResetZoomShortcut,
   isRefreshDataShortcut,
   isSaveShortcut,
+  isSendSelectionToAiShortcut,
   isSwitchToNextTabShortcut,
   isSwitchToPreviousTabShortcut,
   isToggleSidebarShortcut,
@@ -96,6 +97,7 @@ const QuickOpenDialog = defineAsyncComponent(() => import("@/components/quick-op
 
 type AiAssistantHandle = {
   triggerAction: (action: AiAction, instruction?: string) => void;
+  setPrompt: (text: string) => void;
 };
 
 const { t } = useI18n();
@@ -402,12 +404,34 @@ function toggleSqlLibrary() {
   safeLocalStorageSet("dbx-sql-library-open", String(showSqlLibraryPanel.value));
 }
 
+function invokeWhenAiReady(invoke: (handle: AiAssistantHandle) => void) {
+  if (aiAssistantRef.value) {
+    invoke(aiAssistantRef.value);
+    return;
+  }
+  // AiAssistant 是异步组件，首次打开面板时单个 nextTick 不足以等待挂载完成，
+  // 因此监听 ref，待其从 null 变为组件实例后再调用。
+  const stop = watch(aiAssistantRef, (handle) => {
+    if (handle) {
+      stop();
+      invoke(handle);
+    }
+  });
+}
 function fixWithAi(errorMessage: string) {
   if (!showAiPanel.value) {
     showAiPanel.value = true;
     safeLocalStorageSet("dbx-ai-panel-open", "true");
   }
-  nextTick(() => aiAssistantRef.value?.triggerAction("fix", errorMessage));
+  invokeWhenAiReady((handle) => handle.triggerAction("fix", errorMessage));
+}
+
+function sendSelectionToAi(sql: string) {
+  if (!showAiPanel.value) {
+    showAiPanel.value = true;
+    safeLocalStorageSet("dbx-ai-panel-open", "true");
+  }
+  invokeWhenAiReady((handle) => handle.setPrompt(sql));
 }
 
 function openConnectionSettings(connectionId: string) {
@@ -439,7 +463,7 @@ function analyzeHistoryWithAi(entry: HistoryEntry) {
   const title = t("history.aiAnalysisTab");
   const tabId = queryStore.createTab(connectionId, database || "", title, "query");
   queryStore.updateSql(tabId, entry.sql);
-  nextTick(() => aiAssistantRef.value?.triggerAction("explain", buildHistoryAiAnalysisPrompt(entry)));
+  invokeWhenAiReady((handle) => handle.triggerAction("explain", buildHistoryAiAnalysisPrompt(entry)));
 }
 
 function formatActiveSql() {
@@ -1301,6 +1325,12 @@ function handleKeydown(e: KeyboardEvent) {
     requestActiveEditorExecute();
     return;
   }
+  if (activeTab.value?.mode === "query" && isSendSelectionToAiShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (selectedSql.value.trim()) sendSelectionToAi(selectedSql.value);
+    return;
+  }
   if (isModRShortcut(e) && e.target instanceof Element && contentAreaRef.value?.handleModRTarget(e.target)) {
     e.preventDefault();
     e.stopPropagation();
@@ -1624,6 +1654,7 @@ onUnmounted(() => {
                     :cursor-pos="cursorPos"
                     @update:active-output-view="activeOutputView = $event"
                     @fix-with-ai="fixWithAi"
+                    @send-selection-to-ai="sendSelectionToAi"
                     @execute="tryExecute($event)"
                     @cancel="cancelActiveExecution()"
                     @explain="tryExplain()"

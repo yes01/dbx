@@ -99,6 +99,58 @@ const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
 const redisJsonView = ref<"raw" | "tree">("raw");
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonHighlighter = ref<RedisJsonHighlighter>();
+// Auto-refresh
+const autoRefreshEnabled = ref(true);
+const countdownTtl = ref(0);
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
+function shouldStopAutoRefresh(ttl: number): boolean {
+  return ttl <= 0;
+}
+
+function computeAutoRefreshTick(enabled: boolean, ttl: number, isLoading: boolean): { type: "idle" | "decrement" | "refresh" } {
+  if (!enabled || isLoading) return { type: "idle" };
+  if (ttl > 1) return { type: "decrement" };
+  return { type: "refresh" };
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  if (data.value && data.value.ttl > 0) {
+    countdownTtl.value = data.value.ttl;
+  }
+  autoRefreshTimer = setInterval(() => {
+    const action = computeAutoRefreshTick(autoRefreshEnabled.value, countdownTtl.value, loading.value);
+    if (action.type === "decrement") {
+      countdownTtl.value--;
+      return;
+    }
+    if (action.type === "refresh") {
+      load()
+        .then(() => {
+          if (!autoRefreshEnabled.value) return;
+          if (!data.value || shouldStopAutoRefresh(data.value.ttl)) {
+            stopAutoRefresh();
+            autoRefreshEnabled.value = false;
+          }
+        })
+        .catch(() => {
+          // Network / connection error — stop auto-refresh to avoid tight retry loop
+          if (autoRefreshEnabled.value) {
+            stopAutoRefresh();
+            autoRefreshEnabled.value = false;
+          }
+        });
+    }
+  }, 1000);
+}
+
+function stopAutoRefresh() {
+  if (autoRefreshTimer !== null) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+}
 const hashSortBy = ref<"field" | "value" | null>(null);
 const hashSortDir = ref<"asc" | "desc">("asc");
 const hashSearchQuery = ref("");
@@ -458,6 +510,9 @@ async function load(options: { selectDefaultMember?: boolean } = {}) {
     }
   } finally {
     loading.value = false;
+    if (autoRefreshEnabled.value && data.value && data.value.ttl > 0) {
+      startAutoRefresh();
+    }
   }
 }
 

@@ -149,6 +149,7 @@ import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberD
 import { caretPositionInsideInsertedSqlSingleQuotes, insertedSqlSingleQuoteAtCaret } from "@/lib/sqlQuoteCaret";
 import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { isMacOS } from "@/lib/platform";
+import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/debugLog";
 import { formatShortcut } from "@/lib/shortcutRegistry";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
@@ -228,6 +229,10 @@ const shortcutMod = isMac ? "Cmd" : "Ctrl";
 const saveShortcutLabel = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.saveSql));
 const DATA_GRID_COMPACT_TOPBAR_WIDTH = 900;
 
+function logDataGridTiming(message: string, payload?: Record<string, unknown>) {
+  appendDebugLog("info", message, payload);
+}
+
 const emit = defineEmits<{
   reload: [sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number];
   paginate: [offset: number, limit: number, whereInput?: string, orderBy?: string];
@@ -236,14 +241,16 @@ const emit = defineEmits<{
   "update:orderByInput": [value: string];
 }>();
 
-console.info("[DBX][DataGrid:setup]", {
-  traceId: dataGridTraceId,
-  cacheKey: props.cacheKey,
-  rowCount: props.result.rows.length,
-  columnCount: props.result.columns.length,
-  backendMs: props.result.execution_time_ms,
-  loading: props.loading,
-});
+if (isDebugLoggingEnabled()) {
+  logDataGridTiming("[DBX][DataGrid:setup]", {
+    traceId: dataGridTraceId,
+    cacheKey: props.cacheKey,
+    rowCount: props.result.rows.length,
+    columnCount: props.result.columns.length,
+    backendMs: props.result.execution_time_ms,
+    loading: props.loading,
+  });
+}
 
 const transposeRowIndex = ref<number | null>(null);
 const showTranspose = ref(false);
@@ -253,8 +260,9 @@ const preserveTransposeOnNextResult = ref(false);
 watch(
   () => props.result,
   (result) => {
+    if (!isDebugLoggingEnabled()) return;
     const startedAt = performance.now();
-    console.info("[DBX][DataGrid:result:prop]", {
+    logDataGridTiming("[DBX][DataGrid:result:prop]", {
       traceId: dataGridTraceId,
       cacheKey: props.cacheKey,
       rowCount: result.rows.length,
@@ -265,14 +273,14 @@ watch(
     });
 
     nextTick(() => {
-      console.info("[DBX][DataGrid:result:nextTick]", {
+      logDataGridTiming("[DBX][DataGrid:result:nextTick]", {
         traceId: dataGridTraceId,
         cacheKey: props.cacheKey,
         elapsed: `${Math.round(performance.now() - startedAt)}ms`,
         loading: props.loading,
       });
       requestAnimationFrame(() => {
-        console.info("[DBX][DataGrid:result:first-frame]", {
+        logDataGridTiming("[DBX][DataGrid:result:first-frame]", {
           traceId: dataGridTraceId,
           cacheKey: props.cacheKey,
           elapsed: `${Math.round(performance.now() - startedAt)}ms`,
@@ -1664,6 +1672,8 @@ const gridVerticalScrollbarDragging = ref(false);
 let gridHorizontalScrollbarFrame = 0;
 let gridHorizontalScrollbarDragFrame = 0;
 let gridHorizontalScrollbarPendingClientX = 0;
+let gridVerticalScrollbarDragFrame = 0;
+let gridVerticalScrollbarPendingClientY = 0;
 let gridHorizontalScrollbarResizeObserver: ResizeObserver | null = null;
 let dataGridTopbarResizeObserver: ResizeObserver | null = null;
 let cellEditResizeObserver: ResizeObserver | null = null;
@@ -1675,8 +1685,10 @@ let gridHorizontalScrollbarDragState: {
   maxScrollLeft: number;
 } | null = null;
 let gridVerticalScrollbarDragState: {
+  scroller: HTMLElement;
   trackRect: DOMRect;
   thumbOffsetPx: number;
+  maxScrollTop: number;
 } | null = null;
 const hiddenColumnIndexes = ref<Set<number>>(new Set());
 const nullColumnsHidden = ref(false);
@@ -2015,6 +2027,7 @@ function stopGridHorizontalScrollbarDrag() {
 
 function stopGridVerticalScrollbarDrag() {
   if (!gridVerticalScrollbarDragState) return;
+  flushGridVerticalScrollbarDrag();
   gridVerticalScrollbarDragState = null;
   gridVerticalScrollbarDragging.value = false;
   window.removeEventListener("pointermove", onGridVerticalScrollbarPointerMove, true);
@@ -2051,26 +2064,42 @@ function startGridHorizontalScrollbarDrag(event: PointerEvent) {
   scheduleGridHorizontalScrollbarDrag(event.clientX);
 }
 
-function applyGridVerticalScrollbarDrag(clientY: number) {
-  const scroller = gridScrollerElement();
+function applyPendingGridVerticalScrollbarDrag() {
+  gridVerticalScrollbarDragFrame = 0;
   const dragState = gridVerticalScrollbarDragState;
-  if (!scroller || !dragState) return;
-
-  const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-  if (maxScrollTop <= 1) return;
+  if (!dragState) return;
 
   const thumbHeightPx = dragState.trackRect.height * (gridVerticalScrollbarThumbHeightPercent.value / 100);
   const maxThumbTopPx = Math.max(1, dragState.trackRect.height - thumbHeightPx);
-  const thumbTopPx = Math.min(maxThumbTopPx, Math.max(0, clientY - dragState.trackRect.top - dragState.thumbOffsetPx));
-  scroller.scrollTop = (thumbTopPx / maxThumbTopPx) * maxScrollTop;
+  const thumbTopPx = Math.min(maxThumbTopPx, Math.max(0, gridVerticalScrollbarPendingClientY - dragState.trackRect.top - dragState.thumbOffsetPx));
+  const scroller = dragState.scroller;
+  const nextScrollTop = (thumbTopPx / maxThumbTopPx) * dragState.maxScrollTop;
+  if (Math.abs(scroller.scrollTop - nextScrollTop) < 0.5) return;
+  scroller.scrollTop = nextScrollTop;
   updateGridVerticalScrollbar(scroller);
-  if (useCanvasGridRows.value) syncCanvasViewport();
+  if (useCanvasGridRows.value) {
+    canvasScrollTop.value = scroller.scrollTop;
+    drawCanvasGridNow();
+  }
+}
+
+function scheduleGridVerticalScrollbarDrag(clientY: number) {
+  gridVerticalScrollbarPendingClientY = clientY;
+  if (gridVerticalScrollbarDragFrame) return;
+  // Match horizontal dragging: coalesce pointermove bursts to one canvas/layout update per frame.
+  gridVerticalScrollbarDragFrame = requestAnimationFrame(applyPendingGridVerticalScrollbarDrag);
+}
+
+function flushGridVerticalScrollbarDrag() {
+  if (!gridVerticalScrollbarDragFrame) return;
+  cancelAnimationFrame(gridVerticalScrollbarDragFrame);
+  applyPendingGridVerticalScrollbarDrag();
 }
 
 function onGridVerticalScrollbarPointerMove(event: PointerEvent) {
   if (!gridVerticalScrollbarDragState) return;
   event.preventDefault();
-  applyGridVerticalScrollbarDrag(event.clientY);
+  scheduleGridVerticalScrollbarDrag(event.clientY);
 }
 
 function startGridVerticalScrollbarDrag(event: PointerEvent) {
@@ -2078,6 +2107,8 @@ function startGridVerticalScrollbarDrag(event: PointerEvent) {
   const track = gridVerticalScrollbarTrackRef.value;
   if (!scroller || !track || !hasGridVerticalOverflow.value) return;
 
+  const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  if (maxScrollTop <= 1) return;
   const trackRect = track.getBoundingClientRect();
   const thumbTopPx = trackRect.height * (gridVerticalScrollbarThumbTopPercent.value / 100);
   const thumbHeightPx = trackRect.height * (gridVerticalScrollbarThumbHeightPercent.value / 100);
@@ -2085,8 +2116,10 @@ function startGridVerticalScrollbarDrag(event: PointerEvent) {
   const pointerInsideThumb = pointerY >= thumbTopPx && pointerY <= thumbTopPx + thumbHeightPx;
 
   gridVerticalScrollbarDragState = {
+    scroller,
     trackRect,
     thumbOffsetPx: pointerInsideThumb ? pointerY - thumbTopPx : thumbHeightPx / 2,
+    maxScrollTop,
   };
   gridVerticalScrollbarDragging.value = true;
   document.body.style.userSelect = "none";
@@ -2094,7 +2127,7 @@ function startGridVerticalScrollbarDrag(event: PointerEvent) {
   window.addEventListener("pointerup", stopGridVerticalScrollbarDrag, true);
   window.addEventListener("pointercancel", stopGridVerticalScrollbarDrag, true);
   event.preventDefault();
-  applyGridVerticalScrollbarDrag(event.clientY);
+  scheduleGridVerticalScrollbarDrag(event.clientY);
 }
 
 const gridHorizontalScrollbarThumbStyle = computed<CSSProperties>(() => ({
@@ -2534,7 +2567,6 @@ watch(
 const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
 const canCalculateTotalRowCount = computed(() => !isResultsContext.value && !!props.connectionId && (!!props.tableMeta || !!props.countSql));
-const showQueryEditReadyBadge = computed(() => isResultsContext.value && hasData.value && !!props.editable && !!props.tableMeta);
 const showKeylessEditWarning = computed(() => !!props.editable && !!props.tableMeta && canUseKeylessRowPredicate(props.databaseType, props.tableMeta.primaryKeys ?? []));
 const canShowWhereSearch = computed(() => !!props.onExecuteSql && !isResultsContext.value);
 const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && !isResultsContext.value);
@@ -2931,7 +2963,6 @@ const showDataGridTopbar = computed(
     hasLocalColumnFilters.value ||
     canShowWhereSearch.value ||
     hasSearchBarSlot.value ||
-    showQueryEditReadyBadge.value ||
     props.context !== "results" ||
     (!!props.editable && (!!props.tableMeta || !!props.customSaveHandler)) ||
     transactionActive.value ||
@@ -3177,23 +3208,27 @@ const displayItems = computed<RowItem[]>(() => displayRowRefs.value.map(rowItemF
 watch(
   () => displayRowCount.value,
   (length) => {
-    const startedAt = performance.now();
-    console.info("[DBX][DataGrid:display-items:ready]", {
-      traceId: dataGridTraceId,
-      cacheKey: props.cacheKey,
-      displayItemCount: length,
-      sourceRowCount: props.result.rows.length,
-      elapsedSinceSetup: dataGridElapsed(),
-    });
+    const shouldLogTiming = isDebugLoggingEnabled();
+    const startedAt = shouldLogTiming ? performance.now() : 0;
+    if (shouldLogTiming) {
+      logDataGridTiming("[DBX][DataGrid:display-items:ready]", {
+        traceId: dataGridTraceId,
+        cacheKey: props.cacheKey,
+        displayItemCount: length,
+        sourceRowCount: props.result.rows.length,
+        elapsedSinceSetup: dataGridElapsed(),
+      });
+    }
     nextTick(() => {
       const scrollerEl = gridRef.value?.querySelector<HTMLElement>(".data-grid-scroller");
       if (scrollerEl) {
         updateGridScrollbarGutter(scrollerEl);
         updateGridHorizontalViewport(scrollerEl);
       }
+      if (!shouldLogTiming) return;
       requestAnimationFrame(() => {
         const renderedRows = gridRef.value?.querySelectorAll(".vue-recycle-scroller__item-view").length;
-        console.info("[DBX][DataGrid:display-items:first-frame]", {
+        logDataGridTiming("[DBX][DataGrid:display-items:first-frame]", {
           traceId: dataGridTraceId,
           cacheKey: props.cacheKey,
           displayItemCount: length,
@@ -4791,10 +4826,12 @@ watch(
     detailCell,
     showCellDetail,
     editingCell,
+    // Pending edit structures can contain large nested cell maps; the editor
+    // version ref gives the canvas a cheap invalidation signal without a deep watch.
+    pendingChangesVersion,
   ],
   scheduleCanvasDraw,
 );
-watch([dirtyRows, newRows, deletedRows], scheduleCanvasDraw, { deep: true });
 
 function pauseCanvasGridWork() {
   dataGridIsActive = false;
@@ -4846,6 +4883,9 @@ onUnmounted(() => {
   if (gridHorizontalScrollbarFrame && typeof cancelAnimationFrame === "function") {
     cancelAnimationFrame(gridHorizontalScrollbarFrame);
   }
+  if (gridVerticalScrollbarDragFrame && typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(gridVerticalScrollbarDragFrame);
+  }
   if (typeof window === "undefined") return;
   window.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
   window.visualViewport?.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
@@ -4894,6 +4934,7 @@ const {
   copySelectionJson,
   copySelectionSqlInList,
   copySelectedRowsTsv,
+  copySelectedRowsTsvWithHeaders,
   copyColumnNames,
   exportCsv,
   exportCurrentPageCsv,
@@ -6161,7 +6202,6 @@ function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleC
   contextHeaderColumnIndex.value = null;
   contextCell.value = { rowId, rowIndex, col: colIdx };
   if (hasRowSelection.value && isRowSelected(rowId)) {
-    clearCellSelection();
     void prefetchCopyStatements();
     return;
   }
@@ -6300,9 +6340,6 @@ function onRowContext(rowId: number, rowIndex: number) {
   contextHeaderColumn.value = null;
   contextHeaderColumnIndex.value = null;
   contextCell.value = { rowId, rowIndex, col: -1 };
-  if (hasRowSelection.value && isRowSelected(rowId)) {
-    clearCellSelection();
-  }
   if (!isRowSelected(rowId)) {
     clearCellSelection();
     selectedRowIds.value = new Set([rowId]);
@@ -6691,23 +6728,27 @@ watch(
   () => props.loading,
   (isLoading) => {
     stopLoadingElapsedTimer();
-    console.info(isLoading ? "[DBX][DataGrid:loading:start]" : "[DBX][DataGrid:loading:stop]", {
-      traceId: dataGridTraceId,
-      cacheKey: props.cacheKey,
-      elapsedSinceSetup: dataGridElapsed(),
-    });
+    if (isDebugLoggingEnabled()) {
+      logDataGridTiming(isLoading ? "[DBX][DataGrid:loading:start]" : "[DBX][DataGrid:loading:stop]", {
+        traceId: dataGridTraceId,
+        cacheKey: props.cacheKey,
+        elapsedSinceSetup: dataGridElapsed(),
+      });
+    }
     if (isLoading) {
       startLoadingElapsedTimer();
     } else {
-      nextTick(() => {
-        requestAnimationFrame(() => {
-          console.info("[DBX][DataGrid:loading:stop:first-frame]", {
-            traceId: dataGridTraceId,
-            cacheKey: props.cacheKey,
-            elapsedSinceSetup: dataGridElapsed(),
+      if (isDebugLoggingEnabled()) {
+        nextTick(() => {
+          requestAnimationFrame(() => {
+            logDataGridTiming("[DBX][DataGrid:loading:stop:first-frame]", {
+              traceId: dataGridTraceId,
+              cacheKey: props.cacheKey,
+              elapsedSinceSetup: dataGridElapsed(),
+            });
           });
         });
-      });
+      }
     }
   },
 );
@@ -6850,6 +6891,11 @@ function copySubmenu(): ContextMenuItem {
     items.push({ label: t("grid.copyCell"), action: copyCell });
   }
   items.push({ label: labels.row, action: copyRow });
+  if (hasRowSelection.value && selectedRowCount.value > 0) {
+    const singleRowSelected = selectedRowCount.value === 1;
+    items.push({ label: singleRowSelected ? t("grid.copySelectedRowTsv") : t("grid.copySelectedRowsTsv", { count: selectedRowCount.value }), action: copySelectedRowsTsv });
+    items.push({ label: singleRowSelected ? t("grid.copySelectedRowTsvWithHeaders") : t("grid.copySelectedRowsTsvWithHeaders", { count: selectedRowCount.value }), action: copySelectedRowsTsvWithHeaders });
+  }
   if (isMultiRow.value) {
     items.push({ label: labels.insertMerged, action: () => copyRowAsInsert("merged"), disabled: !canCopyPreparedInsert(false, "merged") });
     items.push({ label: labels.insertRowByRow, action: () => copyRowAsInsert("row-by-row"), disabled: !canCopyPreparedInsert(false, "row-by-row") });
@@ -7369,16 +7415,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <slot name="search-bar" :local-filter-count="localFilterCount" :has-local-column-filters="hasLocalColumnFilters" :local-filter-summaries="localFilterSummaries" :clear-local-filter="clearLocalFilter" />
 
             <div class="flex shrink-0 items-center gap-1 px-1 ml-auto">
-              <Tooltip v-if="showQueryEditReadyBadge">
-                <TooltipTrigger as-child>
-                  <div class="flex h-5 items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300">
-                    {{ t("grid.queryEditReady") }}
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" class="max-w-sm">
-                  {{ t("grid.queryEditReadyHint", { table: tableMeta?.tableName }) }}
-                </TooltipContent>
-              </Tooltip>
               <Tooltip v-if="showKeylessEditWarning">
                 <TooltipTrigger as-child>
                   <div class="flex h-5 items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">

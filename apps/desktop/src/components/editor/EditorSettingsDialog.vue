@@ -43,6 +43,7 @@ import { formatAiModelOption } from "@/lib/aiModelPresentation";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { useTheme } from "@/composables/useTheme";
+import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/clipboard";
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/debugLog";
 import {
@@ -88,6 +89,7 @@ const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
 const { isDark, themeMode, setThemeMode } = useTheme();
+const { toast } = useToast();
 
 let cachedSystemFonts: string[] | null = null;
 let pendingSystemFonts: Promise<string[]> | null = null;
@@ -3534,25 +3536,6 @@ watch(
                 </div>
                 <p v-else class="mt-4 text-sm text-muted-foreground">{{ t("settings.supportInfoLoading") }}</p>
                 <p v-if="appSupportInfoError" class="mt-3 text-xs text-destructive">{{ t("settings.supportInfoLoadFailed", { message: appSupportInfoError }) }}</p>
-              </div>
-
-              <div class="rounded-lg border p-4">
-                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div class="min-w-0 space-y-1">
-                    <Label>{{ t("settings.updateDownloadSource") }}</Label>
-                    <p class="text-sm text-muted-foreground">{{ t("settings.updateDownloadSourceDescription") }}</p>
-                  </div>
-                  <Select :model-value="editUpdateDownloadSource" @update:model-value="onUpdateDownloadSourceChange">
-                    <SelectTrigger class="h-9 w-full sm:w-[180px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="official">{{ t("settings.updateDownloadSourceOfficial") }}</SelectItem>
-                      <SelectItem value="cnb">{{ t("settings.updateDownloadSourceCnb") }}</SelectItem>
-                      <SelectItem value="atomgit">{{ t("settings.updateDownloadSourceAtomgit") }}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
               </div>
 
               <div class="grid gap-3 sm:grid-cols-2">

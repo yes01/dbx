@@ -83,7 +83,7 @@ defineExpose({ show });
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="sm:max-w-3xl">
+    <DialogContent class="max-h-[85vh] flex flex-col overflow-hidden sm:max-w-3xl">
       <DialogHeader>
         <DialogTitle>{{ t("extension.manageTitle") }}</DialogTitle>
       </DialogHeader>
@@ -92,14 +92,14 @@ defineExpose({ show });
         <Loader2 class="h-6 w-6 animate-spin text-muted-foreground" />
       </div>
 
-      <div v-else class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div class="flex min-h-[300px] flex-col">
+      <div v-else class="grid flex-1 min-h-0 grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="flex min-h-0 flex-col">
           <div class="mb-2 flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
             <Package class="h-4 w-4" />
             {{ t("extension.available") }}
             <span class="ml-auto text-xs">({{ available.length }})</span>
           </div>
-          <ScrollArea class="flex-1 rounded-md border">
+          <ScrollArea class="min-h-0 flex-1 rounded-md border">
             <div v-if="available.length === 0" class="flex items-center justify-center py-12 text-sm text-muted-foreground">
               {{ t("extension.noAvailable") }}
             </div>
@@ -119,13 +119,13 @@ defineExpose({ show });
           </ScrollArea>
         </div>
 
-        <div class="flex min-h-[300px] flex-col">
+        <div class="flex min-h-0 flex-col">
           <div class="mb-2 flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
             <Package class="h-4 w-4" />
             {{ t("extension.installed") }}
             <span class="ml-auto text-xs">({{ installed.length }})</span>
           </div>
-          <ScrollArea class="flex-1 rounded-md border">
+          <ScrollArea class="min-h-0 flex-1 rounded-md border">
             <div v-if="installed.length === 0" class="flex items-center justify-center py-12 text-sm text-muted-foreground">
               {{ t("extension.noInstalled") }}
             </div>

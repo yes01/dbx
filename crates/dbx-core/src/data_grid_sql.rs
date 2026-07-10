@@ -86,6 +86,8 @@ pub struct DataGridCopyInsertStatementOptions {
     pub table_meta: Option<DataGridTableMeta>,
     pub columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_types: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_columns: Option<Vec<Option<String>>>,
     #[serde(default)]
     pub rows: Vec<Vec<Value>>,
@@ -320,10 +322,19 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
                 insert_columns
                     .iter()
                     .map(|(column, index)| {
-                        format_grid_sql_literal(
+                        format_grid_copy_insert_sql_literal(
                             row.get(*index).unwrap_or(&Value::Null),
                             options.database_type,
-                            column_info_for(column_info, column),
+                            copy_column_info(
+                                column_info,
+                                column,
+                                options
+                                    .column_types
+                                    .as_deref()
+                                    .and_then(|types| types.get(*index))
+                                    .and_then(|value| value.as_deref()),
+                            )
+                            .as_ref(),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -809,6 +820,24 @@ fn effective_copy_columns(source_columns: Option<&[Option<String>]>, columns: &[
     }
 }
 
+fn copy_column_info(
+    column_info: &[DataGridColumnInfo],
+    column: &str,
+    fallback_type: Option<&str>,
+) -> Option<DataGridColumnInfo> {
+    if let Some(info) = column_info_for(column_info, column) {
+        return Some(info.clone());
+    }
+    fallback_type.map(|data_type| DataGridColumnInfo {
+        name: column.to_string(),
+        data_type: data_type.to_string(),
+        is_nullable: true,
+        is_primary_key: false,
+        column_default: None,
+        extra: None,
+    })
+}
+
 fn effective_column(options: &DataGridSaveStatementOptions, index: usize) -> Option<&str> {
     match &options.source_columns {
         Some(source_columns) if source_columns.len() == options.columns.len() => source_columns.get(index)?.as_deref(),
@@ -833,6 +862,23 @@ pub fn normalize_data_grid_save_error(database_type: Option<DatabaseType>, error
         return "Hive UPDATE/DELETE are not enabled for this table or server. Add rows with INSERT, or enable ACID transactional tables in Hive before editing/deleting existing rows.".to_string();
     }
     error.to_string()
+}
+
+fn format_grid_copy_insert_sql_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> String {
+    if is_oracle_temporal_literal_database(database_type) {
+        if let Some(text) = value.as_str() {
+            if let Some(literal) =
+                format_oracle_temporal_literal(text, column_info.map(|column| column.data_type.as_str()))
+            {
+                return literal;
+            }
+        }
+    }
+    format_grid_sql_literal(value, database_type, column_info)
 }
 
 pub fn format_grid_sql_literal(
@@ -957,10 +1003,13 @@ fn is_oracle_temporal_literal_database(database_type: Option<DatabaseType>) -> b
 
 fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
     let kind = oracle_temporal_column_kind(data_type?)?;
-    let parts = regex_like_rfc3339(text)?;
-    let fraction = parts.fraction.unwrap_or_default();
+    let parts = regex_like_oracle_temporal(text)?;
+    let fraction = parts.fraction.as_deref().unwrap_or_default();
     let datetime = format!("{} {}{}", parts.date, parts.time, fraction);
     match kind {
+        OracleTemporalKind::Date if oracle_temporal_parts_are_midnight(&parts) => {
+            Some(format!("DATE '{}'", parts.date))
+        }
         OracleTemporalKind::Date => Some(format!("TO_DATE('{} {}', 'YYYY-MM-DD HH24:MI:SS')", parts.date, parts.time)),
         OracleTemporalKind::Timestamp => {
             let mask = oracle_timestamp_format_mask(datetime.contains('.'));
@@ -972,6 +1021,61 @@ fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option
             Some(format!("TO_TIMESTAMP_TZ('{datetime} {zone}', '{mask} TZH:TZM')"))
         }
     }
+}
+
+fn regex_like_oracle_temporal(text: &str) -> Option<Rfc3339Parts> {
+    regex_like_rfc3339(text).or_else(|| regex_like_local_temporal(text))
+}
+
+fn regex_like_local_temporal(text: &str) -> Option<Rfc3339Parts> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let date = &text[0..10];
+    if bytes.len() == 10 {
+        return Some(Rfc3339Parts {
+            date: date.to_string(),
+            time: "00:00:00".to_string(),
+            fraction: None,
+            zone: String::new(),
+        });
+    }
+    let separator = *bytes.get(10)?;
+    if separator != b'T' && separator != b' ' {
+        return None;
+    }
+    if bytes.len() < 19 || bytes.get(13) != Some(&b':') || bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let time = &text[11..19];
+    let rest = &text[19..];
+    let (fraction, zone) = if let Some(rest) = rest.strip_prefix('.') {
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digit_count == 0 || digit_count > 9 {
+            return None;
+        }
+        let zone = &rest[digit_count..];
+        if !zone.is_empty() && zone != "Z" && zone != "z" && !is_timezone_offset(zone) {
+            return None;
+        }
+        (Some(format!(".{}", &rest[..digit_count])), zone)
+    } else {
+        if !rest.is_empty() && rest != "Z" && rest != "z" && !is_timezone_offset(rest) {
+            return None;
+        }
+        (None, rest)
+    };
+    Some(Rfc3339Parts { date: date.to_string(), time: time.to_string(), fraction, zone: zone.to_string() })
+}
+
+fn oracle_temporal_parts_are_midnight(parts: &Rfc3339Parts) -> bool {
+    parts.time == "00:00:00"
+        && parts
+            .fraction
+            .as_deref()
+            .map(|fraction| fraction.trim_start_matches('.').chars().all(|ch| ch == '0'))
+            .unwrap_or(true)
 }
 
 fn oracle_temporal_column_kind(data_type: &str) -> Option<OracleTemporalKind> {
@@ -1841,6 +1945,7 @@ mod tests {
                 columns: None,
             }),
             columns: vec!["id".to_string(), "login_name".to_string(), "display_name".to_string()],
+            column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
             exclude_primary_keys: true,
@@ -1863,6 +1968,7 @@ mod tests {
                 columns: None,
             }),
             columns: vec!["id".to_string(), "login_name".to_string(), "display_name".to_string()],
+            column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
             exclude_primary_keys: false,
@@ -1887,6 +1993,7 @@ mod tests {
                 columns: None,
             }),
             columns: vec!["ID".to_string(), "NAME".to_string()],
+            column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
             exclude_primary_keys: false,
@@ -1914,6 +2021,7 @@ mod tests {
             database_type: Some(DatabaseType::Mysql),
             table_meta: Some(table_meta.clone()),
             columns: columns.clone(),
+            column_types: None,
             source_columns: None,
             rows: rows.clone(),
             exclude_primary_keys: false,
@@ -1975,6 +2083,7 @@ mod tests {
                 ]),
             }),
             columns: vec!["id".to_string(), "title".to_string(), "search_vector".to_string()],
+            column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
             exclude_primary_keys: false,
@@ -1984,6 +2093,29 @@ mod tests {
         assert_eq!(
             statement.as_deref(),
             Some("INSERT INTO \"public\".\"articles\" (\"id\", \"title\") VALUES (1, 'Hello');")
+        );
+    }
+
+    #[test]
+    fn oracle_copy_insert_uses_result_column_types_for_date_literals() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            table_meta: None,
+            columns: vec!["ID".to_string(), "CREATED_ON".to_string(), "RAW_TEXT".to_string()],
+            column_types: Some(vec![
+                Some("NUMBER".to_string()),
+                Some("DATE".to_string()),
+                Some("VARCHAR2".to_string()),
+            ]),
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("2022-08-25T09:58:43Z"), json!("2022-08-25T09:58:43Z")]],
+            exclude_primary_keys: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO table_name (\"ID\", \"CREATED_ON\", \"RAW_TEXT\") VALUES (1, TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), '2022-08-25T09:58:43Z');")
         );
     }
 
@@ -2144,6 +2276,33 @@ mod tests {
         assert_eq!(
             format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&text)),
             "'2022-08-25T09:58:43Z'"
+        );
+    }
+
+    #[test]
+    fn formats_oracle_temporal_literals_from_editor_values_without_nls_parsing() {
+        let timestamp = column("created_at", "TIMESTAMP(6)", true, None);
+        let date = column("event_day", "DATE", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43.123456"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43.123456', 'YYYY-MM-DD HH24:MI:SS.FF')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43"), Some(DatabaseType::Oracle), Some(&date)),
+            "TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25"), Some(DatabaseType::Oracle), Some(&date)),
+            "DATE '2022-08-25'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T00:00:00Z"), Some(DatabaseType::Oracle), Some(&date)),
+            "DATE '2022-08-25'"
         );
     }
 

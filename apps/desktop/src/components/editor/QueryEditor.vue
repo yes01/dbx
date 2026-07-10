@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { CaseLower, CaseUpper, FileCode, PencilRuler, Play, Copy, Table2, TextSelect } from "@lucide/vue";
+import { CaseLower, CaseUpper, FileCode, PencilRuler, Play, Copy, Sparkles, Table2, TextSelect } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
 import type { EditorView as EditorViewType } from "@codemirror/view";
@@ -13,6 +13,7 @@ import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverr
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/executableStatementRangeCache";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
+import { resolveSqlSingleQuoteKeyAction } from "@/lib/sqlQuoteCaret";
 import { formatMongoShellText } from "@/lib/mongoFormatter";
 import { useConnectionStore, COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -95,6 +96,7 @@ const emit = defineEmits<{
   closeColumnPanel: [];
   viewportChange: [viewport: { scrollTop: number; scrollLeft: number }];
   selectionStateChange: [selection: { anchor: number; head: number }];
+  sendSelectionToAi: [sql: string];
 }>();
 
 const editorRef = ref<HTMLDivElement>();
@@ -102,6 +104,7 @@ const view = shallowRef<EditorViewType | null>(null);
 let viewportEmitFrame: number | null = null;
 let viewportRestoreFrame: number | null = null;
 let latestViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
+let lastEmittedViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
 let latestSelection: { anchor: number; head: number } | undefined = props.initialSelection;
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
@@ -407,14 +410,28 @@ function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, 
   return true;
 }
 
+function sqlSingleQuoteKeyActionAt(state: EditorViewType["state"], position: number) {
+  return resolveSqlSingleQuoteKeyAction({
+    previousChar: position > 0 ? state.doc.sliceString(position - 1, position) : "",
+    nextChar: position < state.doc.length ? state.doc.sliceString(position, position + 1) : "",
+    autoCloseBrackets: settingsStore.editorSettings.autoCloseBrackets,
+  });
+}
+
 function handleSqlSingleQuote(view: EditorViewType): boolean {
   const { state } = view;
-  if (state.readOnly) return false;
-  if (state.selection.ranges.some((range) => !range.empty || range.from === 0 || state.doc.sliceString(range.from - 1, range.from) !== "'")) return false;
-  const transaction = state.changeByRange((range) => ({
-    changes: { from: range.from, insert: "'" },
-    range,
-  }));
+  const EditorSelection = codeMirrorEditorSelection;
+  if (state.readOnly || !EditorSelection) return false;
+  if (state.selection.ranges.some((range) => !range.empty)) return false;
+  if (state.selection.ranges.some((range) => sqlSingleQuoteKeyActionAt(state, range.from) === "pass")) return false;
+  const transaction = state.changeByRange((range) => {
+    const nextRange = EditorSelection.cursor(range.from + 1);
+    if (sqlSingleQuoteKeyActionAt(state, range.from) !== "insertEscapedQuote") return { range: nextRange };
+    return {
+      changes: { from: range.from, insert: "'" },
+      range: nextRange,
+    };
+  });
   view.dispatch(transaction, { userEvent: "input.type" });
   return true;
 }
@@ -810,52 +827,66 @@ function selectSqlLineFromGutter(currentView: EditorViewType, line: { from: numb
   return true;
 }
 
-const contextMenuItems = computed<ContextMenuItem[]>(() => [
-  {
-    label: executeContextMenuLabel.value,
-    action: executeFromContextMenu,
-    disabled: !canExecuteContextSql.value,
-    icon: Play,
-  },
-  {
-    label: t("contextMenu.viewData"),
-    action: openTableFromContextMenu,
-    disabled: !contextTableName.value,
-    icon: Table2,
-  },
-  {
-    label: t("contextMenu.viewDdl"),
-    action: openTableDdlFromContextMenu,
-    disabled: !contextTableName.value,
-    icon: FileCode,
-  },
-  {
-    label: t("contextMenu.editStructure"),
-    action: editTableStructureFromContextMenu,
-    disabled: !contextTableName.value,
-    icon: PencilRuler,
-  },
-  { label: "", separator: true },
-  {
-    label: t("editor.contextMenu.copySelection"),
-    action: copySelectedSqlFromContextMenu,
-    disabled: !canCopySelectedSql.value,
-    icon: Copy,
-  },
-  {
-    label: t("editor.contextMenu.uppercaseSelection"),
-    action: () => convertSelectedSqlCaseFromContextMenu("upper"),
-    disabled: !canCopySelectedSql.value,
-    icon: CaseUpper,
-  },
-  {
-    label: t("editor.contextMenu.lowercaseSelection"),
-    action: () => convertSelectedSqlCaseFromContextMenu("lower"),
-    disabled: !canCopySelectedSql.value,
-    icon: CaseLower,
-  },
-  { label: t("editor.contextMenu.selectAll"), action: selectAllSqlFromContextMenu, icon: TextSelect },
-]);
+const contextMenuItems = computed<ContextMenuItem[]>(() => {
+  const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+  return [
+    {
+      label: executeContextMenuLabel.value,
+      action: executeFromContextMenu,
+      disabled: !canExecuteContextSql.value,
+      icon: Play,
+      shortcut: shortcuts.executeSql,
+    },
+    {
+      label: t("contextMenu.viewData"),
+      action: openTableFromContextMenu,
+      disabled: !contextTableName.value,
+      icon: Table2,
+    },
+    {
+      label: t("contextMenu.editStructure"),
+      action: editTableStructureFromContextMenu,
+      disabled: !contextTableName.value,
+      icon: PencilRuler,
+    },
+    {
+      label: t("contextMenu.viewDdl"),
+      action: openTableDdlFromContextMenu,
+      disabled: !contextTableName.value,
+      icon: FileCode,
+    },
+    { label: "", separator: true },
+    {
+      label: t("editor.contextMenu.copySelection"),
+      action: copySelectedSqlFromContextMenu,
+      disabled: !canCopySelectedSql.value,
+      icon: Copy,
+      shortcut: "Mod+C",
+    },
+    {
+      label: t("editor.contextMenu.sendToAi"),
+      action: () => {
+        if (selectedSql.value.trim()) emit("sendSelectionToAi", selectedSql.value);
+      },
+      disabled: !canCopySelectedSql.value,
+      icon: Sparkles,
+      shortcut: shortcuts.sendSelectionToAi,
+    },
+    {
+      label: t("editor.contextMenu.uppercaseSelection"),
+      action: () => convertSelectedSqlCaseFromContextMenu("upper"),
+      disabled: !canCopySelectedSql.value,
+      icon: CaseUpper,
+    },
+    {
+      label: t("editor.contextMenu.lowercaseSelection"),
+      action: () => convertSelectedSqlCaseFromContextMenu("lower"),
+      disabled: !canCopySelectedSql.value,
+      icon: CaseLower,
+    },
+    { label: t("editor.contextMenu.selectAll"), action: selectAllSqlFromContextMenu, icon: TextSelect, shortcut: shortcuts.selectAll },
+  ];
+});
 
 function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view"))["keymap"]) {
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
@@ -895,6 +926,11 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.exPasteSqlInCondition, () => {
           if (!supportsSqlInListPaste(props.databaseType)) return false;
           void pasteClipboardAsSqlInCondition();
+          return true;
+        }),
+        ...binding(shortcuts.sendSelectionToAi, (currentView) => {
+          const sql = selectedSqlFromView(currentView);
+          if (sql.trim()) emit("sendSelectionToAi", sql);
           return true;
         }),
       ]),
@@ -2968,6 +3004,10 @@ function readEditorViewport(currentView: EditorViewType) {
   };
 }
 
+function sameEditorViewport(a: { scrollTop: number; scrollLeft: number } | undefined, b: { scrollTop: number; scrollLeft: number }) {
+  return a?.scrollTop === b.scrollTop && a.scrollLeft === b.scrollLeft;
+}
+
 function normalizedEditorSelection(selection: { anchor: number; head: number } | undefined, docLength: number) {
   if (!selection) return undefined;
   return {
@@ -3012,6 +3052,8 @@ function restoreEditorFocus() {
 }
 
 function emitEditorViewport(viewport: { scrollTop: number; scrollLeft: number }) {
+  if (sameEditorViewport(lastEmittedViewport, viewport)) return;
+  lastEmittedViewport = { ...viewport };
   emit("viewportChange", viewport);
 }
 

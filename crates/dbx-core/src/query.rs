@@ -737,10 +737,17 @@ pub fn is_connection_error(err: &str) -> bool {
         || lower.contains("timed out")
         || (lower.contains("pool") && lower.contains("timeout"))
         || lower.contains("closed")
-        || lower.contains("\u{5173}\u{95ed}\u{7684}\u{8fde}\u{63a5}")
-        || lower.contains("\u{8fde}\u{63a5}\u{5df2}\u{5173}\u{95ed}")
+        || lower.contains("关闭的连接")
+        || lower.contains("连接已关闭")
+        || lower.contains("网络通信异常")
+        || lower.contains("通信异常")
+        || lower.contains("communications link failure")
+        || lower.contains("sqlrecoverableexception")
+        || lower.contains("sqlnontransientconnectionexception")
+        || lower.contains("sqltransientconnectionexception")
         || lower.contains("eof")
         || lower.contains("i/o error")
+        || lower.contains("input/output error")
         || lower.contains("not connected")
         || lower.contains("end-of-file")
         || lower.contains("idle")
@@ -2803,6 +2810,13 @@ mod tests {
         assert!(is_connection_error(
             "I/O error: \u{7531}\u{4e8e}\u{8fde}\u{63a5}\u{65b9}\u{5728}\u{4e00}\u{6bb5}\u{65f6}\u{95f4}\u{540e}\u{6ca1}\u{6709}\u{6b63}\u{786e}\u{7b54}\u{590d}\u{6216}\u{8fde}\u{63a5}\u{7684}\u{4e3b}\u{673a}\u{6ca1}\u{6709}\u{53cd}\u{5e94}\u{ff0c}\u{8fde}\u{63a5}\u{5c1d}\u{8bd5}\u{5931}\u{8d25}\u{3002} (os error 10060)"
         ));
+        assert!(is_connection_error("Agent RPC error (-1): dm.jdbc.driver.DMException: 网络通信异常"));
+        assert!(is_connection_error(
+            "Agent RPC error (-1): java.sql.SQLRecoverableException: IO 错误: Got minus one from a read call"
+        ));
+        assert!(is_connection_error(
+            "Agent RPC error (-1): com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure"
+        ));
     }
     #[test]
     fn is_connection_error_detects_os_error_codes() {
@@ -2871,6 +2885,9 @@ mod tests {
 
         assert_eq!(pool_error_action(Some(DatabaseType::SqlServer), err), PoolErrorAction::ReconnectAndRetry);
         assert_eq!(pool_error_action(Some(DatabaseType::Postgres), err), PoolErrorAction::ReconnectAndRetry);
+
+        let dameng_err = "Agent RPC error (-1): dm.jdbc.driver.DMException: 网络通信异常";
+        assert_eq!(pool_error_action(Some(DatabaseType::Dameng), dameng_err), PoolErrorAction::ReconnectAndRetry);
     }
 
     #[cfg(feature = "duckdb-bundled")]

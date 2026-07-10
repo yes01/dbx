@@ -1899,6 +1899,11 @@ async fn stream_openai_with_tools(
     });
     add_temperature_if_supported(&mut body, request);
 
+    // DeepSeek API requires {"thinking": {"type": "disabled"}} to disable thinking
+    if !request.config.enable_thinking && matches!(request.config.provider, AiProvider::Deepseek) {
+        body["thinking"] = json!({ "type": "disabled" });
+    }
+
     let res = client
         .post(resolve_endpoint(&request.config))
         .headers(headers)

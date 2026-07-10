@@ -112,6 +112,7 @@ pub async fn start_transfer(
                     total_rows: None,
                     status: TransferStatus::Cancelled,
                     error: None,
+                    terminal: true,
                 };
                 if let Ok(json) = serde_json::to_string(&progress) {
                     let _ = tx.send(json);
@@ -154,12 +155,32 @@ pub async fn start_transfer(
                         total_rows: last_total_rows.or(Some(last_rows_transferred)),
                         status: TransferStatus::TableDone,
                         error: None,
+                        terminal: false,
                     };
                     if let Ok(json) = serde_json::to_string(&progress) {
                         let _ = tx.send(json);
                     }
                 }
                 Err(e) => {
+                    if e == "Cancelled" {
+                        let progress = transfer::TransferProgress {
+                            transfer_id: req.transfer_id.clone(),
+                            table: table.clone(),
+                            table_index: i,
+                            total_tables: tables.len(),
+                            rows_transferred: 0,
+                            total_rows: None,
+                            status: TransferStatus::Cancelled,
+                            error: None,
+                            terminal: true,
+                        };
+                        if let Ok(json) = serde_json::to_string(&progress) {
+                            let _ = tx.send(json);
+                        }
+                        transfer::clear_cancelled(&req.transfer_id).await;
+                        state_clone.remove_sse_channel(&req.transfer_id).await;
+                        return;
+                    }
                     failed_tables.push(table.clone());
                     let progress = transfer::TransferProgress {
                         transfer_id: req.transfer_id.clone(),
@@ -170,6 +191,7 @@ pub async fn start_transfer(
                         total_rows: last_total_rows,
                         status: TransferStatus::Error,
                         error: Some(e),
+                        terminal: false,
                     };
                     if let Ok(json) = serde_json::to_string(&progress) {
                         let _ = tx.send(json);
@@ -196,6 +218,7 @@ pub async fn start_transfer(
                     failed_tables.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
                 ))
             },
+            terminal: true,
         };
         if let Ok(json) = serde_json::to_string(&done) {
             let _ = tx.send(json);
