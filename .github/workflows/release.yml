@@ -35,6 +35,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
+          fetch-depth: 0
 
       - name: Resolve release tag
         id: release-tag
@@ -48,12 +51,20 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
           fi
 
-          if [[ ! "$TAG" =~ ^v[0-9]+(\.[0-9]+){1,2}.*$ ]]; then
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Release tag '$TAG' must start with v and a numeric version, for example v0.5.29."
             exit 1
           fi
 
+          TAG_SHA="$(git rev-list -n 1 "$TAG")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ -z "$TAG_SHA" ] || [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::Checked out commit '$HEAD_SHA' does not match release tag '$TAG' ('$TAG_SHA')."
+            exit 1
+          fi
+
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -112,9 +123,9 @@ jobs:
           tagName: ${{ steps.release-tag.outputs.tag }}
           releaseName: 'DBX ${{ steps.release-tag.outputs.tag }}'
           releaseBody: ${{ steps.release-notes.outputs.body }}
-          releaseCommitish: ${{ github.sha }}
+          releaseCommitish: ${{ steps.release-tag.outputs.sha }}
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ github.event_name == 'release' && github.event.release.prerelease || false }}
           args: ${{ matrix.build_args }}
 
       - name: Build macOS DMG
@@ -164,6 +175,9 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
+          fetch-depth: 0
 
       - name: Resolve release tag
         id: release-tag
@@ -177,12 +191,49 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
           fi
 
-          if [[ ! "$TAG" =~ ^v[0-9]+(\.[0-9]+){1,2}.*$ ]]; then
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Release tag '$TAG' must start with v and a numeric version, for example v0.5.29."
             exit 1
           fi
 
+          TAG_SHA="$(git rev-list -n 1 "$TAG")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ -z "$TAG_SHA" ] || [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::Checked out commit '$HEAD_SHA' does not match release tag '$TAG' ('$TAG_SHA')."
+            exit 1
+          fi
+
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Package JDBC plugin
+        id: jdbc-plugin
+        shell: bash
+        run: |
+          ./plugins/jdbc/package.sh
+          VERSION="$(node -p "require('./plugins/jdbc/manifest.json').version")"
+          PROTOCOL_VERSION="$(node -p "require('./plugins/jdbc/manifest.json').protocol_version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "protocol_version=$PROTOCOL_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Upload JDBC plugin assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release-tag.outputs.tag }}
+          JDBC_VERSION: ${{ steps.jdbc-plugin.outputs.version }}
+        run: |
+          gh release upload "$TAG" \
+            "plugins/jdbc/dist/dbx-jdbc-plugin-${JDBC_VERSION}.zip" \
+            "plugins/jdbc/dist/dbx-jdbc-plugin-latest.zip" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
 
       - name: Resolve release notes
         id: release-notes
@@ -212,4 +263,9 @@ jobs:
           mkdir -p "$WORK_DIR"
           gh release download "$TAG" --repo "${GITHUB_REPOSITORY}" --pattern latest.json --dir "$WORK_DIR"
           node .github/scripts/apply-release-notes-to-latest-json.mjs "$WORK_DIR/latest.json" "$NOTES_PATH"
+          node .github/scripts/augment-latest-json-jdbc-plugin.mjs \
+            "$WORK_DIR/latest.json" \
+            "${{ steps.jdbc-plugin.outputs.version }}" \
+            "${{ steps.jdbc-plugin.outputs.protocol_version }}" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/dbx-jdbc-plugin-latest.zip"
           gh release upload "$TAG" "$WORK_DIR/latest.json" --repo "${GITHUB_REPOSITORY}" --clobber

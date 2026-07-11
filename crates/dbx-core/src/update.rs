@@ -203,7 +203,12 @@ pub fn normalize_version(version: &str) -> String {
 }
 
 pub fn parse_version(version: &str) -> Vec<u64> {
-    normalize_version(version).split(['.', '-', '+']).map(|part| part.parse::<u64>().unwrap_or(0)).collect()
+    normalize_version(version)
+        .split_once(['-', '+'])
+        .map_or_else(|| normalize_version(version), |(core, _)| core.to_string())
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect()
 }
 
 pub fn is_newer_version(latest: &str, current: &str) -> bool {
@@ -222,7 +227,45 @@ pub fn is_newer_version(latest: &str, current: &str) -> bool {
         }
     }
 
-    false
+    compare_prerelease(latest, current).is_gt()
+}
+
+fn compare_prerelease(latest: &str, current: &str) -> std::cmp::Ordering {
+    let latest = normalize_version(latest);
+    let current = normalize_version(current);
+    let latest_pre = latest.split_once('-').map(|(_, value)| value.split('+').next().unwrap_or_default());
+    let current_pre = current.split_once('-').map(|(_, value)| value.split('+').next().unwrap_or_default());
+
+    match (latest_pre, current_pre) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(latest), Some(current)) => compare_prerelease_identifiers(latest, current),
+    }
+}
+
+fn compare_prerelease_identifiers(latest: &str, current: &str) -> std::cmp::Ordering {
+    let mut latest = latest.split('.');
+    let mut current = current.split('.');
+
+    loop {
+        match (latest.next(), current.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(latest), Some(current)) => {
+                let ordering = match (latest.parse::<u64>(), current.parse::<u64>()) {
+                    (Ok(latest), Ok(current)) => latest.cmp(&current),
+                    (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                    (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                    (Err(_), Err(_)) => latest.cmp(current),
+                };
+                if !ordering.is_eq() {
+                    return ordering;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -242,8 +285,13 @@ mod tests {
     fn compares_semver_like_versions() {
         assert!(is_newer_version("0.2.1", "0.2.0"));
         assert!(is_newer_version("1.0.0", "0.9.9"));
+        assert!(is_newer_version("3.23.0", "3.23.0-beta.1"));
+        assert!(is_newer_version("3.23.0-beta.2", "3.23.0-beta.1"));
+        assert!(is_newer_version("3.23.0-beta.10", "3.23.0-beta.2"));
         assert!(!is_newer_version("0.2.0", "0.2.0"));
         assert!(!is_newer_version("0.1.9", "0.2.0"));
+        assert!(!is_newer_version("3.23.0-beta.1", "3.23.0"));
+        assert!(!is_newer_version("3.23.0-beta.1", "3.23.0-beta.2"));
     }
 
     #[test]
