@@ -476,6 +476,20 @@ fn is_kimi_model(model: &str) -> bool {
     }
 }
 
+fn apply_chat_completion_thinking_toggle(body: &mut serde_json::Value, config: &AiConfig) {
+    if config.enable_thinking {
+        return;
+    }
+
+    if matches!(config.provider, AiProvider::Ollama) {
+        body["reasoning_effort"] = json!("none");
+    } else if !is_kimi_model(&config.model) {
+        body["extra_body"] = json!({
+            "chat_template_kwargs": { "enable_thinking": false }
+        });
+    }
+}
+
 pub fn supports_temperature(config: &AiConfig) -> bool {
     !(is_kimi_model(&config.model) || is_openai_api_config(config) && is_openai_reasoning_model(&config.model))
 }
@@ -870,11 +884,7 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
         "max_tokens": request.max_tokens.unwrap_or(2048),
     });
     add_temperature_if_supported(&mut body_obj, &request);
-    if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
-        body_obj["extra_body"] = json!({
-            "chat_template_kwargs": { "enable_thinking": false }
-        });
-    }
+    apply_chat_completion_thinking_toggle(&mut body_obj, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1110,10 +1120,8 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 })
             };
             add_temperature_if_supported_for_config(&mut body_obj, config, Some(0.0));
-            if config.api_style != AiApiStyle::Responses && !config.enable_thinking && !is_kimi_model(&config.model) {
-                body_obj["extra_body"] = json!({
-                    "chat_template_kwargs": { "enable_thinking": false }
-                });
+            if config.api_style != AiApiStyle::Responses {
+                apply_chat_completion_thinking_toggle(&mut body_obj, config);
             }
             let ep = resolve_endpoint(config);
             let res = client
@@ -1351,11 +1359,7 @@ async fn stream_openai(
         "stream": true,
     });
     add_temperature_if_supported(&mut body_obj, request);
-    if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
-        body_obj["extra_body"] = json!({
-            "chat_template_kwargs": { "enable_thinking": false }
-        });
-    }
+    apply_chat_completion_thinking_toggle(&mut body_obj, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1899,9 +1903,12 @@ async fn stream_openai_with_tools(
     });
     add_temperature_if_supported(&mut body, request);
 
-    // DeepSeek API requires {"thinking": {"type": "disabled"}} to disable thinking
-    if !request.config.enable_thinking && matches!(request.config.provider, AiProvider::Deepseek) {
-        body["thinking"] = json!({ "type": "disabled" });
+    if !request.config.enable_thinking {
+        if matches!(request.config.provider, AiProvider::Ollama) {
+            apply_chat_completion_thinking_toggle(&mut body, &request.config);
+        } else if matches!(request.config.provider, AiProvider::Deepseek) {
+            body["thinking"] = json!({ "type": "disabled" });
+        }
     }
 
     let res = client

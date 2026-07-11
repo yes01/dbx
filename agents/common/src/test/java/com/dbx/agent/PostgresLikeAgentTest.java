@@ -27,6 +27,7 @@ class PostgresLikeAgentTest {
         agent.listTables("app");
         agent.listObjects("app");
         agent.getColumns("app", "orders");
+        agent.listCheckConstraintsForTest("app", "orders");
         agent.listForeignKeys("app", "orders");
         agent.listTriggers("app", "orders");
 
@@ -39,6 +40,7 @@ class PostgresLikeAgentTest {
         assertTrue(sql.contains("pg_catalog.pg_proc"), sql);
         assertTrue(sql.contains("pg_catalog.pg_attribute"), sql);
         assertTrue(sql.contains("pg_catalog.pg_constraint"), sql);
+        assertTrue(sql.contains("pg_catalog.pg_get_constraintdef"), sql);
         assertTrue(sql.contains("pg_catalog.pg_trigger"), sql);
         assertFalse(sql.contains(" AS key "), sql);
         assertFalse(sql.contains(" key."), sql);
@@ -111,6 +113,10 @@ class PostgresLikeAgentTest {
                 }
                 return rs.getObject(index);
             };
+        }
+
+        List<CheckConstraintInfo> listCheckConstraintsForTest(String schema, String table) {
+            return listCheckConstraints(schema, table);
         }
     }
 

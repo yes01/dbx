@@ -130,6 +130,32 @@ func TestGetTableDDLResultMarshalsAsString(t *testing.T) {
 	}
 }
 
+func TestNormalizeValueFormatsOracleBinaryColumnsAsHex(t *testing.T) {
+	tests := map[string]string{
+		"RAW":            "0x000f10ff",
+		"raw":            "0x000f10ff",
+		"LongRaw":        "0x000f10ff",
+		"LONG RAW":       "0x000f10ff",
+		"LongVarRaw":     "0x000f10ff",
+		"OCIBlobLocator": "0x000f10ff",
+	}
+
+	for columnType, want := range tests {
+		if got := normalizeValue([]byte{0x00, 0x0f, 0x10, 0xff}, columnType); got != want {
+			t.Fatalf("normalizeValue RAW bytes for %q = %#v, want %q", columnType, got, want)
+		}
+	}
+}
+
+func TestNormalizeValueKeepsNonBinaryBytesAsText(t *testing.T) {
+	if got := normalizeValue([]byte("hello"), "VARCHAR2"); got != "hello" {
+		t.Fatalf("normalizeValue text bytes = %#v, want %q", got, "hello")
+	}
+	if got := normalizeValue([]byte("legacy"), ""); got != "legacy" {
+		t.Fatalf("normalizeValue bytes without metadata = %#v, want %q", got, "legacy")
+	}
+}
+
 func TestNormalizeDDLObjectType(t *testing.T) {
 	tests := map[string]string{
 		"":                  "",
@@ -313,7 +339,7 @@ func TestBuildDSNUsesConnectionStringWhenProvided(t *testing.T) {
 	}
 }
 
-func TestBuildDSNEncodesColonInCredentials(t *testing.T) {
+func TestBuildDSNPreservesBastionUsernameAndEncodesCredentials(t *testing.T) {
 	dsn := buildDSN(connectParams{
 		Host:     "db.example.com",
 		Port:     1521,
@@ -327,11 +353,11 @@ func TestBuildDSNEncodesColonInCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	password, _ := parsed.User.Password()
-	if parsed.User.Username() != `"9008888:reader"` || password != "dbx:pass" {
+	if parsed.User.Username() != "9008888:reader" || password != "dbx:pass" {
 		t.Fatalf("credentials should survive URL parsing, dsn=%s username=%q password=%q", dsn, parsed.User.Username(), password)
 	}
-	if !strings.HasPrefix(parsed.User.String(), "%229008888%3Areader%22:") {
-		t.Fatalf("Oracle auth username should be quoted and escaped for non-regular identifiers, dsn=%s", dsn)
+	if !strings.HasPrefix(parsed.User.String(), "9008888%3Areader:") {
+		t.Fatalf("bastion username should be escaped without being quoted, dsn=%s", dsn)
 	}
 }
 
@@ -347,7 +373,7 @@ func TestBuildDSNEncodesColonInCredentialsFromJDBCServiceURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	password, _ := parsed.User.Password()
-	if parsed.User.Username() != `"9008888:reader"` || password != "dbx:pass" {
+	if parsed.User.Username() != "9008888:reader" || password != "dbx:pass" {
 		t.Fatalf("credentials should survive JDBC URL conversion, dsn=%s username=%q password=%q", dsn, parsed.User.Username(), password)
 	}
 	if parsed.Host != "db.example.com:1521" || strings.TrimPrefix(parsed.Path, "/") != "XE" {
@@ -355,21 +381,21 @@ func TestBuildDSNEncodesColonInCredentialsFromJDBCServiceURL(t *testing.T) {
 	}
 }
 
-func TestOracleAuthUsernameQuotesOnlyNonRegularIdentifiers(t *testing.T) {
-	tests := map[string]string{
-		"scott":          "scott",
-		"test":           "test",
-		"SCOTT_1":        "SCOTT_1",
-		"9008888:reader": `"9008888:reader"`,
-		"abc:def":        `"abc:def"`,
-		`"abc:def"`:      `"abc:def"`,
-		`abc"def`:        `"abc""def"`,
-	}
+func TestBuildDSNPreservesExplicitlyQuotedUsername(t *testing.T) {
+	dsn := buildDSN(connectParams{
+		Host:     "db.example.com",
+		Port:     1521,
+		Database: "XE",
+		Username: `"abc:def"`,
+		Password: "dbx:pass",
+	})
 
-	for input, want := range tests {
-		if got := oracleAuthUsername(input); got != want {
-			t.Fatalf("oracleAuthUsername(%q) = %q, want %q", input, got, want)
-		}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.User.Username() != `"abc:def"` {
+		t.Fatalf("explicitly quoted username should remain unchanged, dsn=%s username=%q", dsn, parsed.User.Username())
 	}
 }
 

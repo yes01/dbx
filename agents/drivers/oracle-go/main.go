@@ -615,7 +615,7 @@ func buildDSN(params connectParams) string {
 	if strings.HasPrefix(strings.ToLower(connectionString), "oracle://") {
 		return connectionString
 	}
-	username := oracleAuthUsername(params.Username)
+	username := params.Username
 	options := parseURLParams(params.URLParams)
 	if params.SysDBA {
 		options["AUTH TYPE"] = "SYSDBA"
@@ -648,42 +648,6 @@ func buildDSN(params connectParams) string {
 	return buildGoOraURL(params.Host, port, service, username, params.Password, options)
 }
 
-func oracleAuthUsername(username string) string {
-	if username == "" || isQuotedOracleUsername(username) || !oracleUsernameRequiresQuoting(username) {
-		return username
-	}
-	// Oracle logon accepts quoted identifiers for users that cannot be
-	// represented as regular identifiers, such as bastion usernames with ':'.
-	return `"` + strings.ReplaceAll(username, `"`, `""`) + `"`
-}
-
-func isQuotedOracleUsername(username string) bool {
-	return len(username) >= 2 && strings.HasPrefix(username, `"`) && strings.HasSuffix(username, `"`)
-}
-
-func oracleUsernameRequiresQuoting(username string) bool {
-	for index, ch := range username {
-		if index == 0 {
-			if !isAsciiLetter(ch) {
-				return true
-			}
-			continue
-		}
-		if !isAsciiLetter(ch) && !isAsciiDigit(ch) && ch != '_' && ch != '$' && ch != '#' {
-			return true
-		}
-	}
-	return false
-}
-
-func isAsciiLetter(ch rune) bool {
-	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
-}
-
-func isAsciiDigit(ch rune) bool {
-	return ch >= '0' && ch <= '9'
-}
-
 func buildGoOraJDBC(user, password, connStr string, options map[string]string) string {
 	if options == nil {
 		options = make(map[string]string)
@@ -694,7 +658,8 @@ func buildGoOraJDBC(user, password, connStr string, options map[string]string) s
 
 func buildGoOraURL(server string, port int, service, user, password string, options map[string]string) string {
 	// go-ora v2.9.0 uses path escaping for user/password, leaving ':' unescaped.
-	// Userinfo escaping keeps usernames such as "9008888:reader" intact.
+	// Userinfo escaping keeps bastion usernames such as 9008888:reader intact
+	// without changing their authentication semantics.
 	ret := fmt.Sprintf(
 		"oracle://%s@%s/%s",
 		url.UserPassword(user, password).String(),
@@ -1646,7 +1611,7 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 		if !session.rows.Next() {
 			return result, session.rows.Err()
 		}
-		row, err := scanRow(session.rows, len(session.columns))
+		row, err := scanRow(session.rows, len(session.columns), session.columnTypes)
 		if err != nil {
 			return queryPageResult{}, err
 		}
@@ -1658,7 +1623,7 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 		return result, nil
 	}
 	if session.rows.Next() {
-		row, err := scanRow(session.rows, len(session.columns))
+		row, err := scanRow(session.rows, len(session.columns), session.columnTypes)
 		if err != nil {
 			return queryPageResult{}, err
 		}
@@ -1708,13 +1673,14 @@ func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error)
 	if err != nil {
 		return queryResult{}, err
 	}
-	result := queryResult{Columns: columns, ColumnTypes: columnTypeNames(rows), Rows: [][]any{}}
+	columnTypes := columnTypeNames(rows)
+	result := queryResult{Columns: columns, ColumnTypes: columnTypes, Rows: [][]any{}}
 	for rows.Next() {
 		if len(result.Rows) >= maxRows {
 			result.Truncated = true
 			break
 		}
-		values, err := scanRow(rows, len(columns))
+		values, err := scanRow(rows, len(columns), columnTypes)
 		if err != nil {
 			return queryResult{}, err
 		}
@@ -1723,7 +1689,7 @@ func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error)
 	return result, rows.Err()
 }
 
-func scanRow(rows *sql.Rows, columnCount int) ([]any, error) {
+func scanRow(rows *sql.Rows, columnCount int, columnTypes []string) ([]any, error) {
 	values := make([]any, columnCount)
 	scanTargets := make([]any, columnCount)
 	for i := range values {
@@ -1733,9 +1699,16 @@ func scanRow(rows *sql.Rows, columnCount int) ([]any, error) {
 		return nil, err
 	}
 	for i, value := range values {
-		values[i] = normalizeValue(value)
+		values[i] = normalizeValue(value, columnTypeAt(columnTypes, i))
 	}
 	return values, nil
+}
+
+func columnTypeAt(columnTypes []string, index int) string {
+	if index < 0 || index >= len(columnTypes) {
+		return ""
+	}
+	return columnTypes[index]
 }
 
 func columnTypeNames(rows *sql.Rows) []string {
@@ -2545,11 +2518,15 @@ func quoteIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
-func normalizeValue(value any) any {
+func normalizeValue(value any, columnTypeName string) any {
 	switch v := value.(type) {
 	case nil:
 		return nil
 	case []byte:
+		// Oracle RAW-like columns are binary data; decoding them as text produces mojibake.
+		if isOracleBinaryColumnType(columnTypeName) {
+			return bytesToHex(v)
+		}
 		return string(v)
 	case time.Time:
 		return v.Format(time.RFC3339Nano)
@@ -2560,6 +2537,28 @@ func normalizeValue(value any) any {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+func isOracleBinaryColumnType(columnTypeName string) bool {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
+	switch normalized {
+	case "RAW", "VARRAW", "LONGRAW", "LONGVARRAW", "BLOB", "BFILE", "OCIBLOBLOCATOR", "OCIFILELOCATOR":
+		return true
+	default:
+		return false
+	}
+}
+
+func bytesToHex(bytes []byte) string {
+	const digits = "0123456789abcdef"
+	result := make([]byte, 2+len(bytes)*2)
+	result[0] = '0'
+	result[1] = 'x'
+	for i, b := range bytes {
+		result[2+i*2] = digits[b>>4]
+		result[3+i*2] = digits[b&0x0f]
+	}
+	return string(result)
 }
 
 func emptyIfNil[T any](values []T) []T {

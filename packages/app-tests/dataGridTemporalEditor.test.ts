@@ -21,7 +21,7 @@ test("detects explicit date time column types for grid editing", () => {
 test("formats existing temporal cell values for native inputs", () => {
   assert.equal(formatTemporalInputValue("2026-05-19 08:30:45", "date"), "2026-05-19");
   assert.equal(formatTemporalInputValue("2026-05-19 08:30:45", "datetime"), "2026-05-19T08:30:45");
-  assert.equal(formatTemporalInputValue("08:30:45.123456", "time"), "08:30:45");
+  assert.equal(formatTemporalInputValue("08:30:45.123456", "time"), "08:30:45.123456");
   assert.equal(formatTemporalInputValue(null, "datetime"), "");
 });
 

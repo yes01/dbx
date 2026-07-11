@@ -1,5 +1,6 @@
 import type { BinaryHexViewRow } from "@/lib/binaryHexViewer";
 import { buildBinaryHexViewRows } from "@/lib/binaryHexViewer";
+import { parseJsonPreservingLargeNumbers, safeJsonFormat } from "@/lib/safeJsonFormat";
 import type { RedisBlob, RedisCollectionPage, RedisHashItem, RedisListItem, RedisSetItem, RedisValue, RedisZsetItem } from "@/lib/api";
 import { parseJavaSerializedDetail, type RedisJavaSerializedDetail } from "@/lib/javaSerialized";
 
@@ -188,11 +189,11 @@ export function parseRedisJsonDetail(value: unknown): RedisJsonDetail | null {
   if (!trimmed) return null;
 
   try {
-    const parsed = JSON.parse(trimmed);
+    const parsed = parseJsonPreservingLargeNumbers(trimmed);
     if (!parsed || (typeof parsed !== "object" && !Array.isArray(parsed))) return null;
     return {
       rawText: value,
-      formattedText: JSON.stringify(parsed, null, 2),
+      formattedText: safeJsonFormat(trimmed, 2),
       value: parsed,
     };
   } catch {

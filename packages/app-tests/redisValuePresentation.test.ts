@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
+import { isLosslessJsonNumber } from "../../apps/desktop/src/lib/safeJsonFormat.ts";
 import { canEditRedisMemberDetail, clampRedisMemberDetailSheetWidth, formatRedisCommandResult, formatRedisMemberDetail, formatRedisStringValue, getRedisMemberSelectionKey, highlightRedisJsonDetail, parseRedisJsonDetail, sanitizeRedisDisplayText } from "../../apps/desktop/src/lib/redisValuePresentation.ts";
 
 test("formats JSON object strings for Redis member details", () => {
@@ -41,6 +42,15 @@ test("parses Redis JSON details only for object and array containers", () => {
   assert.equal(parseRedisJsonDetail('"plain json string"'), null);
   assert.equal(parseRedisJsonDetail("123"), null);
   assert.equal(parseRedisJsonDetail("plain redis value"), null);
+});
+
+test("preserves large Redis JSON integers in formatted and tree values", () => {
+  const detail = parseRedisJsonDetail('{"companyId":518400931654815740,"nested":[-9007199254740992]}');
+
+  assert.equal(detail?.formattedText, '{\n  "companyId": 518400931654815740,\n  "nested": [\n    -9007199254740992\n  ]\n}');
+  const value = detail?.value as { companyId?: unknown; nested?: unknown[] };
+  assert.equal(isLosslessJsonNumber(value.companyId) ? value.companyId.raw : null, "518400931654815740");
+  assert.equal(isLosslessJsonNumber(value.nested?.[0]) ? value.nested[0].raw : null, "-9007199254740992");
 });
 
 test("formats Redis command results with JSON strings expanded", () => {

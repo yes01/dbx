@@ -56,4 +56,19 @@ class OceanBaseOracleAgentTest {
             OceanBaseOracleAgent.buildUrl(params)
         );
     }
+
+    @Test
+    void convertsQueryTimeoutToOceanBaseSessionMicroseconds() {
+        Assertions.assertEquals("ALTER SESSION SET ob_query_timeout = 300000000", OceanBaseOracleAgent.queryTimeoutSql(300));
+        Assertions.assertEquals("ALTER SESSION SET ob_query_timeout = 0", OceanBaseOracleAgent.queryTimeoutSql(0));
+        Assertions.assertEquals(
+            "ALTER SESSION SET ob_query_timeout = 2147483647000000",
+            OceanBaseOracleAgent.queryTimeoutSql(Integer.MAX_VALUE)
+        );
+    }
+
+    @Test
+    void rejectsNegativeQueryTimeout() {
+        Assertions.assertThrows(IllegalArgumentException.class, () -> OceanBaseOracleAgent.queryTimeoutSql(-1));
+    }
 }

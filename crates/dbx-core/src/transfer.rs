@@ -394,6 +394,9 @@ fn postgres_column_type_sql(
     source_db: &DatabaseType,
     target_db: &DatabaseType,
 ) -> String {
+    if let Some(mapped_type) = clickhouse_temporal_column_type(column, source_db, target_db) {
+        return mapped_type;
+    }
     if is_postgres_compat_transfer(source_db, target_db) {
         let trimmed = column.data_type.trim();
         if !trimmed.is_empty() {
@@ -401,6 +404,43 @@ fn postgres_column_type_sql(
         }
     }
     map_column_type(&column.data_type, source_db, target_db)
+}
+
+fn clickhouse_temporal_column_type(
+    column: &db::ColumnInfo,
+    source_db: &DatabaseType,
+    target_db: &DatabaseType,
+) -> Option<String> {
+    if !matches!(target_db, DatabaseType::ClickHouse) || source_db == target_db {
+        return None;
+    }
+
+    let source_type = column.data_type.trim();
+    let lower = source_type.to_ascii_lowercase();
+    let base = lower.split(['(', ' ', '\t', '\n']).next().unwrap_or("").trim();
+    if !matches!(base, "datetime" | "timestamp" | "timestamptz") {
+        return None;
+    }
+
+    let scale = clickhouse_datetime64_scale(column);
+    // ClickHouse DateTime stores whole seconds, and older versions reject
+    // fractional timestamp strings such as Dameng's TIMESTAMP(6) output.
+    Some(format!("DateTime64({scale})"))
+}
+
+fn clickhouse_datetime64_scale(column: &db::ColumnInfo) -> u8 {
+    let scale = parse_temporal_type_scale(&column.data_type).or(column.numeric_scale).unwrap_or(6);
+    scale.clamp(0, 9) as u8
+}
+
+fn parse_temporal_type_scale(source_type: &str) -> Option<i32> {
+    let start = source_type.find('(')? + 1;
+    let rest = &source_type[start..];
+    let digits = rest.bytes().take_while(|byte| byte.is_ascii_digit()).collect::<Vec<_>>();
+    if digits.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(&digits).ok()?.parse::<i32>().ok()
 }
 
 fn postgres_default_clause(
@@ -1505,11 +1545,13 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
         "time" => "TIME".into(),
         "datetime" => match target_db {
             DatabaseType::Postgres => "TIMESTAMP".into(),
+            DatabaseType::ClickHouse => "DateTime64(6)".into(),
             _ => "DATETIME".into(),
         },
         "timestamp" | "timestamptz" | "timestamp with time zone" | "timestamp without time zone" => match target_db {
             DatabaseType::Mysql => "DATETIME".into(),
             DatabaseType::SqlServer => "DATETIME2".into(),
+            DatabaseType::ClickHouse => "DateTime64(6)".into(),
             _ => "TIMESTAMP".into(),
         },
         "longblob" => match target_db {
@@ -4970,6 +5012,29 @@ mod tests {
 
         assert!(ddl.contains("ENGINE = MergeTree() ORDER BY tuple()"));
         assert!(!ddl.contains("PRIMARY KEY"));
+    }
+
+    #[test]
+    fn clickhouse_transfer_maps_fractional_timestamp_to_datetime64() {
+        let cols = vec![db::ColumnInfo { numeric_scale: Some(6), ..test_column("created_at", "TIMESTAMP") }];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "events",
+            "SYSDBA",
+            "",
+            &DatabaseType::ClickHouse,
+            &DatabaseType::Dameng,
+            None,
+        );
+
+        assert!(ddl.contains("`created_at` DateTime64(6)"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn clickhouse_transfer_uses_datetime64_fallback_for_timestamp_types() {
+        assert_eq!(map_column_type("datetime", &DatabaseType::Dameng, &DatabaseType::ClickHouse), "DateTime64(6)");
+        assert_eq!(map_column_type("timestamp", &DatabaseType::Dameng, &DatabaseType::ClickHouse), "DateTime64(6)");
     }
 
     #[test]

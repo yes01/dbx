@@ -34,6 +34,7 @@ pub const PRESTOSQL_JDBC_DRIVER_CLASS: &str = "io.prestosql.jdbc.PrestoDriver";
 const DEFAULT_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const ACCESS_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
+const HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[cfg(feature = "duckdb-bundled")]
 mod duckdb_types {
@@ -1359,11 +1360,30 @@ impl AppState {
                 PoolKind::Mysql(pool, _) => {
                     let pool = pool.clone();
                     drop(connections);
-                    match db::mysql::get_conn_with_health_check(&pool).await {
-                        Ok(_) => false,
-                        Err(err) => {
+                    match tokio::time::timeout(HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT, pool.get_conn()).await {
+                        // Pool saturation means active work, not a dead connection. Removing this pool would
+                        // start a competing reconnect while foreground queries and metadata are still running.
+                        Err(_) => {
+                            log::debug!("MySQL connection pool '{pool_key}' is busy; skipping health probe");
+                            false
+                        }
+                        Ok(Err(err)) => {
                             log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
                             true
+                        }
+                        Ok(Ok(mut conn)) => {
+                            let timeout = crate::db::connection_timeout();
+                            match tokio::time::timeout(timeout, conn.ping()).await {
+                                Ok(Ok(())) => false,
+                                Ok(Err(err)) => {
+                                    log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
+                                    true
+                                }
+                                Err(_) => {
+                                    log::warn!("MySQL connection pool '{pool_key}' is stale: health check timed out");
+                                    true
+                                }
+                            }
                         }
                     }
                 }
@@ -1371,7 +1391,7 @@ impl AppState {
                     let pool = pool.clone();
                     drop(connections);
                     let timeout = crate::db::connection_timeout();
-                    match tokio::time::timeout(timeout, pool.get()).await {
+                    match tokio::time::timeout(HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT, pool.get()).await {
                         Ok(Ok(client)) => match tokio::time::timeout(timeout, client.simple_query("SELECT 1")).await {
                             Ok(Ok(_)) => false,
                             Ok(Err(err)) => {
@@ -1388,8 +1408,8 @@ impl AppState {
                             true
                         }
                         Err(_) => {
-                            log::warn!("PostgreSQL connection pool '{pool_key}' is stale: get connection timed out");
-                            true
+                            log::debug!("PostgreSQL connection pool '{pool_key}' is busy; skipping health probe");
+                            false
                         }
                     }
                 }
@@ -2667,7 +2687,7 @@ mod tests {
         agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
         metadata_connection_config, mysql_metadata_fallback_url, oceanbase_mysql_setup_queries,
         prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_h2_database_path, AppState, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
+        validate_h2_database_path, AppState, MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -2683,6 +2703,7 @@ mod tests {
     use crate::query;
     use crate::schema;
     use crate::storage::Storage;
+    use std::time::{Duration, Instant};
 
     fn mysql_config(database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
@@ -3162,6 +3183,28 @@ mod tests {
         let conns = state.connections.read().await;
         assert!(matches!(conns.get("conn"), Some(PoolKind::Sqlite(_))));
         assert_eq!(conns.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_MYSQL_URL"]
+    async fn live_mysql_health_check_keeps_saturated_pool() {
+        let url = std::env::var("DBX_TEST_MYSQL_URL").expect("DBX_TEST_MYSQL_URL is required");
+        let (state, dir) = test_app_state().await;
+        let config = mysql_config(Some("testdb"));
+        let pool = db::mysql::connect_bare_with_pool_limit(&url, Duration::from_secs(5), 1).await.unwrap();
+        state
+            .insert_connection_pool("conn".to_string(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal), &config)
+            .await;
+        let held_connection = pool.get_conn().await.unwrap();
+
+        let started = Instant::now();
+        state.check_connection_health("conn").await.unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(state.connections.read().await.contains_key("conn"));
+        drop(held_connection);
+        state.remove_connection_pools_detached("conn").await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

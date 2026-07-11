@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
@@ -6,8 +8,21 @@ use crate::sql_dialect::{
     firebird_rows_clause, pagination_strategy, quote_table_identifier, PaginationContext, TablePaginationStrategy,
 };
 use sqlparser::ast::{Expr, GroupByExpr, SelectItem, SetExpr, Statement};
-use sqlparser::dialect::GenericDialect;
+use sqlparser::dialect::{GenericDialect, MsSqlDialect};
 use sqlparser::parser::Parser;
+
+fn skip_sql_whitespace(sql: &str, mut index: usize) -> usize {
+    while index < sql.len() {
+        let Some(ch) = sql[index..].chars().next() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    index
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,6 +230,9 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
     if options.database_type == Some(DatabaseType::Elasticsearch) {
         return err("unsupported");
     }
+    if options.database_type == Some(DatabaseType::SqlServer) && !sql_server_derived_table_projection_safe(&statement) {
+        return err("unsupported");
+    }
 
     let alias = quote_table_identifier(options.database_type, "dbx_count");
     let wrapped_sql = if options.database_type == Some(DatabaseType::SqlServer) {
@@ -418,7 +436,7 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
     }
 
     let statement_without_order = order_by_index.map(|index| statement[..index].trim_end()).unwrap_or(statement);
-    if !sql_server_row_number_pagination_safe(statement_without_order) {
+    if !sql_server_derived_table_projection_safe(statement_without_order) {
         return None;
     }
 
@@ -431,8 +449,8 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
     ))
 }
 
-fn sql_server_row_number_pagination_safe(statement: &str) -> bool {
-    let dialect = GenericDialect {};
+fn sql_server_derived_table_projection_safe(statement: &str) -> bool {
+    let dialect = MsSqlDialect {};
     let Ok(statements) = Parser::parse_sql(&dialect, statement) else {
         return false;
     };
@@ -443,15 +461,33 @@ fn sql_server_row_number_pagination_safe(statement: &str) -> bool {
         return false;
     };
 
-    select.projection.iter().all(|item| match item {
-        SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => false,
-        SelectItem::UnnamedExpr(expr) => sql_server_derived_projection_has_name(expr),
-        SelectItem::ExprWithAlias { .. } | SelectItem::ExprWithAliases { .. } => true,
+    if matches!(select.projection.as_slice(), [SelectItem::Wildcard(_)]) {
+        return select.from.len() == 1 && select.from[0].joins.is_empty();
+    }
+
+    let mut column_names = HashSet::with_capacity(select.projection.len());
+    select.projection.iter().all(|item| {
+        let Some(name) = sql_server_derived_projection_name(item) else {
+            return false;
+        };
+        column_names.insert(name.to_ascii_lowercase())
     })
 }
 
-fn sql_server_derived_projection_has_name(expr: &Expr) -> bool {
-    matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_))
+fn sql_server_derived_projection_name(item: &SelectItem) -> Option<&str> {
+    match item {
+        SelectItem::ExprWithAlias { alias, .. } => Some(&alias.value),
+        SelectItem::UnnamedExpr(Expr::Identifier(identifier)) if !identifier.value.starts_with('@') => {
+            Some(&identifier.value)
+        }
+        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(identifiers)) => {
+            identifiers.last().map(|identifier| identifier.value.as_str())
+        }
+        SelectItem::UnnamedExpr(_)
+        | SelectItem::ExprWithAliases { .. }
+        | SelectItem::QualifiedWildcard(_, _)
+        | SelectItem::Wildcard(_) => None,
+    }
 }
 
 fn add_sql_server_top(sql: &str, limit: usize) -> String {
@@ -546,6 +582,33 @@ fn add_questdb_limit(statement: &str, limit: usize, offset: usize) -> String {
 
 fn has_top_level_limit(sql: &str) -> bool {
     top_level_sql_tokens(sql).iter().any(|token| token.text == "LIMIT")
+}
+
+fn top_level_limit_row_count(sql: &str) -> Option<usize> {
+    let token = top_level_sql_tokens(sql).into_iter().find(|token| token.text == "LIMIT")?;
+    parse_standard_limit_row_count(sql, token.start + token.text.len())
+}
+
+fn parse_standard_limit_row_count(sql: &str, start: usize) -> Option<usize> {
+    let mut cursor = skip_sql_whitespace(sql, start);
+    let first = parse_usize_literal(sql, &mut cursor)?;
+    cursor = skip_sql_whitespace(sql, cursor);
+    if sql.get(cursor..)?.starts_with(',') {
+        cursor = skip_sql_whitespace(sql, cursor + 1);
+        return parse_usize_literal(sql, &mut cursor);
+    }
+    Some(first)
+}
+
+fn parse_usize_literal(sql: &str, cursor: &mut usize) -> Option<usize> {
+    let start = *cursor;
+    while *cursor < sql.len() && sql.as_bytes()[*cursor].is_ascii_digit() {
+        *cursor += 1;
+    }
+    if *cursor == start {
+        return None;
+    }
+    sql[start..*cursor].parse().ok()
 }
 
 fn has_top_level_informix_row_limit(sql: &str) -> bool {
@@ -659,7 +722,9 @@ fn add_standard_limit(
             // ordering across pages in distributed databases like Doris.
             return add_outer_standard_limit(statement, database_type, limit, offset, &order_sql);
         }
-        if offset > 0 {
+        // A user/top-level LIMIT can still be wider than the selected grid page size.
+        // Wrap it so the first page respects the UI page limit while preserving the user's cap.
+        if offset > 0 || top_level_limit_row_count(statement).is_some_and(|row_count| row_count > limit) {
             return add_outer_standard_limit(statement, database_type, limit, offset, "");
         }
         return format!("{statement};");
@@ -1465,6 +1530,36 @@ WHERE u.id = picked.id;
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT id FROM users LIMIT 20;");
+    }
+
+    #[test]
+    fn mysql_pagination_wraps_wide_existing_limit_on_first_page() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM dy_promotion_item WHERE create_time < '2026-06-01' LIMIT 10000;".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 500,
+            offset: 0,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT * FROM dy_promotion_item WHERE create_time < '2026-06-01' LIMIT 10000) `dbx_page` LIMIT 500 OFFSET 0;"
+        );
+    }
+
+    #[test]
+    fn mysql_pagination_wraps_comma_limit_row_count_on_first_page() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT * FROM users LIMIT 20, 10000;".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            limit: 500,
+            offset: 0,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT * FROM users LIMIT 20, 10000) `dbx_page` LIMIT 500 OFFSET 0;"
+        );
     }
 
     #[test]
