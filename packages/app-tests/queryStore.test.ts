@@ -391,7 +391,10 @@ test("removing the active result run clears output when remaining caches are una
   assert.equal(tab.activeResultRunId, undefined);
   assert.equal(tab.result, undefined);
   assert.equal(tab.results, undefined);
-  assert.deepEqual(tab.resultRuns?.map((run) => run.id), ["run-2"]);
+  assert.deepEqual(
+    tab.resultRuns?.map((run) => run.id),
+    ["run-2"],
+  );
 });
 
 test("removed result runs are excluded from result archives", async () => {
@@ -1577,6 +1580,52 @@ test("data tab default pagination is independent from query result page size", a
     assert.equal(executeBody.fetchSize, 100);
     assert.equal(tab.resultPageLimit, 100);
     assert.equal(tab.resultPageOffset, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("reloading an evicted data tab preserves its saved pagination", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let executeBody: any;
+
+  settingsStore.updateEditorSettings({ pageSize: 1000 });
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  const tabId = store.createTab("conn-1", "db", "users", "data", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  tab.sql = 'SELECT * FROM "public"."users" LIMIT 50 OFFSET 50;';
+  tab.lastExecutedSql = tab.sql;
+  tab.resultPageLimit = 50;
+  tab.resultPageOffset = 50;
+  tab.resultEvicted = true;
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      executeBody = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify([{ columns: ["id"], rows: [[51]], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.reloadEvictedTab(tabId);
+
+    assert.equal(executeBody.maxRows, 50);
+    assert.equal(executeBody.fetchSize, 50);
+    assert.equal(tab.resultPageLimit, 50);
+    assert.equal(tab.resultPageOffset, 50);
+    assert.equal(tab.resultEvicted, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

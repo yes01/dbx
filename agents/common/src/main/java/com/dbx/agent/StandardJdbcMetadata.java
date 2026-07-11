@@ -90,6 +90,31 @@ public final class StandardJdbcMetadata {
         return result;
     }
 
+    public List<ObjectInfo> listObjects(
+        Connection conn,
+        JdbcAgentProfile profile,
+        String configuredDatabase,
+        String schema,
+        MetadataListConstraints constraints
+    ) {
+        return unchecked(() -> {
+            MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+            List<ObjectInfo> result = new ArrayList<>(
+                listObjects(listTables(conn, profile, configuredDatabase, schema), schema)
+            );
+            DatabaseMetaData meta = conn.getMetaData();
+            appendRoutines(result, meta, null, blankToNull(schema), schema);
+            if (!containsRoutine(result)
+                && profile.getCatalogFallbackEnabled()
+                && configuredDatabase != null
+                && !configuredDatabase.trim().isEmpty()) {
+                appendRoutines(result, meta, configuredDatabase, blankToNull(schema), schema);
+            }
+            result.sort(Comparator.comparing(ObjectInfo::getName));
+            return normalized.filterObjects(result);
+        });
+    }
+
     public CompletionAssistantResponse completionAssistantSearch(
         Connection conn,
         JdbcAgentProfile profile,
@@ -522,6 +547,47 @@ public final class StandardJdbcMetadata {
             return "TABLE";
         }
         return type;
+    }
+
+    private static void appendRoutines(
+        List<ObjectInfo> result,
+        DatabaseMetaData meta,
+        String catalog,
+        String schemaPattern,
+        String schema
+    ) {
+        Set<String> procedureNames = new LinkedHashSet<>();
+        try (ResultSet rs = meta.getProcedures(catalog, schemaPattern, "%")) {
+            while (rs.next()) {
+                String name = rs.getString("PROCEDURE_NAME");
+                if (name != null && !name.trim().isEmpty()) {
+                    procedureNames.add(name);
+                    result.add(new ObjectInfo(name, "PROCEDURE", schema, rs.getString("REMARKS")));
+                }
+            }
+        } catch (Exception | AbstractMethodError ignored) {
+            // Some JDBC drivers don't implement routine metadata.
+        }
+        try (ResultSet rs = meta.getFunctions(catalog, schemaPattern, "%")) {
+            while (rs.next()) {
+                String name = rs.getString("FUNCTION_NAME");
+                if (name != null && !name.trim().isEmpty() && !procedureNames.contains(name)) {
+                    result.add(new ObjectInfo(name, "FUNCTION", schema, rs.getString("REMARKS")));
+                }
+            }
+        } catch (Exception | AbstractMethodError ignored) {
+            // Some JDBC drivers don't implement function metadata separately.
+        }
+    }
+
+    private static boolean containsRoutine(List<ObjectInfo> objects) {
+        for (ObjectInfo object : objects) {
+            if ("PROCEDURE".equalsIgnoreCase(object.getObject_type())
+                || "FUNCTION".equalsIgnoreCase(object.getObject_type())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static Integer intOrNull(ResultSet rs, String column) throws Exception {

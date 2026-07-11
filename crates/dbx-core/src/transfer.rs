@@ -233,6 +233,14 @@ fn quote_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn postgres_schema_exists_sql(schema: &str) -> String {
+    format!("SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = {} LIMIT 1", quote_string_literal(schema))
+}
+
+fn query_result_has_rows(result: &db::QueryResult) -> bool {
+    !result.rows.is_empty()
+}
+
 fn is_simple_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -4146,13 +4154,19 @@ where
     }
 
     if !request.target_schema.trim().is_empty() {
-        let create_schema_sql = format!(
-            "CREATE SCHEMA IF NOT EXISTS {}",
-            quote_identifier(&request.target_schema, &DatabaseType::Postgres)
-        );
-        execute_on_pool(state, target_pool_key, &create_schema_sql)
-            .await
-            .map_err(|e| format!("Failed to ensure PostgreSQL target schema exists: {e}"))?;
+        let schema_exists =
+            execute_on_pool(state, target_pool_key, &postgres_schema_exists_sql(&request.target_schema))
+                .await
+                .map_err(|e| format!("Failed to check PostgreSQL target schema: {e}"))?;
+        if !query_result_has_rows(&schema_exists) {
+            // CREATE SCHEMA requires database-level CREATE privilege even with
+            // IF NOT EXISTS, so only issue it after confirming the schema is absent.
+            let create_schema_sql =
+                format!("CREATE SCHEMA {}", quote_identifier(&request.target_schema, &DatabaseType::Postgres));
+            execute_on_pool(state, target_pool_key, &create_schema_sql)
+                .await
+                .map_err(|e| format!("Failed to create PostgreSQL target schema: {e}"))?;
+        }
     }
 
     let extensions =
@@ -4595,6 +4609,20 @@ mod tests {
             session_id: None,
             has_more: false,
         }
+    }
+
+    #[test]
+    fn postgres_schema_exists_query_escapes_schema_name() {
+        assert_eq!(
+            postgres_schema_exists_sql("team's data"),
+            "SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'team''s data' LIMIT 1"
+        );
+    }
+
+    #[test]
+    fn postgres_schema_exists_depends_on_returned_rows() {
+        assert!(!query_result_has_rows(&test_query_result(Vec::new())));
+        assert!(query_result_has_rows(&test_query_result(vec![vec![serde_json::json!(1)]])));
     }
 
     fn test_transfer_request(tables: Vec<&str>) -> TransferRequest {

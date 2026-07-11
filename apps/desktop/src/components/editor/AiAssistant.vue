@@ -3,7 +3,37 @@ import { computed, nextTick, onMounted, onUnmounted, ref, type Component } from 
 import { uuid } from "@/lib/utils";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { ArrowUp, ArrowRightLeft, AlertTriangle, Bot, Check, ChevronRight, CircleSlash, Copy, Database, GitBranch, HelpCircle, History, Loader2, MessageSquarePlus, Pencil, Replace, Server, ShieldCheck, Table2, Play, Square, Trash2, Terminal, Wand2, Wrench, X, Zap, TestTube } from "@lucide/vue";
+import {
+  ArrowUp,
+  ArrowRightLeft,
+  AlertTriangle,
+  Bot,
+  Check,
+  ChevronRight,
+  CircleSlash,
+  Copy,
+  Database,
+  FlaskConical,
+  GitBranch,
+  HelpCircle,
+  History,
+  Loader2,
+  MessageSquarePlus,
+  Pencil,
+  Replace,
+  Server,
+  ShieldCheck,
+  Table2,
+  Play,
+  Square,
+  Trash2,
+  Terminal,
+  Wand2,
+  Wrench,
+  X,
+  Zap,
+  TestTube,
+} from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -64,6 +94,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   replaceSql: [sql: string];
   executeSql: [sql: string];
+  tempRunSql: [sql: string];
   requestAutoExecuteSql: [sql: string];
   openExplainPlan: [sql: string];
   close: [];
@@ -932,8 +963,11 @@ function applySql(code: string) {
 }
 
 function executeSql(code: string) {
-  emit("replaceSql", code);
   emit("executeSql", code);
+}
+
+function tempRunSql(code: string) {
+  emit("tempRunSql", code);
 }
 
 const copiedIndex = ref("");
@@ -1268,6 +1302,9 @@ const messageRenderer = computed(() => {
                     <span>{{ seg.lang }}</span>
                     <span class="flex-1" />
                     <div class="flex items-center gap-1.5">
+                      <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
+                        <FlaskConical class="h-3.5 w-3.5" />
+                      </button>
                       <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
                         <Play class="h-3.5 w-3.5" />
                       </button>

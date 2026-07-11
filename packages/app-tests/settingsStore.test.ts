@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createPinia, setActivePinia } from "pinia";
 import { DEFAULT_SQL_FORMATTER_SETTINGS } from "../../apps/desktop/src/lib/sqlFormatterConfig.ts";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib/tableColumnTemplates.ts";
+import { tableOpenPageLimit } from "../../apps/desktop/src/lib/tableOpenPageLimit.ts";
 import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 
 const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
@@ -44,6 +45,10 @@ test("normalizes saved query result page size", () => {
   assert.equal(normalizeEditorSettings({ pageSize: 5000 }).pageSize, 5000);
   assert.equal(normalizeEditorSettings({ pageSize: 200000 }).pageSize, 100000);
   assert.equal(normalizeEditorSettings({ pageSize: 0 }).pageSize, 100);
+});
+
+test("uses dedicated default row limit for table opens", () => {
+  assert.equal(tableOpenPageLimit(), 100);
 });
 
 test("defaults export batch size to 2000 rows", () => {

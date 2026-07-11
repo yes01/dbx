@@ -3015,35 +3015,58 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
 }
 
 pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
-    let sql = format!(
-        "SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, \
-         kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME, \
-         rc.UPDATE_RULE, rc.DELETE_RULE \
-         FROM information_schema.KEY_COLUMN_USAGE kcu \
-         LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
-           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA \
-          AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME \
-          AND rc.TABLE_NAME = kcu.TABLE_NAME \
-         WHERE kcu.TABLE_SCHEMA = {} AND kcu.TABLE_NAME = {} \
-         AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
-         ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
+    let column_sql = format!(
+        "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, \
+         REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+         FROM information_schema.KEY_COLUMN_USAGE \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+         AND REFERENCED_TABLE_NAME IS NOT NULL \
+         ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION",
         quote_value(database),
         quote_value(table),
     );
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let column_result = conn.query_iter(&column_sql).await.map_err(|e| e.to_string())?;
+    let column_rows: Vec<mysql_async::Row> = column_result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    if column_rows.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    Ok(rows
+    // MySQL 5.7 materializes information_schema tables without normal indexes.
+    // Avoid joining two metadata tables because the join can scan the entire catalog.
+    let rule_sql = format!(
+        "SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE \
+         FROM information_schema.REFERENTIAL_CONSTRAINTS \
+         WHERE CONSTRAINT_SCHEMA = {} AND TABLE_NAME = {}",
+        quote_value(database),
+        quote_value(table),
+    );
+    let rule_result = conn.query_iter(&rule_sql).await.map_err(|e| e.to_string())?;
+    let rule_rows: Vec<mysql_async::Row> = rule_result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let rules = rule_rows
         .iter()
-        .map(|row| ForeignKeyInfo {
-            name: get_str_by_name(row, "CONSTRAINT_NAME"),
-            column: get_str_by_name(row, "COLUMN_NAME"),
-            ref_schema: Some(get_str_by_name(row, "REFERENCED_TABLE_SCHEMA")),
-            ref_table: get_str_by_name(row, "REFERENCED_TABLE_NAME"),
-            ref_column: get_str_by_name(row, "REFERENCED_COLUMN_NAME"),
-            on_update: Some(get_str_by_name(row, "UPDATE_RULE")).filter(|value| !value.is_empty()),
-            on_delete: Some(get_str_by_name(row, "DELETE_RULE")).filter(|value| !value.is_empty()),
+        .map(|row| {
+            (
+                get_str_by_name(row, "CONSTRAINT_NAME"),
+                (get_str_by_name(row, "UPDATE_RULE"), get_str_by_name(row, "DELETE_RULE")),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    Ok(column_rows
+        .iter()
+        .map(|row| {
+            let name = get_str_by_name(row, "CONSTRAINT_NAME");
+            let (on_update, on_delete) = rules.get(&name).cloned().unwrap_or_default();
+            ForeignKeyInfo {
+                name,
+                column: get_str_by_name(row, "COLUMN_NAME"),
+                ref_schema: Some(get_str_by_name(row, "REFERENCED_TABLE_SCHEMA")),
+                ref_table: get_str_by_name(row, "REFERENCED_TABLE_NAME"),
+                ref_column: get_str_by_name(row, "REFERENCED_COLUMN_NAME"),
+                on_update: Some(on_update).filter(|value| !value.is_empty()),
+                on_delete: Some(on_delete).filter(|value| !value.is_empty()),
+            }
         })
         .collect())
 }

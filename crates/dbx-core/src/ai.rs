@@ -1083,7 +1083,9 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
             res.bytes_stream()
         }
         AiProvider::Gemini => {
-            let ep = resolve_endpoint(config);
+            // Gemini only returns SSE from streamGenerateContent; generateContent
+            // returns one JSON document even when alt=sse is supplied.
+            let ep = resolve_gemini_stream_endpoint(config);
             let res = client
                 .post(&ep)
                 .header(CONTENT_TYPE, "application/json")
@@ -2391,11 +2393,11 @@ mod tests {
         add_temperature_if_supported_for_config, build_ai_http_client, build_responses_input_with_tools,
         claude_headers, claude_system_prompt, drain_next_stream_line, emit_responses_function_call_item, gemini_text,
         is_kimi_model, openai_response_text, openai_stream_reasoning, openai_stream_text, parse_model_list_response,
-        resolve_endpoint, resolve_model_list_endpoint, responses_function_tool, responses_max_output_tokens,
-        responses_stream_text, responses_text, responses_token_usage, stream_data_payload, supports_temperature,
-        temperature_value, validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiMessage, AiModelInfo, AiProvider,
-        AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION,
-        CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_list_endpoint, responses_function_tool,
+        responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage, stream_data_payload,
+        supports_temperature, temperature_value, validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiMessage,
+        AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef,
+        AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
 
     #[test]
@@ -2523,6 +2525,10 @@ mod tests {
         assert_eq!(
             resolve_endpoint(&gemini),
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent"
+        );
+        assert_eq!(
+            resolve_gemini_stream_endpoint(&gemini),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:streamGenerateContent"
         );
 
         let ollama = AiConfig {

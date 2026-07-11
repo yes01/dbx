@@ -1143,8 +1143,10 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               </div>
             </PopoverContent>
           </Popover>
-          <Button v-if="activeTab.tableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" @click="dataGridRef?.toggleDdl()"><TableProperties class="h-3.5 w-3.5" />{{ t("grid.tableInfo") }}</Button>
-          <DropdownMenu v-if="activeTab.tableMeta && activeTab.connectionId">
+          <Button v-if="activeTab.result && activeTab.tableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" @click="dataGridRef?.toggleDdl()"
+            ><TableProperties class="h-3.5 w-3.5" />{{ t("grid.tableInfo") }}</Button
+          >
+          <DropdownMenu v-if="activeTab.result && activeTab.tableMeta && activeTab.connectionId">
             <DropdownMenuTrigger as-child>
               <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :title="t('tableToolbox.title')"><Toolbox class="h-3.5 w-3.5" />{{ t("tableToolbox.title") }}</Button>
             </DropdownMenuTrigger>
