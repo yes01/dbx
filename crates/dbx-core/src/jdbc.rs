@@ -7,9 +7,6 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-const JDBC_PLUGIN_DOWNLOAD_URL: &str =
-    "https://github.com/yes01/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip";
-const JDBC_PLUGIN_R2_PATH: &str = "releases/latest/dbx-jdbc-plugin-latest.zip";
 pub const PRESTOSQL_JDBC_DRIVER_VERSION: &str = "350";
 pub const PRESTOSQL_JDBC_DRIVER_COORDINATE: &str = "io.prestosql:presto-jdbc:350";
 pub const PRESTOSQL_JDBC_DRIVER_REPOSITORY: &str = "https://repo.maven.apache.org/maven2/";
@@ -367,15 +364,20 @@ async fn latest_jdbc_plugin() -> Option<JdbcPluginLatest> {
 }
 
 async fn download_jdbc_plugin_zip_with_progress(progress: &impl Fn(AgentProgressEvent)) -> Result<Vec<u8>, String> {
+    let latest = fetch_latest_release()
+        .await
+        .map_err(|err| format!("Failed to resolve the latest JDBC plugin release: {err}"))?
+        .jdbc_plugin
+        .ok_or_else(|| "The latest release does not include JDBC plugin metadata.".to_string())?;
+    let r2_path = jdbc_plugin_r2_path(&latest.version);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|err| err.to_string())?;
 
-    let mut resp =
-        crate::race_download(&client, JDBC_PLUGIN_DOWNLOAD_URL, JDBC_PLUGIN_R2_PATH, "dbx-jdbc-plugin-installer")
-            .await
-            .map_err(|err| format!("Failed to download JDBC plugin: {err}"))?;
+    let mut resp = crate::race_download(&client, &latest.url, &r2_path, "dbx-jdbc-plugin-installer")
+        .await
+        .map_err(|err| format!("Failed to download JDBC plugin: {err}"))?;
 
     let total = resp.content_length().unwrap_or(0);
     progress(AgentProgressEvent::transfer("jdbc-plugin", 0, total));
@@ -390,6 +392,10 @@ async fn download_jdbc_plugin_zip_with_progress(progress: &impl Fn(AgentProgress
         progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, downloaded));
     }
     Ok(bytes)
+}
+
+fn jdbc_plugin_r2_path(version: &str) -> String {
+    format!("releases/jdbc/{version}/dbx-jdbc-plugin-{version}.zip")
 }
 
 fn install_jdbc_plugin_zip(bytes: &[u8], plugin_dir: &Path) -> Result<(), String> {
@@ -772,6 +778,11 @@ pub fn unique_target_path(dir: &Path, file_name: &str) -> PathBuf {
 mod tests {
     use super::*;
     use crate::plugins::PluginRuntimeEnv;
+
+    #[test]
+    fn jdbc_plugin_r2_asset_is_versioned() {
+        assert_eq!(jdbc_plugin_r2_path("0.1.19"), "releases/jdbc/0.1.19/dbx-jdbc-plugin-0.1.19.zip");
+    }
 
     #[test]
     fn maven_bundle_install_lists_nested_jars() {

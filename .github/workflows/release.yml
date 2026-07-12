@@ -8,17 +8,121 @@ on:
       tag:
         description: 'Release tag to build, for example v0.5.29'
         required: true
+      prerelease:
+        description: 'Publish as a prerelease when creating a new release'
+        required: false
+        type: boolean
+        default: false
+      force_rebuild:
+        description: 'Rebuild a release that already has latest.json'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
   cancel-in-progress: false
 
 jobs:
+  prepare-release:
+    name: Prepare draft release
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.prepare.outputs.tag }}
+      sha: ${{ steps.prepare.outputs.sha }}
+      prerelease: ${{ steps.prepare.outputs.prerelease }}
+      skip: ${{ steps.prepare.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Validate tag, source checks, and release state
+        id: prepare
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_PRERELEASE: ${{ github.event.inputs.prerelease }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$RELEASE_TAG"
+          fi
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag '$TAG' must start with v and a numeric version, for example v0.5.29."
+            exit 1
+          fi
+
+          TAG_SHA="$(git rev-list -n 1 "$TAG")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ -z "$TAG_SHA" ] || [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::Checked out commit '$HEAD_SHA' does not match release tag '$TAG' ('$TAG_SHA')."
+            exit 1
+          fi
+
+          RELEASE_JSON="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets 2>/dev/null || true)"
+          if [ -n "$RELEASE_JSON" ]; then
+            HAS_MANIFEST="$(printf '%s' "$RELEASE_JSON" | jq -r 'any(.assets[]?; .name == "latest.json")')"
+            PRERELEASE="$(printf '%s' "$RELEASE_JSON" | jq -r '.isPrerelease')"
+          else
+            HAS_MANIFEST="false"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              PRERELEASE="${INPUT_PRERELEASE:-false}"
+            else
+              PRERELEASE="${{ github.event.release.prerelease }}"
+            fi
+          fi
+
+          if [ "$HAS_MANIFEST" = "true" ] && [ "$FORCE_REBUILD" != "true" ]; then
+            echo "::notice::Release $TAG already contains latest.json; skipping duplicate published event."
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
+            echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          missing_checks=()
+          for workflow in ci.yml desktop-build.yml; do
+            successful_run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --commit "$TAG_SHA" --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            if [ -z "$successful_run" ]; then
+              missing_checks+=("$workflow")
+            fi
+          done
+
+          if [ "${#missing_checks[@]}" -gt 0 ]; then
+            if [ -n "$RELEASE_JSON" ]; then
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true --prerelease="$PRERELEASE"
+            fi
+            echo "::error::Release source $TAG_SHA is missing successful checks: ${missing_checks[*]}."
+            exit 1
+          fi
+
+          if [ -z "$RELEASE_JSON" ]; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "DBX $TAG"
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true --prerelease="$PRERELEASE"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.label }}
+    needs: prepare-release
+    if: needs.prepare-release.outputs.skip != 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -36,35 +140,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
+          ref: ${{ needs.prepare-release.outputs.tag }}
           fetch-depth: 0
-
-      - name: Resolve release tag
-        id: release-tag
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          elif [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Release tag '$TAG' must start with v and a numeric version, for example v0.5.29."
-            exit 1
-          fi
-
-          TAG_SHA="$(git rev-list -n 1 "$TAG")"
-          HEAD_SHA="$(git rev-parse HEAD)"
-          if [ -z "$TAG_SHA" ] || [ "$TAG_SHA" != "$HEAD_SHA" ]; then
-            echo "::error::Checked out commit '$HEAD_SHA' does not match release tag '$TAG' ('$TAG_SHA')."
-            exit 1
-          fi
-
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -79,7 +156,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Set app version from release tag
-        run: node scripts/set-app-version.mjs "${{ steps.release-tag.outputs.tag }}"
+        run: node scripts/set-app-version.mjs "${{ needs.prepare-release.outputs.tag }}"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -98,7 +175,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release-tag.outputs.tag }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
           RELEASE_BODY: ${{ github.event.release.body }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -120,12 +197,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ steps.release-tag.outputs.tag }}
-          releaseName: 'DBX ${{ steps.release-tag.outputs.tag }}'
+          tagName: ${{ needs.prepare-release.outputs.tag }}
+          releaseName: 'DBX ${{ needs.prepare-release.outputs.tag }}'
           releaseBody: ${{ steps.release-notes.outputs.body }}
-          releaseCommitish: ${{ steps.release-tag.outputs.sha }}
-          releaseDraft: false
-          prerelease: ${{ github.event_name == 'release' && github.event.release.prerelease || false }}
+          releaseCommitish: ${{ needs.prepare-release.outputs.sha }}
+          releaseDraft: true
+          prerelease: ${{ needs.prepare-release.outputs.prerelease }}
           args: ${{ matrix.build_args }}
 
       - name: Build macOS DMG
@@ -133,7 +210,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release-tag.outputs.tag }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           VERSION="${TAG#v}"
           DMG_PATH="target/${{ matrix.target }}/release/bundle/dmg/TestTeam.DBX_${VERSION}_aarch64.dmg"
@@ -147,7 +224,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release-tag.outputs.tag }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           $version = "${env:TAG}".TrimStart("v")
           $portableRoot = "portable"
@@ -172,38 +249,13 @@ jobs:
   finalize-updater-manifest:
     name: Finalize updater manifest
     runs-on: ubuntu-22.04
-    needs: build
+    needs: [prepare-release, build]
+    if: needs.prepare-release.outputs.skip != 'true'
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name }}
+          ref: ${{ needs.prepare-release.outputs.tag }}
           fetch-depth: 0
-
-      - name: Resolve release tag
-        id: release-tag
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          elif [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Release tag '$TAG' must start with v and a numeric version, for example v0.5.29."
-            exit 1
-          fi
-
-          TAG_SHA="$(git rev-list -n 1 "$TAG")"
-          HEAD_SHA="$(git rev-parse HEAD)"
-          if [ -z "$TAG_SHA" ] || [ "$TAG_SHA" != "$HEAD_SHA" ]; then
-            echo "::error::Checked out commit '$HEAD_SHA' does not match release tag '$TAG' ('$TAG_SHA')."
-            exit 1
-          fi
-
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -226,7 +278,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release-tag.outputs.tag }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
           JDBC_VERSION: ${{ steps.jdbc-plugin.outputs.version }}
         run: |
           gh release upload "$TAG" \
@@ -235,12 +287,60 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
 
+      - name: Sync JDBC plugin assets to R2
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          JDBC_VERSION: ${{ steps.jdbc-plugin.outputs.version }}
+        run: |
+          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_BUCKET_NAME" ] || [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+            echo "::error::R2 release secrets are required to keep JDBC download mirrors consistent."
+            exit 1
+          fi
+
+          pip install awscli --quiet
+          VERSIONED_ASSET="plugins/jdbc/dist/dbx-jdbc-plugin-${JDBC_VERSION}.zip"
+          LATEST_ASSET="plugins/jdbc/dist/dbx-jdbc-plugin-latest.zip"
+          R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          VERSIONED_KEY="releases/jdbc/${JDBC_VERSION}/dbx-jdbc-plugin-${JDBC_VERSION}.zip"
+          LATEST_KEY="releases/latest/dbx-jdbc-plugin-latest.zip"
+
+          aws s3 cp "$VERSIONED_ASSET" "s3://${R2_BUCKET_NAME}/${VERSIONED_KEY}" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/zip
+          aws s3 cp "$LATEST_ASSET" "s3://${R2_BUCKET_NAME}/${LATEST_KEY}" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/zip \
+            --cache-control 'no-cache'
+
+          LOCAL_SHA="$(sha256sum "$VERSIONED_ASSET" | cut -d ' ' -f 1)"
+          verify_mirror() {
+            local url="$1"
+            local remote_sha=""
+            for attempt in $(seq 1 12); do
+              remote_sha="$(curl --fail --silent --show-error --location "$url" | sha256sum | cut -d ' ' -f 1)" || true
+              if [ "$remote_sha" = "$LOCAL_SHA" ]; then
+                echo "Verified $url ($LOCAL_SHA)"
+                return 0
+              fi
+              echo "Mirror verification attempt $attempt failed for $url: expected $LOCAL_SHA, got ${remote_sha:-download-error}"
+              sleep 5
+            done
+            return 1
+          }
+
+          verify_mirror "https://dl.dbxio.com/${VERSIONED_KEY}"
+          verify_mirror "https://dl.dbxio.com/${LATEST_KEY}?v=${JDBC_VERSION}"
+
       - name: Resolve release notes
         id: release-notes
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release-tag.outputs.tag }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
           RELEASE_BODY: ${{ github.event.release.body }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -256,7 +356,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release-tag.outputs.tag }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
           NOTES_PATH: ${{ steps.release-notes.outputs.path }}
         run: |
           WORK_DIR="${RUNNER_TEMP}/latest-json"
@@ -267,5 +367,17 @@ jobs:
             "$WORK_DIR/latest.json" \
             "${{ steps.jdbc-plugin.outputs.version }}" \
             "${{ steps.jdbc-plugin.outputs.protocol_version }}" \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/dbx-jdbc-plugin-latest.zip"
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/dbx-jdbc-plugin-${{ steps.jdbc-plugin.outputs.version }}.zip"
           gh release upload "$TAG" "$WORK_DIR/latest.json" --repo "${GITHUB_REPOSITORY}" --clobber
+
+      - name: Publish completed release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+          PRERELEASE: ${{ needs.prepare-release.outputs.prerelease }}
+        run: |
+          gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --prerelease="$PRERELEASE"
