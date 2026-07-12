@@ -147,12 +147,14 @@ test("adds JDBC plugin metadata to latest.json without disturbing updater fields
   });
 });
 
-test("keeps releases draft until checks and JDBC mirrors are finalized", () => {
+test("keeps releases draft until required assets are finalized and treats R2 as optional", () => {
   const workflow = readFileSync(".github/workflows/release.yml", "utf8");
 
   assert.match(workflow, /for workflow in ci\.yml desktop-build\.yml/);
   assert.match(workflow, /INPUT_PRERELEASE: \$\{\{ github\.event\.inputs\.prerelease \}\}/);
   assert.match(workflow, /releaseDraft: true/);
+  assert.match(workflow, /R2 release secrets are not fully configured; skipping optional JDBC mirror sync\./);
+  assert.doesNotMatch(workflow, /R2 release secrets are required/);
   assert.match(workflow, /VERSIONED_KEY="releases\/jdbc\/\$\{JDBC_VERSION\}/);
   assert.match(workflow, /verify_mirror "https:\/\/dl\.dbxio\.com\/\$\{VERSIONED_KEY\}"/);
   assert.match(workflow, /gh release upload "\$TAG" "\$WORK_DIR\/latest\.json"/);
