@@ -740,7 +740,15 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
                 req.send().await
             }
         }
-        "DELETE" => client.delete(&path).send().await,
+        "DELETE" => {
+            let req = client.delete(&path);
+            if let Some(b) = body {
+                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
+                req.json(&json).send().await
+            } else {
+                req.send().await
+            }
+        }
         _ => return Err(format!("Unsupported HTTP method: {method}. Use GET, POST, PUT, or DELETE.")),
     }
     .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
@@ -909,11 +917,11 @@ fn parse_elasticsearch_rest_response(
     start: std::time::Instant,
 ) -> Result<crate::types::QueryResult, String> {
     if body_text.trim().is_empty() {
-        return parse_elasticsearch_response(status, serde_json::Value::Null, start);
+        return Ok(raw_json_response_result(status, "null", start));
     }
 
-    if let Ok(body) = serde_json::from_str::<serde_json::Value>(body_text) {
-        return parse_elasticsearch_response(status, body, start);
+    if is_valid_json_text(body_text) {
+        return Ok(raw_json_response_result(status, body_text, start));
     }
 
     // CAT APIs default to text/plain for human-readable output. Keep those
@@ -932,6 +940,29 @@ fn parse_elasticsearch_rest_response(
         session_id: None,
         has_more: false,
     })
+}
+
+fn raw_json_response_result(
+    status: u16,
+    body_text: impl Into<String>,
+    start: std::time::Instant,
+) -> crate::types::QueryResult {
+    crate::types::QueryResult {
+        columns: vec!["status".to_string(), "response".to_string()],
+        column_types: Vec::new(),
+        column_sortables: vec![],
+        rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(body_text.into())]],
+        affected_rows: 0,
+        execution_time_ms: start.elapsed().as_millis(),
+        truncated: false,
+        session_id: None,
+        has_more: false,
+    }
+}
+
+fn is_valid_json_text(body_text: &str) -> bool {
+    let mut deserializer = serde_json::Deserializer::from_str(body_text);
+    serde::de::IgnoredAny::deserialize(&mut deserializer).is_ok() && deserializer.end().is_ok()
 }
 
 fn parse_select_star_search_query(input: &str) -> Option<ElasticsearchSearchQuery> {
@@ -1671,6 +1702,32 @@ mod tests {
         assert_eq!(result.rows[0][0], json!("health status index           docs.count store.size"));
         assert_eq!(result.rows[1][0], json!("green  open   app-log-2026-07 42         10mb"));
         assert_eq!(result.affected_rows, 2);
+    }
+
+    #[test]
+    fn preserves_rest_json_text_and_large_numeric_literals() {
+        let body = r#"{"largest_id":123456789012345678901234567890,"ratio":0.123456789012345678901234567890,"estimate":1e400}"#;
+        let result = super::parse_elasticsearch_rest_response(200, body, std::time::Instant::now()).unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(200));
+        assert_eq!(result.rows[0][1].as_str(), Some(body));
+    }
+
+    #[test]
+    fn keeps_sql_api_response_tabular() {
+        let result = super::parse_elasticsearch_response(
+            200,
+            json!({
+                "columns": [{ "name": "name" }],
+                "rows": [["Alice"]]
+            }),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        assert_eq!(result.columns, vec!["name"]);
+        assert_eq!(result.rows, vec![vec![json!("Alice")]]);
     }
 
     #[tokio::test]

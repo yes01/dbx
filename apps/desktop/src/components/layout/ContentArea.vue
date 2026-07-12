@@ -46,6 +46,7 @@ const DocumentBrowser = defineAsyncComponent(() => import("@/components/document
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
 const MongoBucketBrowser = defineAsyncComponent(() => import("@/components/document/MongoBucketBrowser.vue"));
 const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/VectorBrowser.vue"));
+const ElasticsearchJsonResponsePanel = defineAsyncComponent(() => import("@/components/common/ElasticsearchJsonResponsePanel.vue"));
 const MqAdminConsole = defineAsyncComponent(() => import("@/components/mq/MqAdminConsole.vue"));
 const NacosAdminConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAdminConsole.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
@@ -67,6 +68,7 @@ import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { formatShortcut } from "@/lib/shortcutRegistry";
 import { effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { chartableColumnIndexes } from "@/lib/chartData";
+import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearchJsonResponse";
 import type { SqlExecutionOverride } from "@/lib/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGridSort";
 import { useTabScroll } from "@/composables/useTabScroll";
@@ -307,6 +309,8 @@ const allResultExportSheets = computed(() =>
 const resultRuns = computed(() => resultRunItems(props.activeTab));
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
+const activeResultSql = computed(() => props.activeTab.resultRuns?.find((run) => run.id === props.activeTab.activeResultRunId)?.sql || props.activeTab.lastExecutedSql || props.activeTab.sql);
+const activeElasticsearchJsonResponse = computed(() => elasticsearchJsonResponseForResult(activeEffectiveDatabaseType.value, activeResultSql.value, props.activeTab.result));
 const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
@@ -613,6 +617,10 @@ function refreshData(): boolean {
     emit("reload");
     return true;
   }
+  if (activeElasticsearchJsonResponse.value) {
+    emit("reload", activeResultSql.value);
+    return true;
+  }
   if (!dataGridRef.value) return false;
   void dataGridRef.value.onToolbarRefresh();
   return true;
@@ -668,7 +676,7 @@ function toggleResultAutoSave() {
 function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
-  if (target.closest("[data-grid-root]")) return refreshData();
+  if (target.closest("[data-grid-root], [data-elasticsearch-json-response-root]")) return refreshData();
   if (canReloadUnavailableDataTab(props.activeTab)) return refreshData();
   return false;
 }
@@ -800,7 +808,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                   <ListChecks class="h-3.5 w-3.5" />
                   {{ t("tabs.executionSummary") }}
                 </Button>
-                <Button size="sm" :variant="activeOutputView === 'chart' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!hasNumericData" @click="emit('update:activeOutputView', 'chart')">
+                <Button size="sm" :variant="activeOutputView === 'chart' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!hasNumericData || !!activeElasticsearchJsonResponse" @click="emit('update:activeOutputView', 'chart')">
                   <BarChart3 class="h-3.5 w-3.5" />
                   {{ t("chart.title") }}
                 </Button>
@@ -999,7 +1007,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               :table-error="activeTab.explainTableError"
             />
 
-            <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result" class="flex-1 min-h-0" :result="activeTab.result" />
+            <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result && !activeElasticsearchJsonResponse" class="flex-1 min-h-0" :result="activeTab.result" />
 
             <div v-else-if="activeOutputView === 'summary'" class="flex-1 min-h-0 overflow-auto bg-background">
               <div v-if="activeTab.isExecuting" class="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -1037,8 +1045,9 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
             </div>
 
             <template v-else>
+              <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
               <DataGrid
-                v-if="activeTab.result && hasTabularResult"
+                v-else-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"
                 :key="activeResultGridCacheKey"
                 :cache-key="activeResultGridCacheKey"

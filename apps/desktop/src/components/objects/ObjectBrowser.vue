@@ -59,6 +59,7 @@ import { buildViewDdl } from "@/lib/viewDdl";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/databaseExport";
 import { copyToClipboard } from "@/lib/clipboard";
+import { objectBrowserRowActivationAction } from "@/lib/objectBrowserRowActivation";
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -420,12 +421,12 @@ function sourceTitle(row: ObjectBrowserRow | null) {
 }
 
 function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
-  if (settingsStore.editorSettings.sidebarActivation === "double") {
-    if (event.detail === 2) openRow(row);
-    return;
+  const action = objectBrowserRowActivationAction(row, event.detail, settingsStore.editorSettings.sidebarActivation);
+  if (action === "open-table") {
+    emit("openTable", { tableName: row.name, schema: row.schema, tableType: row.type });
+  } else if (action === "open-source") {
+    void openSource(row);
   }
-  if (event.detail > 1) return;
-  openRow(row);
 }
 
 function openRow(row: ObjectBrowserRow) {
