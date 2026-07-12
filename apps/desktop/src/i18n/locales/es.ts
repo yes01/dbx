@@ -857,6 +857,7 @@ export default {
   },
   explain: {
     title: "Plan de ejecución",
+    standardTable: "Tabla",
     tree: "Árbol",
     summary: "Resumen",
     running: "Leyendo plan de ejecución...",

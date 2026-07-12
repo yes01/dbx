@@ -111,6 +111,45 @@ test("linkExternalSqlPath records the local path and detaches saved SQL", () => 
   assert.equal(store.isTabDirty(tab!), true);
 });
 
+test("external SQL files use full paths as tab identity", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+
+  const demoId = store.openExternalSqlFile("conn-1", "db", "/work/demo/create.sql", "select 'demo';");
+  const learnId = store.openExternalSqlFile("conn-1", "db", "/work/learn/create.sql", "select 'learn';");
+
+  assert.notEqual(demoId, learnId);
+  assert.equal(store.tabs.find((tab) => tab.id === demoId)?.title, "demo/create.sql");
+  assert.equal(store.tabs.find((tab) => tab.id === learnId)?.title, "learn/create.sql");
+  assert.equal(store.tabs.find((tab) => tab.id === demoId)?.sql, "select 'demo';");
+  assert.equal(store.tabs.find((tab) => tab.id === learnId)?.sql, "select 'learn';");
+});
+
+test("reopening an external SQL path preserves unsaved editor content", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.openExternalSqlFile("conn-1", "db", "C:\\work\\draft.sql", "select 1;");
+  store.updateSql(tabId, "select 2;");
+
+  const reopenedId = store.openExternalSqlFile("conn-2", "other", "C:/work/draft.sql", "select 3;");
+
+  assert.equal(reopenedId, tabId);
+  assert.equal(store.tabs.length, 1);
+  assert.equal(store.tabs[0].sql, "select 2;");
+  assert.equal(store.tabs[0].connectionId, "conn-1");
+});
+
+test("external SQL titles collapse after a duplicate filename tab closes", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstId = store.openExternalSqlFile("conn-1", "db", "/work/demo/create.sql", "select 1;");
+  const secondId = store.openExternalSqlFile("conn-1", "db", "/work/learn/create.sql", "select 2;");
+
+  store.closeTab(secondId, { force: true });
+
+  assert.equal(store.tabs.find((tab) => tab.id === firstId)?.title, "create.sql");
+});
+
 test("external SQL file paths persist with open query tabs", async () => {
   const restoreStorage = installMemoryStorage();
   try {

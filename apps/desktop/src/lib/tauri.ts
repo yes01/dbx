@@ -240,6 +240,8 @@ export interface QuerySqlBuildResult {
 export interface BuildExplainSqlOptions {
   databaseType?: DatabaseType;
   sql: string;
+  /** MySQL can return either the existing JSON plan or its native tabular plan. */
+  format?: "json" | "standard";
 }
 
 export interface ExplainSqlBuildResult {
@@ -2086,18 +2088,19 @@ export async function exportTableDataCsv(options: TableCsvExportOptions): Promis
   return invoke("export_table_data_csv", { request: options });
 }
 
-export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
   return invoke("export_query_result_xlsx", {
     request: {
       filePath,
       sheetName,
       columns,
+      columnTypes,
       rows,
     },
   });
 }
 
-export async function exportQueryResultsXlsx(filePath: string, worksheets: readonly { sheetName?: string; columns: string[]; rows: readonly (readonly XlsxCellValue[])[] }[]): Promise<void> {
+export async function exportQueryResultsXlsx(filePath: string, worksheets: readonly { sheetName?: string; columns: string[]; columnTypes?: string[]; rows: readonly (readonly XlsxCellValue[])[] }[]): Promise<void> {
   return invoke("export_query_results_xlsx", {
     request: {
       filePath,

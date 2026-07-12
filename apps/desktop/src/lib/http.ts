@@ -1446,11 +1446,12 @@ function downloadTextFile(filePath: string, fallbackFileName: string, content: s
   URL.revokeObjectURL(url);
 }
 
-export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
   const { buildXlsxWorkbook } = await import("./xlsxExport");
   const workbook = buildXlsxWorkbook({
     sheetName: sheetName || "Export",
     columns,
+    columnTypes,
     rows,
   });
   const fileName = filePath.split(/[\\/]/).pop() || "export.xlsx";
@@ -1465,7 +1466,7 @@ export async function exportQueryResultXlsx(filePath: string, sheetName: string 
   URL.revokeObjectURL(url);
 }
 
-export async function exportQueryResultsXlsx(filePath: string, worksheets: readonly { sheetName?: string; columns: string[]; rows: readonly (readonly XlsxCellValue[])[] }[]): Promise<void> {
+export async function exportQueryResultsXlsx(filePath: string, worksheets: readonly { sheetName?: string; columns: string[]; columnTypes?: string[]; rows: readonly (readonly XlsxCellValue[])[] }[]): Promise<void> {
   const { buildXlsxWorkbookMulti } = await import("./xlsxExport");
   const workbook = buildXlsxWorkbookMulti(worksheets);
   const fileName = filePath.split(/[\\/]/).pop() || "export.xlsx";

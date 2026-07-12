@@ -6,7 +6,7 @@ import type { DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/queryExecutionState";
 import { closeAllTabsState, closeOtherTabsState } from "@/lib/tabCloseActions";
-import { buildExplainSql, parseExplainResult, parseDamengExplainText } from "@/lib/explainPlan";
+import { buildExplainSql, parseExplainResult, parseDamengExplainText, type BuildExplainSqlResult } from "@/lib/explainPlan";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, sourceColumnsForResult, type EditableQueryInfo } from "@/lib/sqlAnalysis";
 import { restoreOpenTabsState, serializeOpenTabs } from "@/lib/openTabsPersistence";
 import {
@@ -30,15 +30,16 @@ import { redisCommandResultToQueryResult } from "@/lib/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/databaseDriverManifest";
-import { canUseKeylessRowPredicate, editableRowIdentifierColumns } from "@/lib/tableEditing";
+import { canUseKeylessRowPredicate, editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
 import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
-import { quoteTableIdentifier } from "@/lib/tableSelectSql";
+import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { connectionQueryExecutionSchema, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
 import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { sortDataGridRows, type DataGridSortDirection } from "@/lib/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
+import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sqlFileOpen";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabResultCache";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/queryResultArchive";
@@ -75,6 +76,14 @@ interface DroppedTableObjectTarget {
   schemaCandidates?: Array<string | undefined>;
   name: string;
   objectType?: DroppedTableObjectType;
+}
+
+interface TableDataRefreshTarget {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  schemaCandidates?: Array<string | undefined>;
+  name: string;
 }
 
 function tabClientSessionId(tab: Pick<QueryTab, "id">, suffix?: (typeof BACKGROUND_CLIENT_SESSION_SUFFIXES)[number]): string {
@@ -239,7 +248,7 @@ export const useQueryStore = defineStore("query", () => {
 
   async function closeClientConnectionSession(tab: QueryTab | undefined) {
     if (!tab?.connectionId) return;
-    const clientSessionIds = [tabClientSessionId(tab), ...BACKGROUND_CLIENT_SESSION_SUFFIXES.map((suffix) => tabClientSessionId(tab, suffix))];
+    const clientSessionIds = [...new Set([tabClientSessionId(tab), ...BACKGROUND_CLIENT_SESSION_SUFFIXES.map((suffix) => tabClientSessionId(tab, suffix)), tab.explainClientSessionId].filter((sessionId): sessionId is string => !!sessionId))];
     for (const clientSessionId of clientSessionIds) {
       await closeClientSessionId(tab.connectionId, tab.database, clientSessionId, { tabId: tab.id });
     }
@@ -660,6 +669,46 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function refreshExternalSqlFileTitles() {
+    const externalTabs = tabs.value.filter((tab) => tab.mode === "query" && tab.externalSqlPath);
+    const titles = externalSqlFileDisplayTitles(externalTabs.map((tab) => tab.externalSqlPath!));
+    externalTabs.forEach((tab, index) => {
+      tab.title = titles[index];
+      tab.customTitle = true;
+    });
+  }
+
+  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string) {
+    const normalizedPath = normalizeExternalSqlPath(path);
+    const existing = tabs.value.find((tab) => tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedPath);
+    if (existing) {
+      activeTabId.value = existing.id;
+      return existing.id;
+    }
+
+    // File-backed tabs are identified by their full path, not their basename.
+    // Bypassing createTab avoids overwriting another file with the same name.
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: "",
+      customTitle: true,
+      connectionId,
+      database,
+      sql,
+      originalSql: sql,
+      externalSqlPath: path,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "query",
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    refreshExternalSqlFileTitles();
+    return id;
+  }
+
   function openObjectBrowser(connectionId: string, database: string, schema?: string) {
     const title = schema ? `${schema} objects` : `${database} objects`;
     const existing = tabs.value.find((tab) => tab.mode === "objects" && tab.connectionId === connectionId && tab.database === database && (tab.objectBrowser?.schema || "") === (schema || ""));
@@ -910,6 +959,7 @@ export const useQueryStore = defineStore("query", () => {
     clearResultRunSnapshots(tabs.value[idx]);
     clearResultPayload(tabs.value[idx]);
     tabs.value.splice(idx, 1);
+    if (tab.externalSqlPath) refreshExternalSqlFileTitles();
     if (activeTabId.value === id) {
       activeTabId.value = tabs.value[Math.min(idx, tabs.value.length - 1)]?.id ?? null;
     }
@@ -1085,10 +1135,59 @@ export const useQueryStore = defineStore("query", () => {
     return false;
   }
 
+  function tabMatchesTableDataRefreshTarget(tab: QueryTab, target: TableDataRefreshTarget): boolean {
+    if (tab.mode !== "data" || tab.connectionId !== target.connectionId || tab.database !== target.database) return false;
+    const tableMeta = tableMetaForDataTab(tab);
+    if (!tableMeta || tableMeta.tableName !== target.name) return false;
+    const targetSchemas = droppedTableObjectSchemaCandidates(target);
+    return targetSchemas.has(normalizeOptionalSchema(tableMeta.schema ?? tab.schema));
+  }
+
   function closeDroppedTableObjectTabs(target: DroppedTableObjectTarget) {
     // A dropped table-like object makes existing data/structure tabs stale; close
     // them immediately instead of letting the next refresh fail against a missing object.
     closeTabsWhere((tab) => tabMatchesDroppedTableObject(tab, target));
+  }
+
+  async function refreshDataTabsForTable(target: TableDataRefreshTarget): Promise<number> {
+    const matchingTabs = tabs.value.filter((tab) => tabMatchesTableDataRefreshTarget(tab, target));
+    if (matchingTabs.length === 0) return 0;
+
+    const settingsStore = useSettingsStore();
+    let refreshed = 0;
+
+    for (const tab of matchingTabs) {
+      const tableMeta = tableMetaForDataTab(tab);
+      if (!tableMeta?.tableName) continue;
+      const conn = useConnectionStore().getConfig(tab.connectionId);
+      const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
+      const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
+      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const orderBy = tab.orderByInput?.trim() || sortOrder;
+      const limit = tab.resultPageLimit ?? settingsStore.editorSettings.pageSize ?? tableOpenPageLimit();
+      const offset = tab.resultPageOffset ?? 0;
+      const sql = await buildTableSelectSql({
+        databaseType: effectiveDbType,
+        schema: tableMeta.schema,
+        tableName: tableMeta.tableName,
+        tableType: tableMeta.tableType,
+        columns: tableMeta.columns.map((column) => column.name),
+        primaryKeys,
+        includeRowId: usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta.tableType),
+        whereInput: tab.whereInput,
+        orderBy,
+        limit,
+        offset,
+      });
+      updateSql(tab.id, sql);
+      await executeTabSql(tab.id, sql, {
+        pagination: { limit, offset },
+        preserveResultDuringExecution: true,
+      });
+      refreshed += 1;
+    }
+
+    return refreshed;
   }
 
   function releaseTabsWhere(predicate: (tab: QueryTab) => boolean) {
@@ -1175,6 +1274,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.customTitle = true;
     }
     markTabClean(tab);
+    refreshExternalSqlFileTitles();
   }
 
   function openSavedSql(file: SavedSqlFile) {
@@ -1312,11 +1412,15 @@ export const useQueryStore = defineStore("query", () => {
 
   function clearExplain(tab: QueryTab) {
     tab.explainPlan = undefined;
+    tab.explainTableResult = undefined;
     tab.explainError = undefined;
+    tab.explainTableError = undefined;
     tab.explainSql = undefined;
+    tab.explainTableSql = undefined;
     tab.lastExplainedSql = undefined;
     tab.isExplaining = false;
     tab.explainExecutionId = undefined;
+    tab.explainClientSessionId = undefined;
   }
 
   function toErrorResult(e: any): NonNullable<QueryTab["result"]> {
@@ -2091,7 +2195,12 @@ export const useQueryStore = defineStore("query", () => {
 
     tab.isExplaining = true;
     tab.explainExecutionId = executionId;
+    tab.explainPlan = undefined;
+    tab.explainTableResult = undefined;
     tab.explainError = undefined;
+    tab.explainTableError = undefined;
+    tab.explainSql = undefined;
+    tab.explainTableSql = undefined;
     tab.lastExplainedSql = sql;
 
     // DM uses native getExplainInfo via JDBC (supports explain + autotrace modes)
@@ -2138,10 +2247,99 @@ export const useQueryStore = defineStore("query", () => {
       return { ok: true as const };
     }
 
+    if (databaseType === "mysql") {
+      let tableBuilt: BuildExplainSqlResult;
+      let jsonBuilt: BuildExplainSqlResult;
+      try {
+        [tableBuilt, jsonBuilt] = await Promise.all([buildExplainSql(databaseType, sql, "standard"), buildExplainSql(databaseType, sql, "json")]);
+      } catch (e: any) {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+          current.explainExecutionId = undefined;
+          current.explainError = String(e?.message || e);
+        }
+        return { ok: true as const, sql: "" };
+      }
+      if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
+        return { ok: true as const, sql: jsonBuilt.ok ? jsonBuilt.sql : "" };
+      }
+      if (!tableBuilt.ok || !jsonBuilt.ok) {
+        const failed = !tableBuilt.ok ? tableBuilt : jsonBuilt;
+        const reason = !tableBuilt.ok ? tableBuilt.reason : !jsonBuilt.ok ? jsonBuilt.reason : "unsupported";
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+          current.explainExecutionId = undefined;
+          current.explainError = reason;
+        }
+        return failed;
+      }
+
+      tab.explainTableSql = tableBuilt.sql;
+      tab.explainSql = jsonBuilt.sql;
+      // Keep the two EXPLAIN statements on the same one-connection MySQL session.
+      const clientSessionId = `${tabClientSessionId(tab, "explain")}:${executionId}`;
+      tab.explainClientSessionId = clientSessionId;
+      try {
+        try {
+          const tableResult = await api.executeQuery(tab.connectionId, tab.database, tableBuilt.sql, tab.schema, executionId, {
+            clientSessionId,
+            timeoutSecs: queryTimeoutSecs,
+          });
+          const current = tabs.value.find((t) => t.id === id);
+          if (current?.explainExecutionId === executionId) {
+            current.explainTableResult = markQueryResultRowsRaw(tableResult);
+            current.explainTableError = undefined;
+          }
+        } catch (e: any) {
+          const current = tabs.value.find((t) => t.id === id);
+          if (current?.explainExecutionId === executionId) {
+            current.explainTableResult = undefined;
+            current.explainTableError = String(e?.message || e);
+          }
+        }
+
+        // A canceled or superseded standard request must not start the JSON request.
+        if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
+          return { ok: true as const, sql: jsonBuilt.sql };
+        }
+
+        try {
+          const jsonResult = await api.executeQuery(tab.connectionId, tab.database, jsonBuilt.sql, tab.schema, executionId, {
+            clientSessionId,
+            timeoutSecs: queryTimeoutSecs,
+          });
+          const current = tabs.value.find((t) => t.id === id);
+          if (current?.explainExecutionId === executionId) {
+            current.explainPlan = parseExplainResult("mysql", jsonResult);
+            current.explainError = undefined;
+          }
+        } catch (e: any) {
+          const current = tabs.value.find((t) => t.id === id);
+          if (current?.explainExecutionId === executionId) {
+            current.explainPlan = undefined;
+            current.explainError = String(e?.message || e);
+          }
+        }
+      } finally {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+          current.explainExecutionId = undefined;
+        }
+        if (current?.explainClientSessionId === clientSessionId) current.explainClientSessionId = undefined;
+        void closeClientSessionId(tab.connectionId, tab.database, clientSessionId, { tabId: tab.id, explainExecutionId: executionId });
+      }
+      return { ok: true as const, sql: jsonBuilt.sql };
+    }
+
     const built = await buildExplainSql(databaseType, sql);
     if (!built.ok) {
       tab.explainPlan = undefined;
       tab.explainError = built.reason;
+      tab.isExplaining = false;
+      tab.explainExecutionId = undefined;
       return built;
     }
 
@@ -2216,19 +2414,12 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab?.isExplaining || !tab.explainExecutionId) return false;
 
     const executionId = tab.explainExecutionId;
+    // Invalidate locally before the remote cancellation call so no later stage can start.
+    tab.isExplaining = false;
+    tab.explainExecutionId = undefined;
     try {
-      const canceled = await api.cancelQuery(executionId);
-      if (!canceled) {
-        const current = tabs.value.find((t) => t.id === id);
-        if (current && current.explainExecutionId === executionId) current.isExplaining = false;
-      }
-      return canceled;
-    } catch (e: any) {
-      const current = tabs.value.find((t) => t.id === id);
-      if (current && current.explainExecutionId === executionId) {
-        current.isExplaining = false;
-        current.explainError = String(e?.message || e);
-      }
+      return await api.cancelQuery(executionId);
+    } catch {
       return false;
     }
   }
@@ -2634,6 +2825,7 @@ export const useQueryStore = defineStore("query", () => {
     closeConnectionTabs,
     closeDatabaseTabs,
     closeDroppedTableObjectTabs,
+    refreshDataTabsForTable,
     releaseConnectionTabs,
     releaseDatabaseTabs,
     updateSql,
@@ -2650,6 +2842,7 @@ export const useQueryStore = defineStore("query", () => {
     openTableStructure,
     linkSavedSql,
     linkExternalSqlPath,
+    openExternalSqlFile,
     openSavedSql,
     togglePinnedTab,
     reorderTab,

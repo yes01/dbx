@@ -512,6 +512,7 @@ export default {
     jobs: "Jobs",
     executionSummary: "Summary",
     tooltipTitle: "Title:",
+    tooltipFilePath: "File Path:",
     tooltipConnection: "Connection:",
     tooltipDatabase: "Database:",
     tooltipTable: "Table:",
@@ -988,6 +989,7 @@ export default {
   },
   explain: {
     title: "Explain Plan",
+    standardTable: "Table",
     tree: "Tree",
     summary: "Summary",
     running: "Reading explain plan...",

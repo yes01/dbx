@@ -513,6 +513,7 @@ export default {
     jobs: "作业",
     executionSummary: "摘要",
     tooltipTitle: "标题：",
+    tooltipFilePath: "文件路径：",
     tooltipConnection: "连接：",
     tooltipDatabase: "数据库：",
     tooltipTable: "表：",
@@ -987,6 +988,7 @@ export default {
   },
   explain: {
     title: "执行计划",
+    standardTable: "标准表格",
     tree: "树",
     summary: "摘要",
     running: "正在读取执行计划...",

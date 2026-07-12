@@ -479,6 +479,7 @@ export default {
     users: "Usuários e Privilégios",
     executionSummary: "Resumo",
     tooltipTitle: "Título:",
+    tooltipFilePath: "Caminho do arquivo:",
     tooltipConnection: "Conexão:",
     tooltipDatabase: "Banco de dados:",
     tooltipTable: "Tabela:",
@@ -912,6 +913,7 @@ export default {
   },
   explain: {
     title: "Plano de Execução",
+    standardTable: "Tabela",
     tree: "Árvore",
     summary: "Resumo",
     running: "Lendo plano de execução...",

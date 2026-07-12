@@ -213,6 +213,7 @@ pub fn duckdb_query_columns_in_database_with_attached(
         .query_map((database.as_str(), schema, table), |row| row.get::<_, String>(0))
         .map_err(|e| e.to_string())?;
     let primary_keys: std::collections::HashSet<String> = pk_rows.filter_map(|r| r.ok()).collect();
+    let column_comments = duckdb_column_comments(con, &database, schema, table);
 
     let mut stmt = con
         .prepare(
@@ -225,6 +226,7 @@ pub fn duckdb_query_columns_in_database_with_attached(
     let rows = stmt
         .query_map((database.as_str(), schema, table), |row| {
             let name = row.get::<_, String>(0)?;
+            let comment = column_comments.get(&name).cloned().flatten();
             Ok(db::ColumnInfo {
                 is_primary_key: primary_keys.contains(&name),
                 name,
@@ -232,7 +234,7 @@ pub fn duckdb_query_columns_in_database_with_attached(
                 is_nullable: row.get::<_, String>(2).unwrap_or_default() == "YES",
                 column_default: row.get::<_, Option<String>>(3)?,
                 extra: None,
-                comment: None,
+                comment,
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
@@ -241,6 +243,28 @@ pub fn duckdb_query_columns_in_database_with_attached(
         })
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+#[cfg(feature = "duckdb-bundled")]
+fn duckdb_column_comments(
+    con: &duckdb::Connection,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> HashMap<String, Option<String>> {
+    let Ok(mut stmt) = con.prepare(
+        "SELECT column_name, comment FROM duckdb_columns() \
+         WHERE database_name = ? AND schema_name = ? AND table_name = ?",
+    ) else {
+        // Older DuckDB versions may not expose the comment column; keep metadata browsing functional.
+        return HashMap::new();
+    };
+    let Ok(rows) = stmt
+        .query_map((database, schema, table), |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
+    else {
+        return HashMap::new();
+    };
+    rows.filter_map(Result::ok).collect()
 }
 
 #[cfg(feature = "duckdb-bundled")]
@@ -2156,6 +2180,22 @@ mod tests {
         assert!(!attached_tables.iter().any(|table| table.name == "main_table"));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "duckdb-bundled")]
+    #[test]
+    fn duckdb_query_columns_includes_column_comments() {
+        let con = duckdb::Connection::open_in_memory().unwrap();
+        con.execute_batch(
+            "CREATE TABLE users (id INTEGER, name VARCHAR); \
+             COMMENT ON COLUMN users.name IS 'Display name';",
+        )
+        .unwrap();
+
+        let columns = super::duckdb_query_columns(&con, "users").unwrap();
+        let name = columns.iter().find(|column| column.name == "name").unwrap();
+
+        assert_eq!(name.comment.as_deref(), Some("Display name"));
     }
 
     #[cfg(feature = "duckdb-bundled")]

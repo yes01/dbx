@@ -719,9 +719,7 @@ async function openSqlFilePath(path: string) {
     const connectionId = connectionStore.activeConnectionId || activeTab.value?.connectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
     const database = activeTab.value?.database || (connection ? resolveDefaultDatabase(connection, []) : "");
-    const tabId = queryStore.createTab(connectionId, database, sqlFileTitleFromPath(path), "query");
-    queryStore.updateSql(tabId, content);
-    queryStore.linkExternalSqlPath(tabId, path, sqlFileTitleFromPath(path));
+    queryStore.openExternalSqlFile(connectionId, database, path, content);
   } catch (e: any) {
     toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -1177,6 +1175,12 @@ async function handleQuickOpenSelect(item: any) {
         await connectionStore.loadTables(item.connectionId, item.database);
       }
     }
+    return;
+  } else if (item.type === "schema") {
+    const dbNode = findTreeNodeById(connectionStore.treeNodes, `${item.connectionId}:${item.database}`);
+    if (dbNode && !dbNode.isExpanded) await connectionStore.loadSchemas(item.connectionId, item.database);
+    const schemaNode = findTreeNodeById(connectionStore.treeNodes, `${item.connectionId}:${item.database}:${item.schema}`);
+    if (schemaNode && !schemaNode.isExpanded) await connectionStore.loadTables(item.connectionId, item.database, item.schema);
     return;
   } else if (item.type === "table" || item.type === "view" || item.type === "materialized_view") {
     // Open the table/view in a data tab

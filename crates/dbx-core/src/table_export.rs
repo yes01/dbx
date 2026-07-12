@@ -73,6 +73,16 @@ fn format_csv_rows(rows: &[Vec<Value>]) -> String {
         .join("\n")
 }
 
+fn export_column_types(request: &TableExportRequest) -> Vec<String> {
+    request
+        .column_types
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|column_type| column_type.clone().unwrap_or_default())
+        .collect()
+}
+
 fn write_json_row_object<W: Write>(writer: &mut W, columns: &[String], row: &[Value]) -> Result<(), String> {
     writer.write_all(b"{\n").map_err(|e| format!("Failed to write JSON: {e}"))?;
     let mut first = true;
@@ -492,10 +502,15 @@ async fn try_export_native_table_stream(
             result
         }
         "xlsx" => {
+            let column_types = export_column_types(request);
             let xlsx_file =
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
-            let mut writer =
-                start_streaming_xlsx_workbook(BufWriter::new(xlsx_file), Some(&request.table_name), col_names)?;
+            let mut writer = start_streaming_xlsx_workbook(
+                BufWriter::new(xlsx_file),
+                Some(&request.table_name),
+                col_names,
+                &column_types,
+            )?;
             let result = stream_native_table_rows(
                 state,
                 pool_key,
@@ -958,13 +973,18 @@ pub async fn export_table_data_core(
             }
         }
         "xlsx" => {
+            let column_types = export_column_types(request);
             // Create a dedicated file handle for the streaming XLSX writer
             // instead of cloning the outer BufWriter's handle.  This avoids
             // sharing a file descriptor between two independent buffers.
             let xlsx_file =
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
-            let mut writer =
-                start_streaming_xlsx_workbook(BufWriter::new(xlsx_file), Some(&request.table_name), &col_names)?;
+            let mut writer = start_streaming_xlsx_workbook(
+                BufWriter::new(xlsx_file),
+                Some(&request.table_name),
+                &col_names,
+                &column_types,
+            )?;
 
             loop {
                 // Check cancellation between batches
@@ -1490,6 +1510,7 @@ mod tests {
         let data = XlsxWorksheetData {
             sheet_name: Some("employees".to_string()),
             columns: vec!["id".to_string(), "name".to_string(), "salary".to_string()],
+            column_types: vec![],
             rows: vec![
                 vec![json!(1), json!("Alice"), json!(75000.50)],
                 vec![json!(2), json!("Bob"), json!(82000)],

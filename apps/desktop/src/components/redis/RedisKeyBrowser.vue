@@ -216,14 +216,37 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
   }
 }
 
-async function fetchScanPage(): Promise<RedisScanResult> {
+async function fetchScanPage(requestId = searchRequestId): Promise<RedisScanResult> {
   const pageSize = redisScanPageSize.value;
-  // Redis SCAN may return an empty page with a non-zero cursor; batch a few
-  // key-search pages so sparse MATCH patterns do not look empty immediately.
-  const keySearchIterations = 8;
-  return isValueSearchMode.value
-    ? await api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all")
-    : await api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, keySearchIterations, false);
+  if (isValueSearchMode.value) {
+    return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all");
+  }
+
+  // Keep each backend call small so a changed search can cancel between calls.
+  // The total COUNT budget bounds Redis work while giving sparse MATCH patterns
+  // substantially more coverage than a fixed number of SCAN calls.
+  const scanCountBudget = 50_000;
+  const iterationsPerCall = 8;
+  const maxIterations = Math.max(1, Math.ceil(scanCountBudget / Math.max(1, pageSize)));
+  let completedIterations = 0;
+  let cursor = scanCursor.value;
+  let totalKeys = 0;
+
+  while (completedIterations < maxIterations) {
+    if (requestId !== searchRequestId) {
+      return { cursor, keys: [], total_keys: totalKeys };
+    }
+    const iterations = Math.min(iterationsPerCall, maxIterations - completedIterations);
+    const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, false);
+    if (totalKeys === 0) totalKeys = result.total_keys;
+    if (result.keys.length > 0 || result.cursor === 0) {
+      return { ...result, total_keys: totalKeys };
+    }
+    cursor = result.cursor;
+    completedIterations += iterations;
+  }
+
+  return { cursor, keys: [], total_keys: totalKeys };
 }
 
 /// Batch-scan variant that performs multiple SCAN iterations server-side.
@@ -275,7 +298,7 @@ function appendScanResult(result: RedisScanResult, options: { updateTree?: boole
 }
 
 async function scanNextPage(requestId = searchRequestId): Promise<boolean> {
-  const result = await fetchScanPage();
+  const result = await fetchScanPage(requestId);
   if (requestId !== searchRequestId) return false;
   appendScanResult(result);
   return true;

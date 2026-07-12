@@ -26,7 +26,7 @@ import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/li
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
 import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/tableStructureCapabilities";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/jdbcDialect";
-import type { TableStructureEditorDraft } from "@/types/database";
+import type { TableInfoTab, TableStructureEditorDraft } from "@/types/database";
 import {
   buildStructureTargetLabel,
   combineDataTypeForDatabase,
@@ -88,7 +88,7 @@ const emit = defineEmits<{
   openSettings: [initialTab?: string, initialSection?: string];
 }>();
 
-const activeTab = ref("columns");
+const activeTab = ref<TableInfoTab>("columns");
 const loading = ref(false);
 const saving = ref(false);
 const postSaveRefreshing = ref(false);

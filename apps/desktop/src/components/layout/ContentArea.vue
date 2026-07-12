@@ -296,7 +296,7 @@ const activeQueryError = computed(() => {
   if (!result?.columns.includes("Error")) return "";
   return String(result.rows[0]?.[0] ?? "");
 });
-const hasQueryOutput = computed(() => !!props.activeTab.result || !!props.activeTab.explainPlan || !!props.activeTab.explainError || props.activeTab.isExecuting === true || props.activeTab.isExplaining === true);
+const hasQueryOutput = computed(() => !!props.activeTab.result || !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExecuting === true || props.activeTab.isExplaining === true);
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results));
 const allResultExportSheets = computed(() =>
   tabularResults.value.map((item) => ({
@@ -805,7 +805,13 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                   {{ t("chart.title") }}
                 </Button>
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
-                <Button size="sm" :variant="activeOutputView === 'explain' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" :disabled="!activeTab.explainPlan && !activeTab.explainError && !activeTab.isExplaining" @click="emit('update:activeOutputView', 'explain')">
+                <Button
+                  size="sm"
+                  :variant="activeOutputView === 'explain' ? 'secondary' : 'ghost'"
+                  class="h-6 px-2 text-xs gap-1"
+                  :disabled="!activeTab.explainPlan && !activeTab.explainError && !activeTab.explainTableResult && !activeTab.explainTableError && !activeTab.isExplaining"
+                  @click="emit('update:activeOutputView', 'explain')"
+                >
                   <GitBranch class="h-3.5 w-3.5" />
                   {{ t("explain.title") }}
                 </Button>
@@ -981,7 +987,17 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               </div>
             </div>
 
-            <ExplainPlanViewer v-if="activeOutputView === 'explain'" class="flex-1 min-h-0" :plan="activeTab.explainPlan" :error="activeTab.explainError" :loading="activeTab.isExplaining" :source-sql="activeTab.lastExplainedSql" :explain-sql="activeTab.explainSql" />
+            <ExplainPlanViewer
+              v-if="activeOutputView === 'explain'"
+              class="flex-1 min-h-0"
+              :plan="activeTab.explainPlan"
+              :error="activeTab.explainError"
+              :loading="activeTab.isExplaining"
+              :source-sql="activeTab.lastExplainedSql"
+              :explain-sql="activeTab.explainSql"
+              :table-result="activeTab.explainTableResult"
+              :table-error="activeTab.explainTableError"
+            />
 
             <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result" class="flex-1 min-h-0" :result="activeTab.result" />
 

@@ -2,11 +2,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExplainFormat {
+    Json,
+    Standard,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplainSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
+    /// MySQL supports both a structured JSON plan and the traditional tabular plan.
+    /// Omitted formats retain the existing JSON behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ExplainFormat>,
     pub sql: String,
 }
 
@@ -37,7 +48,10 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if source.is_empty() {
         return explain_err("empty");
     }
-    if !is_safe_explain_source(&source) {
+    if has_extra_statement_after_semicolon(&source)
+        || !is_safe_explain_source(&source)
+        || contains_dangerous_sql_keyword(&source)
+    {
         return explain_err("unsafe");
     }
 
@@ -47,6 +61,10 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
         }
         Some(DatabaseType::Dameng | DatabaseType::Questdb) => {
             format!("EXPLAIN {source}")
+        }
+        Some(DatabaseType::Mysql) if options.format == Some(ExplainFormat::Standard) => {
+            // MySQL 8.0.32+ may otherwise inherit TREE or JSON from the session-level explain_format.
+            format!("EXPLAIN FORMAT=TRADITIONAL {source}")
         }
         _ => format!("EXPLAIN FORMAT=JSON {source}"),
     };
@@ -390,6 +408,7 @@ mod tests {
     fn builds_postgres_json_explain_sql() {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Postgres),
+            format: None,
             sql: " select * from users where id = 1; ".to_string(),
         });
 
@@ -407,6 +426,7 @@ mod tests {
     fn builds_dameng_explain_sql() {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Dameng),
+            format: None,
             sql: "SELECT * FROM t1 WHERE id = 1".to_string(),
         });
 
@@ -435,6 +455,7 @@ mod tests {
         assert_eq!(
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
+                format: None,
                 sql: "SELECT * FROM users;".to_string(),
             }),
             ExplainSqlBuildResult {
@@ -447,9 +468,31 @@ mod tests {
         assert_eq!(
             build_explain_sql(ExplainSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
+                format: None,
                 sql: "delete from users".to_string(),
             }),
             ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
+        );
+        assert_eq!(
+            build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Mysql),
+                format: None,
+                sql: "SELECT * FROM users; DELETE FROM users".to_string(),
+            }),
+            ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) }
+        );
+
+        assert_eq!(
+            build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Mysql),
+                format: Some(ExplainFormat::Standard),
+                sql: "SELECT * FROM users;".to_string(),
+            }),
+            ExplainSqlBuildResult {
+                ok: true,
+                sql: Some("EXPLAIN FORMAT=TRADITIONAL SELECT * FROM users".to_string()),
+                reason: None,
+            }
         );
     }
 

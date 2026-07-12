@@ -52,6 +52,7 @@ import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/shortc
 import { trimmedSelectionLayer } from "@/lib/codemirrorTrimmedSelectionLayer";
 import { selectionMatchOccurrences } from "@/lib/codemirrorSelectionMatches";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/codemirrorSqlDialect";
+import { startsQueryEditorRectangularSelection } from "@/lib/queryEditorPointerSelection";
 import { isSchemaAware, isSingleDatabase, supportsSqlInListPaste } from "@/lib/databaseFeatureSupport";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/completionMetadataPolicy";
 import { qualifiedTableNameAtSqlPosition } from "@/lib/queryCursorTableTarget";
@@ -2600,7 +2601,9 @@ onMounted(async () => {
       wordWrapComp.of(props.forceWordWrap || initialSettings.wordWrap ? EditorView.lineWrapping : []),
       readOnlyComp.of([EditorState.readOnly.of(!!props.readOnly), EditorView.editable.of(!props.readOnly)]),
       indentComp.of(indentExtension()),
-      rectangularSelection({ eventFilter: (e: MouseEvent) => e.altKey || e.button === 1 }),
+      // Alt+drag belongs exclusively to rectangular selection. Registering the
+      // same gesture as an added cursor preserves the previous cursor.
+      rectangularSelection({ eventFilter: startsQueryEditorRectangularSelection }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
           searchPanelRef.value?.scheduleDocumentSearchUpdate();

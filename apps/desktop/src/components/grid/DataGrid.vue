@@ -89,7 +89,17 @@ import type { BuildSingleColumnAlterSqlOptions } from "@/lib/tableStructureEdito
 import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/tableSelectSql";
 import { uuid } from "@/lib/utils";
 import { resolveHeaderColumnType } from "@/lib/dataGridColumnType";
-import { canEditExistingTableRows, canUseKeylessRowPredicate, hiveTablePropertiesIndicateTransactional, isClickHouseExistingRowReadonlyColumn, isHiddenGridColumn, isTdengineExistingRowReadonlyColumn, usesSyntheticRowIdKey } from "@/lib/tableEditing";
+import {
+  canDeleteExistingTdengineRows,
+  canEditExistingTableRows,
+  canUseKeylessRowPredicate,
+  hasCompleteTdengineRowIdentity,
+  hiveTablePropertiesIndicateTransactional,
+  isClickHouseExistingRowReadonlyColumn,
+  isHiddenGridColumn,
+  isTdengineExistingRowReadonlyColumn,
+  usesSyntheticRowIdKey,
+} from "@/lib/tableEditing";
 import { buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGridSql";
 import {
   buildVisibleTransposeRows,
@@ -2622,7 +2632,11 @@ const canShowWhereSearch = computed(() => !!props.onExecuteSql && !isResultsCont
 const canUseWhereSearch = computed(() => !!props.tableMeta && !!props.onExecuteSql && !isResultsContext.value);
 type DataGridTableMeta = NonNullable<typeof props.tableMeta>;
 const hiveTableTransactional = ref<boolean | undefined>(undefined);
-const canEditExistingRows = computed(() => !!props.customSaveHandler || canEditExistingTableRows(props.databaseType, hiveTableTransactional.value, props.tableMeta?.primaryKeys ?? []));
+const resultSourceColumns = computed(() => props.result.columns.map((column, index) => props.sourceColumns?.[index] ?? column));
+const canEditExistingRows = computed(
+  () => !!props.customSaveHandler || (canEditExistingTableRows(props.databaseType, hiveTableTransactional.value, props.tableMeta?.primaryKeys ?? []) && hasCompleteTdengineRowIdentity(props.databaseType, props.tableMeta?.primaryKeys ?? [], resultSourceColumns.value)),
+);
+const canDeleteExistingRows = computed(() => !!props.customSaveHandler || canDeleteExistingTdengineRows(props.databaseType, props.tableMeta?.primaryKeys ?? []));
 watch(
   () => [props.databaseType, props.connectionId, props.database, props.tableMeta?.schema, props.tableMeta?.tableName],
   async () => {
@@ -3128,7 +3142,7 @@ function isDecimalColumnType(dataType: string): boolean {
 }
 
 function canDeleteRowItem(item: RowItem | undefined): boolean {
-  return !!props.editable && !!item && !item.isDeleted && (item.isNew || canEditExistingRows.value);
+  return !!props.editable && !!item && !item.isDeleted && (item.isNew || (canEditExistingRows.value && canDeleteExistingRows.value));
 }
 
 function resetInfiniteScrollState() {
@@ -4825,6 +4839,8 @@ const canvasDetailButtonCell = computed(() => {
   if (!useCanvasGridRows.value || isScrolling.value) return null;
   const target = hoveredDetailCell.value ?? quickDownloadMenuCell.value ?? (showCellDetail.value ? detailCell.value : null);
   if (!target || !cellDetailButtonVisible(target.rowIndex, target.col)) return null;
+  const editing = editingCell.value;
+  if (editing && editing.rowId === displayItems.value[target.rowIndex]?.id && editing.col === target.col) return null;
   const visibleColIdx = visibleColumnIndexes.value.indexOf(target.col);
   if (visibleColIdx < 0) return null;
   const rect = canvasCellViewportRect(target.rowIndex, visibleColIdx);
