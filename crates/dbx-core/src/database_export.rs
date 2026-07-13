@@ -1259,6 +1259,7 @@ pub async fn export_database_sql_core(
                 &request.schema,
                 view_name,
                 crate::db::ObjectSourceKind::View,
+                None,
             )
             .await
             {
@@ -1300,6 +1301,7 @@ pub async fn export_database_sql_core(
                 &request.schema,
                 proc_name,
                 crate::db::ObjectSourceKind::Procedure,
+                None,
             )
             .await
             {
@@ -1341,6 +1343,7 @@ pub async fn export_database_sql_core(
                 &request.schema,
                 func_name,
                 crate::db::ObjectSourceKind::Function,
+                None,
             )
             .await
             {

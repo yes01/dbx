@@ -12,7 +12,7 @@ import { formatSqlInsert } from "@/lib/exportFormats";
 import { uuid } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { expandNestedJsonStringsForCopy } from "@/lib/jsonCopyValue";
-import { buildMongoCopyInsertDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongoDocumentValues";
+import { buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongoDocumentValues";
 import type { DatabaseType, QueryResult } from "@/types/database";
 import type { QueryResultExportRequest } from "@/lib/api";
 import { DBX_ROWID_COLUMN } from "@/lib/tableEditing";
@@ -39,6 +39,7 @@ export interface UseDataGridExportOptions {
   database: ComputedRef<string | undefined>;
   context: ComputedRef<"results" | "table-data" | undefined>;
   sourceColumns: ComputedRef<Array<string | undefined> | undefined>;
+  mongoDocuments?: ComputedRef<unknown[] | undefined>;
   columnTypes: ComputedRef<Array<string | undefined> | undefined>;
   whereInput: ComputedRef<string | undefined>;
   orderBy: ComputedRef<string | undefined>;
@@ -224,7 +225,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function insertCopyKey(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode): string {
-    const rows = copyStatementRowsKey(insertEligibleRows());
+    const eligibleRows = insertEligibleRows();
+    const rows = copyStatementRowsKey(eligibleRows);
+    const originalMongoDocuments = eligibleRows.map((item) => (item.sourceIndex === undefined ? undefined : options.mongoDocuments?.value?.[item.sourceIndex]));
     return JSON.stringify({
       databaseType: databaseType.value ?? null,
       schema: tableMeta.value?.schema ?? null,
@@ -236,12 +239,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       excludePrimaryKeys,
       insertMode,
       rows,
+      originalMongoDocuments,
     });
   }
 
-  function copyStatementRowsKey(rows: RowItem[]): Array<{ id: number; data: CellValue[] }> {
+  function copyStatementRowsKey(rows: RowItem[]): Array<{ id: number; sourceIndex?: number; data: CellValue[]; isDirtyCol: boolean[] }> {
     // Prepared copy SQL depends on current cell values; edited rows keep the same id while their data changes.
-    return rows.map((item) => ({ id: item.id, data: item.data }));
+    return rows.map((item) => ({ id: item.id, sourceIndex: item.sourceIndex, data: item.data, isDirtyCol: item.isDirtyCol }));
   }
 
   function insertCopyCache(excludePrimaryKeys: boolean, insertMode: DataGridCopyInsertMode): CopyStatementCache {
@@ -300,7 +304,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               collection: copyInsertTargetLabel?.value || tableMeta.value?.tableName || "collection",
               columns: columns.value,
               sourceColumns: sourceColumns.value,
-              rows: rows.map((item) => item.data),
+              rows,
+              mongoDocuments: options.mongoDocuments?.value,
               excludePrimaryKeys,
               insertMode,
             })
@@ -506,6 +511,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function rowToJsonObject(item: RowItem): Record<string, unknown> {
+    if (options.databaseType.value === "mongodb" && item.sourceIndex !== undefined) {
+      const original = options.mongoDocuments?.value?.[item.sourceIndex];
+      const document = buildMongoCopyDocumentFromOriginal(original, item.data as MongoInputValue[], columns.value, item.isDirtyCol);
+      if (document) return document;
+    }
     const obj: Record<string, unknown> = {};
     columns.value.forEach((col, i) => {
       obj[col] = item.data[i];
@@ -516,7 +526,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function copyRowsAsJson(items: RowItem[]) {
     if (items.length === 0) return;
     const value = items.length === 1 ? rowToJsonObject(items[0]) : items.map(rowToJsonObject);
-    const copyValue = options.databaseType.value === "mongodb" ? expandNestedJsonStringsForCopy(value) : value;
+    const hasOriginalMongoDocuments = options.databaseType.value === "mongodb" && items.every((item) => item.sourceIndex !== undefined && options.mongoDocuments?.value?.[item.sourceIndex] !== undefined);
+    const copyValue = options.databaseType.value === "mongodb" && !hasOriginalMongoDocuments ? expandNestedJsonStringsForCopy(value) : value;
     await copyText(JSON.stringify(copyValue, null, 2));
   }
 
@@ -1234,12 +1245,17 @@ function compactLocalTimestamp(date = new Date()): string {
   return `${yy}${month}${day}${hour}${minute}${second}`;
 }
 
-function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: CellValue[][]; excludePrimaryKeys?: boolean; insertMode?: DataGridCopyInsertMode }): string | undefined {
+function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: RowItem[]; mongoDocuments?: unknown[]; excludePrimaryKeys?: boolean; insertMode?: DataGridCopyInsertMode }): string | undefined {
   const saveColumns = effectiveColumns(options.sourceColumns, options.columns);
   const columnIndexes = saveColumns.map((column, index) => ({ column, index })).filter((item): item is { column: string; index: number } => !!item.column);
   if (columnIndexes.length === 0 || options.rows.length === 0) return undefined;
   const documentColumns = columnIndexes.map((item) => item.column);
-  const documents = options.rows.map((row) => buildMongoCopyInsertDocument(columnIndexes.map((item) => row[item.index]) as MongoInputValue[], documentColumns, { excludePrimaryKeys: options.excludePrimaryKeys }));
+  const documents = options.rows.map((item) => {
+    const row = columnIndexes.map(({ index }) => item.data[index]) as MongoInputValue[];
+    const dirtyColumns = columnIndexes.map(({ index }) => item.isDirtyCol[index] ?? false);
+    const original = item.sourceIndex === undefined ? undefined : options.mongoDocuments?.[item.sourceIndex];
+    return buildMongoCopyDocumentFromOriginal(original, row, documentColumns, dirtyColumns, { excludePrimaryKeys: options.excludePrimaryKeys }) ?? buildMongoCopyInsertDocument(row, documentColumns, { excludePrimaryKeys: options.excludePrimaryKeys });
+  });
   const collection = `db.getCollection(${JSON.stringify(options.collection)})`;
   if (documents.length === 1) return `${collection}.insert(${formatMongoShellLiteral(documents[0])});`;
   if (options.insertMode === "row-by-row") {

@@ -31,6 +31,18 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
   return raw;
 }
 
+function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, originalValue: unknown): unknown {
+  if (typeof originalValue === "string") {
+    return typeof raw === "string" ? raw : String(raw);
+  }
+  return parseMongoDocumentInputValue(raw);
+}
+
+function mongoDocumentFieldValue(document: unknown, field: string): unknown {
+  if (!document || typeof document !== "object" || Array.isArray(document)) return undefined;
+  return (document as Record<string, unknown>)[field];
+}
+
 function legacyMongoDateDisplayToExtendedJson(value: string): { $date: string } | null {
   const match = value.match(LEGACY_MONGO_DATE_DISPLAY_PATTERN);
   if (!match) return null;
@@ -38,7 +50,7 @@ function legacyMongoDateDisplayToExtendedJson(value: string): { $date: string } 
   return { $date: `${date}T${time}.${millis.padEnd(3, "0")}Z` };
 }
 
-export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, columns: string[]): Record<string, unknown> {
+export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, columns: string[], originalDocument?: unknown): Record<string, unknown> {
   const setFields: Record<string, unknown> = {};
   const unsetFields: Record<string, unknown> = {};
   for (const [colIdx, newVal] of changes) {
@@ -47,7 +59,7 @@ export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, 
     if (newVal === null) {
       unsetFields[col] = "";
     } else {
-      setFields[col] = parseMongoDocumentInputValue(newVal);
+      setFields[col] = parseMongoExistingFieldInputValue(newVal, mongoDocumentFieldValue(originalDocument, col));
     }
   }
   const doc: Record<string, unknown> = {};
@@ -82,6 +94,25 @@ export function buildMongoCopyInsertDocument(row: MongoInputValue[], columns: st
     doc[col] = parseMongoDocumentInputValue(val);
   }
   return doc;
+}
+
+export function buildMongoCopyDocumentFromOriginal(original: unknown, row: MongoInputValue[], columns: string[], dirtyColumns: boolean[], options: { excludePrimaryKeys?: boolean } = {}): Record<string, unknown> | null {
+  if (!original || typeof original !== "object" || Array.isArray(original)) return null;
+
+  const source = original as Record<string, unknown>;
+  const document: Record<string, unknown> = {};
+  for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
+    const column = columns[columnIndex];
+    if (!column || (options.excludePrimaryKeys && column === "_id")) continue;
+
+    if (dirtyColumns[columnIndex]) {
+      const value = row[columnIndex];
+      if (value !== null) document[column] = parseMongoExistingFieldInputValue(value, source[column]);
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(source, column)) document[column] = source[column];
+  }
+  return document;
 }
 
 export function formatMongoShellLiteral(value: unknown): string {

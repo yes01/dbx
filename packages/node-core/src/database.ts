@@ -955,6 +955,7 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
       filter_json: command.filter,
       update_json: command.update,
       many: command.many,
+      options_json: command.options,
     });
     return result.affected_rows;
   }
@@ -1048,7 +1049,7 @@ interface MongoGetIndexesCommand {
   collection: string;
 }
 
-export type MongoWriteCommand = { kind: "insert"; collection: string; docsJson: string } | { kind: "update"; collection: string; filter: string; update: string; many: boolean } | { kind: "delete"; collection: string; filter: string; many: boolean };
+export type MongoWriteCommand = { kind: "insert"; collection: string; docsJson: string } | { kind: "update"; collection: string; filter: string; update: string; options?: string; many: boolean } | { kind: "delete"; collection: string; filter: string; many: boolean };
 
 export function parseMongoFindCommand(input: string): MongoFindCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
@@ -1158,11 +1159,13 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     const target = parseCollectionMethodTarget(source, method);
     if (!target) continue;
     const args = parseMethodArgs(source, target.methodCallIndex);
-    if (!args || args.length !== 2) return null;
+    if (!args || args.length < 2 || args.length > 3) return null;
     const filter = normalizeJsonArgument(args[0]);
     const update = normalizeJsonArgument(args[1]);
     if (!filter || !update) return null;
-    return { kind: "update", collection: target.collection, filter, update, many: method === "updateMany" };
+    const options = args[2]?.trim() ? normalizeJsonArgument(args[2]) : undefined;
+    if (args[2]?.trim() && !options) return null;
+    return { kind: "update", collection: target.collection, filter, update, ...(options ? { options } : {}), many: method === "updateMany" };
   }
 
   for (const method of ["deleteOne", "deleteMany"] as const) {

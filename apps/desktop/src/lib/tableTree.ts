@@ -453,7 +453,8 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
     if (!name) continue;
 
     const childSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
-    const dedupeKey = `${objectType}\0${(childSchema || "").toLowerCase()}\0${name.toLowerCase()}`;
+    const signature = obj.signature?.trim() || "";
+    const dedupeKey = `${objectType}\0${(childSchema || "").toLowerCase()}\0${name.toLowerCase()}\0${signature.toLowerCase()}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
@@ -474,9 +475,11 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
     } else {
       const simpleNodeType = simpleObjectNodeType(objectType);
       objectNodes.push({
-        id: objectType === "VIEW" || objectType === "MATERIALIZED_VIEW" ? entry.node.id : `${nodeId}:${childSchema ? `${childSchema}:` : ""}${name}:${objectType}`,
-        label: name,
+        id: objectType === "VIEW" || objectType === "MATERIALIZED_VIEW" ? entry.node.id : `${nodeId}:${childSchema ? `${childSchema}:` : ""}${name}:${signature}:${objectType}`,
+        label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${name}(${signature})` : name,
         type: simpleNodeType,
+        objectName: name,
+        signature: signature || undefined,
         comment: obj.comment,
         connectionId,
         database,

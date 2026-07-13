@@ -82,54 +82,105 @@ export function sqlSafetyFromEnv(env: NodeJS.ProcessEnv = process.env): SqlSafet
 
 export function splitSqlStatements(sql: string): string[] {
   const statements: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | "`" | null = null;
-  let inLineComment = false;
-  let inBlockComment = false;
+  let statementStart = 0;
+  let index = 0;
+  let state: "none" | "single" | "double" | "backtick" | "bracket" | "lineComment" | "blockComment" | "dollar" = "none";
+  let dollarTag = "";
 
-  for (let i = 0; i < sql.length; i++) {
-    const char = sql[i];
-    const next = sql[i + 1];
+  const pushStatement = (end: number) => {
+    const statement = sql.slice(statementStart, end).trim();
+    if (statement) statements.push(statement);
+  };
 
-    if (inLineComment) {
-      current += char;
-      if (char === "\n") inLineComment = false;
+  while (index < sql.length) {
+    const char = sql[index] ?? "";
+    const next = sql[index + 1] ?? "";
+
+    if (state === "lineComment") {
+      if (char === "\n" || char === "\r") state = "none";
+      index += 1;
       continue;
     }
-    if (inBlockComment) {
-      current += char;
+    if (state === "blockComment") {
       if (char === "*" && next === "/") {
-        current += next;
-        i++;
-        inBlockComment = false;
+        state = "none";
+        index += 2;
+      } else {
+        index += 1;
       }
       continue;
     }
-    if (quote) {
-      current += char;
+    if (state === "dollar") {
+      if (sql.startsWith(dollarTag, index)) {
+        index += dollarTag.length;
+        state = "none";
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+    if (state === "single" || state === "double" || state === "backtick") {
+      const quote = state === "single" ? "'" : state === "double" ? '"' : "`";
       if (char === quote) {
         if (next === quote) {
-          current += next;
-          i++;
-        } else {
-          quote = null;
+          index += 2;
+          continue;
         }
+        state = "none";
+      } else if (char === "\\" && next) {
+        index += 2;
+        continue;
       }
+      index += 1;
+      continue;
+    }
+    if (state === "bracket") {
+      if (char === "]") {
+        if (next === "]") {
+          index += 2;
+          continue;
+        }
+        state = "none";
+      }
+      index += 1;
       continue;
     }
 
-    if (char === "-" && next === "-") inLineComment = true;
-    if (char === "/" && next === "*") inBlockComment = true;
-    if (char === "'" || char === '"' || char === "`") quote = char;
-
-    if (char === ";") {
-      if (current.trim()) statements.push(current.trim());
-      current = "";
-    } else {
-      current += char;
+    if (char === "-" && next === "-") {
+      state = "lineComment";
+      index += 2;
+      continue;
     }
+    if (char === "#") {
+      state = "lineComment";
+      index += 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      state = "blockComment";
+      index += 2;
+      continue;
+    }
+    if (char === "'") state = "single";
+    else if (char === '"') state = "double";
+    else if (char === "`") state = "backtick";
+    else if (char === "[") state = "bracket";
+    else if (char === "$") {
+      const match = /^\$[A-Za-z_0-9]*\$/.exec(sql.slice(index));
+      if (match) {
+        dollarTag = match[0];
+        state = "dollar";
+        index += dollarTag.length;
+        continue;
+      }
+    } else if (char === ";") {
+      pushStatement(index);
+      statementStart = index + 1;
+    }
+    index += 1;
   }
-  if (current.trim()) statements.push(current.trim());
+
+  pushStatement(sql.length);
   return statements;
 }
 

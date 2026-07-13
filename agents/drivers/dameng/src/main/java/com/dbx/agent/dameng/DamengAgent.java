@@ -140,7 +140,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     @Override
     public List<TableInfo> listTables(String schema) {
-        return listTables(schema, null);
+        return listTables(schema, (List<String>) null);
     }
 
     @Override

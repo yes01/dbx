@@ -121,6 +121,22 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
   });
 });
 
+test("parseMongoWriteCommand accepts updateMany arrayFilters options", () => {
+  assert.deepEqual(
+    parseMongoWriteCommand(
+      'db.orders.updateMany({status: "open"}, {$set: {"items.$[item].status": "done"}}, {arrayFilters: [{"item.id": 7}]})',
+    ),
+    {
+      kind: "update",
+      collection: "orders",
+      filter: '{"status": "open"}',
+      update: '{"$set": {"items.$[item].status": "done"}}',
+      options: '{"arrayFilters": [{"item.id": 7}]}',
+      many: true,
+    },
+  );
+});
+
 test("parseMongoCountDocumentsCommand parses db collection countDocuments", () => {
   assert.deepEqual(parseMongoCountDocumentsCommand("db.products.countDocuments({})"), {
     collection: "products",

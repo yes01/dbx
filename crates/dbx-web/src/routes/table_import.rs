@@ -1,15 +1,21 @@
+use std::path::Path as StdPath;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::{Multipart, Path, State};
 use axum::response::sse::{Event, Sse};
 use axum::Json;
 use dbx_core::table_import::{self, TableImportRequest};
 use dbx_core::transfer;
 use futures::stream::Stream;
+use futures::StreamExt;
 use serde::Deserialize;
+use tokio::io::AsyncWriteExt;
 
 use crate::error::AppError;
 use crate::state::WebState;
+
+const MAX_IMPORT_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,14 +38,10 @@ pub async fn preview_import(
 
     if let Some(field) = multipart.next_field().await.map_err(|e| AppError(e.to_string()))? {
         let file_name = field.file_name().unwrap_or("upload.csv").to_string();
-        let data = field.bytes().await.map_err(|e| AppError(e.to_string()))?;
-
-        if data.len() > 100 * 1024 * 1024 {
-            return Err(AppError(format!("File too large: {} bytes (max {} bytes)", data.len(), 100 * 1024 * 1024)));
-        }
-
-        let file_path = tmp_dir.join(&file_name);
-        std::fs::write(&file_path, &data).map_err(|e| AppError(e.to_string()))?;
+        let safe_name = StdPath::new(&file_name).file_name().and_then(|name| name.to_str()).unwrap_or("upload.csv");
+        let extension = StdPath::new(safe_name).extension().and_then(|value| value.to_str()).unwrap_or("csv");
+        let file_path = tmp_dir.join(format!("{}.{extension}", uuid::Uuid::new_v4()));
+        write_import_upload_stream(field, &file_path, MAX_IMPORT_UPLOAD_BYTES).await?;
 
         let file_path_str = file_path.to_string_lossy().to_string();
         let preview = table_import::preview_table_import_file_core(&file_path_str).await;
@@ -49,6 +51,39 @@ pub async fn preview_import(
     }
 
     Err(AppError("No file uploaded".to_string()))
+}
+
+async fn write_import_upload_stream<S, E>(
+    mut chunks: S,
+    file_path: &StdPath,
+    max_upload_bytes: usize,
+) -> Result<(), AppError>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    let mut upload = tokio::fs::File::create(file_path).await.map_err(|error| AppError(error.to_string()))?;
+    let mut uploaded_bytes = 0usize;
+    let result = async {
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk.map_err(|error| AppError(error.to_string()))?;
+            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
+            if uploaded_bytes > max_upload_bytes {
+                return Err(AppError(format!(
+                    "File too large: {uploaded_bytes} bytes received (max {max_upload_bytes} bytes)"
+                )));
+            }
+            upload.write_all(&chunk).await.map_err(|error| AppError(error.to_string()))?;
+        }
+        upload.flush().await.map_err(|error| AppError(error.to_string()))
+    }
+    .await;
+    drop(upload);
+
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(file_path).await;
+    }
+    result
 }
 
 pub async fn execute_import(
@@ -164,4 +199,36 @@ pub async fn cancel_import(
 ) -> Json<serde_json::Value> {
     transfer::set_cancelled(&req.import_id).await;
     Json(serde_json::json!({ "cancelled": true }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    fn test_upload_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("dbx-table-import-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn streams_import_upload_to_disk() {
+        let file_path = test_upload_path();
+        let chunks = stream::iter([Ok::<_, String>(Bytes::from_static(b"a,b\n")), Ok(Bytes::from_static(b"1,2\n"))]);
+        assert!(write_import_upload_stream(chunks, &file_path, 8).await.is_ok());
+        assert_eq!(tokio::fs::read(&file_path).await.unwrap(), b"a,b\n1,2\n");
+        let _ = tokio::fs::remove_file(&file_path).await;
+    }
+
+    #[tokio::test]
+    async fn removes_partial_upload_after_limit_or_stream_error() {
+        let oversized_path = test_upload_path();
+        let oversized = stream::iter([Ok::<_, String>(Bytes::from_static(b"1234")), Ok(Bytes::from_static(b"5"))]);
+        assert!(write_import_upload_stream(oversized, &oversized_path, 4).await.is_err());
+        assert!(!oversized_path.exists());
+
+        let failed_path = test_upload_path();
+        let failed = stream::iter([Ok(Bytes::from_static(b"1234")), Err("multipart stream failed")]);
+        assert!(write_import_upload_stream(failed, &failed_path, 8).await.is_err());
+        assert!(!failed_path.exists());
+    }
 }

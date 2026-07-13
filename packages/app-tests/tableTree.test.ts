@@ -271,6 +271,28 @@ test("buildSimpleObjectTreeNodes keeps routines, sequences, and packages visible
   );
 });
 
+test("buildSimpleObjectTreeNodes keeps overloaded PostgreSQL routines distinct", () => {
+  const nodes = buildSimpleObjectTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    objects: [
+      { name: "calculate_total", object_type: "FUNCTION", schema: "public", signature: "integer" },
+      { name: "calculate_total", object_type: "FUNCTION", schema: "public", signature: "numeric, numeric" },
+    ],
+  });
+
+  assert.deepEqual(
+    nodes.map((node) => ({ label: node.label, objectName: node.objectName, signature: node.signature })),
+    [
+      { label: "calculate_total(integer)", objectName: "calculate_total", signature: "integer" },
+      { label: "calculate_total(numeric, numeric)", objectName: "calculate_total", signature: "numeric, numeric" },
+    ],
+  );
+  assert.notEqual(nodes[0].id, nodes[1].id);
+});
+
 test("mergeTableInfosIntoObjects restores views missing from object metadata", () => {
   const merged = mergeTableInfosIntoObjects(
     [object("orders")],

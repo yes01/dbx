@@ -181,6 +181,7 @@ const columnInfoLoading = ref(false);
 const columnInfoError = ref<string | undefined>(undefined);
 const dataGridRef = ref<DataGridHandle>();
 const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
+const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean> }>();
 const resultTabsScrollerRef = ref<HTMLElement | null>(null);
 const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
@@ -685,7 +686,11 @@ function requestQueryEditorExecute() {
   return queryEditorRef.value?.requestExecute();
 }
 
-defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExecute });
+function applyTableStructureChanges() {
+  return tableStructureEditorRef.value?.applyChanges() ?? Promise.resolve(false);
+}
+
+defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExecute, applyTableStructureChanges });
 </script>
 
 <template>
@@ -1468,6 +1473,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
     <!-- Structure mode: table structure editor -->
     <template v-else-if="activeTab.mode === 'structure'">
       <TableStructureEditor
+        ref="tableStructureEditorRef"
         :key="activeTab.id"
         :connection-id="activeTab.connectionId"
         :database="activeTab.database"

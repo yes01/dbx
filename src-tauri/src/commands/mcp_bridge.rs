@@ -88,6 +88,7 @@ struct MongoUpdateDocumentsRequest {
     filter_json: String,
     update_json: String,
     many: bool,
+    options_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -551,6 +552,7 @@ async fn handle_mongo_update_documents_data(state: &Arc<AppState>, body: &str, s
         &req.filter_json,
         &req.update_json,
         req.many,
+        req.options_json.as_deref(),
     )
     .await
     {

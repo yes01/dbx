@@ -521,7 +521,16 @@ async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: bo
 
 async function handleSaveTab(tabId: string) {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
-  if (!tab || !canSaveSqlTab(tab)) return;
+  if (!tab) return;
+  if (tab.mode === "structure") {
+    queryStore.activeTabId = tabId;
+    await nextTick();
+    if (await contentAreaRef.value?.applyTableStructureChanges?.()) {
+      queryStore.closeTab(tabId, { force: true });
+    }
+    return;
+  }
+  if (!canSaveSqlTab(tab)) return;
   if (tab.objectSource) {
     const saved = await saveActiveObjectSource(tab);
     if (saved) queryStore.closeTab(tabId, { force: true });

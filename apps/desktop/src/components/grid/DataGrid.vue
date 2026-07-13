@@ -128,6 +128,7 @@ import { isEnumColumn, enumValuesForColumn } from "@/lib/dataGridEnumEditor";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGridScrollGutter";
 import { canGoNextDataGridPage } from "@/lib/dataGridPagination";
+import { dataGridCountQueryOptions } from "@/lib/dataGridQueryOptions";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/canvasDataGridRenderer";
 import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGridSaveUi";
@@ -2807,7 +2808,7 @@ async function lastPage() {
   const sql = countTarget?.sql;
   if (!sql) return;
   try {
-    const result = await api.executeQuery(props.connectionId, props.database ?? "", sql, countTarget.schema);
+    const result = await api.executeQuery(props.connectionId, props.database ?? "", sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
     const total = Number(result.rows?.[0]?.[0] ?? 0);
     if (total <= 0) return;
     const lastPageNum = Math.ceil(total / pageSize.value);
@@ -2840,7 +2841,7 @@ async function calculateTotalRowCount() {
   try {
     const countTarget = await buildCurrentCountTarget();
     if (!countTarget?.sql) return;
-    const result = await api.executeQuery(props.connectionId, props.database ?? "", countTarget.sql, countTarget.schema);
+    const result = await api.executeQuery(props.connectionId, props.database ?? "", countTarget.sql, countTarget.schema, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId)));
     const total = Number(result.rows?.[0]?.[0] ?? 0);
     if (Number.isFinite(total) && total >= 0) {
       manualTotalRowCount.value = total;
@@ -5064,6 +5065,7 @@ const {
   database: computed(() => props.database),
   context: computed(() => props.context),
   sourceColumns: visibleSourceColumns,
+  mongoDocuments: computed(() => props.result.mongo_documents),
   columnTypes: visibleColumnTypes,
   whereInput: computed(() => currentWhereInput()),
   orderBy: computed(() => currentOrderBy()),
@@ -7033,18 +7035,15 @@ function copySubmenu(): ContextMenuItem {
       items.push({
         label: labels.insertNoPkMerged,
         action: () => copyRowAsInsertWithoutPrimaryKeys("merged"),
-        disabled: !canCopyRowAsInsertWithoutPrimaryKeys.value,
       });
       items.push({
         label: labels.insertNoPkRowByRow,
         action: () => copyRowAsInsertWithoutPrimaryKeys("row-by-row"),
-        disabled: !canCopyRowAsInsertWithoutPrimaryKeys.value,
       });
     } else {
       items.push({
         label: labels.insertNoPk,
         action: () => copyRowAsInsertWithoutPrimaryKeys(),
-        disabled: !canCopyRowAsInsertWithoutPrimaryKeys.value,
       });
     }
   }

@@ -43,6 +43,7 @@ import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sq
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabResultCache";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/queryResultArchive";
+import { isMysqlExecutionErrorResult } from "@/lib/queryResultError";
 import * as api from "@/lib/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -930,6 +931,9 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function isTabDirty(tab: QueryTab): boolean {
+    if (tab.mode === "structure") {
+      return !!tab.structureDraft && tab.structureDraft.dirty !== false;
+    }
     if (tab.mode !== "query") return false;
     if (!tab.externalSqlPath && !tab.sql.trim()) return false;
     const original = tab.originalSql;
@@ -1989,7 +1993,7 @@ export const useQueryStore = defineStore("query", () => {
           const result = await api.mongoInsertDocuments(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.docsJson);
           affectedRows = result.affected_rows;
         } else if (mongoWrite.kind === "update") {
-          const result = await api.mongoUpdateDocuments(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.filter, mongoWrite.update, mongoWrite.many);
+          const result = await api.mongoUpdateDocuments(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.filter, mongoWrite.update, mongoWrite.many, mongoWrite.options);
           affectedRows = result.affected_rows;
         } else {
           const result = await api.mongoDeleteDocuments(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.filter, mongoWrite.many);
@@ -2079,8 +2083,9 @@ export const useQueryStore = defineStore("query", () => {
       const current = tabs.value.find((t) => t.id === id);
       if (current?.executionId === executionId) {
         if (results.length > 1) {
+          const errorResultIndex = results.findIndex((result) => isMysqlExecutionErrorResult(result, conn?.db_type));
           const activeResultIndex = results.findIndex((result) => result.columns.length > 0);
-          const resultIndex = activeResultIndex >= 0 ? activeResultIndex : 0;
+          const resultIndex = errorResultIndex >= 0 ? errorResultIndex : activeResultIndex >= 0 ? activeResultIndex : 0;
           current.results = results;
           current.activeResultIndex = resultIndex;
           current.result = results[resultIndex];

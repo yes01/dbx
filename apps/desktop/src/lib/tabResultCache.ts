@@ -31,6 +31,7 @@ export interface TabResultSnapshot {
 
 interface ColumnarQueryResult {
   columns: string[];
+  execution_error?: true;
   column_types?: string[];
   columnValues: CellValue[][];
   rowCount: number;
@@ -122,6 +123,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
   if (!result) return undefined;
   return {
     columns: [...result.columns],
+    execution_error: result.execution_error,
     column_types: result.column_types ? [...result.column_types] : undefined,
     rows: result.rows.map((row) => [...row]),
     affected_rows: result.affected_rows,
@@ -150,6 +152,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
   const columnValues = result.columns.map((_, colIndex) => result.rows.map((row) => row[colIndex] ?? null));
   return removeUndefinedFields({
     columns: [...result.columns],
+    execution_error: result.execution_error,
     column_types: result.column_types ? [...result.column_types] : undefined,
     columnValues,
     rowCount: result.rows.length,
@@ -165,6 +168,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
   const rows = Array.from({ length: result.rowCount }, (_, rowIndex) => result.columnValues.map((values) => values[rowIndex] ?? null));
   return {
     columns: [...result.columns],
+    execution_error: result.execution_error,
     column_types: result.column_types ? [...result.column_types] : undefined,
     rows,
     affected_rows: result.affected_rows,

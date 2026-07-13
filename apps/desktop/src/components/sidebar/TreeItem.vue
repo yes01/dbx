@@ -1721,7 +1721,8 @@ function dropObjectSqlOptionsForNode(node: TreeNode): DropObjectSqlOptions | nul
     databaseType: tableStructureDatabaseTypeForNode(node),
     objectType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : node.type === "procedure" ? "PROCEDURE" : "FUNCTION",
     schema: node.schema,
-    name: node.label,
+    name: node.objectName || node.label,
+    signature: node.signature,
   };
 }
 
@@ -1841,7 +1842,7 @@ function viewObjectSource() {
     .ensureConnected(node.connectionId)
     .then(() => {
       connectionStore.activeConnectionId = node.connectionId!;
-      return api.getObjectSource(node.connectionId!, node.database!, schema, node.label, objectType as any);
+      return api.getObjectSource(node.connectionId!, node.database!, schema, node.objectName || node.label, objectType as any, node.signature);
     })
     .then(async (result) => {
       const databaseType = currentDatabaseType();
@@ -1851,14 +1852,14 @@ function viewObjectSource() {
         databaseType,
         objectType,
         schema,
-        name: node.label,
+        name: node.objectName || node.label,
         source: result.source,
       });
       queryStore.updateSql(tabId, editable);
       if (objectType !== "SEQUENCE") {
         queryStore.setObjectSource(tabId, {
           schema,
-          name: node.label,
+          name: node.objectName || node.label,
           objectType,
         });
       }
@@ -2145,7 +2146,7 @@ const canRenameObject = computed(() => {
 });
 
 function openRenameObjectDialog() {
-  renameObjectName.value = props.node.label;
+  renameObjectName.value = props.node.objectName || props.node.label;
   renameObjectError.value = "";
   renameObjectPreviewSql.value = "";
   showRenameObjectDialog.value = true;
@@ -2157,7 +2158,7 @@ async function refreshRenameObjectPreviewSql() {
   const requestId = ++renameObjectPreviewRequestId;
   const objectType = nodeRenameObjectType();
   const newName = renameObjectName.value.trim();
-  if (!showRenameObjectDialog.value || !objectType || !newName || newName === props.node.label) {
+  if (!showRenameObjectDialog.value || !objectType || !newName || newName === (props.node.objectName || props.node.label)) {
     renameObjectPreviewSql.value = "";
     return;
   }
@@ -2170,7 +2171,7 @@ async function refreshRenameObjectPreviewSql() {
       databaseType: currentDatabaseType(),
       objectType,
       schema: props.node.schema,
-      oldName: props.node.label,
+      oldName: props.node.objectName || props.node.label,
       newName,
     });
     if (requestId === renameObjectPreviewRequestId) renameObjectPreviewSql.value = sql;
@@ -2187,19 +2188,20 @@ async function confirmRenameObject() {
   const node = props.node;
   const objectType = nodeRenameObjectType();
   const newName = renameObjectName.value.trim();
-  if (!objectType || !newName || newName === node.label || !node.connectionId || !node.database) return;
+  const objectName = node.objectName || node.label;
+  if (!objectType || !newName || newName === objectName || !node.connectionId || !node.database) return;
   renameObjectError.value = "";
   try {
     const dbType = currentDatabaseType();
     await connectionStore.ensureConnected(node.connectionId);
     if (supportsSourceBackedRoutineRename(dbType, objectType as any)) {
       const schema = node.schema || node.database;
-      const source = await api.getObjectSource(node.connectionId, node.database, schema, node.label, objectType as any);
+      const source = await api.getObjectSource(node.connectionId, node.database, schema, objectName, objectType as any, node.signature);
       const statements = await buildRoutineRenameObjectSourceStatements({
         databaseType: dbType!,
         objectType: objectType as any,
         schema,
-        name: node.label,
+        name: objectName,
         newName,
         source: source.source,
       });
@@ -2211,12 +2213,12 @@ async function confirmRenameObject() {
         databaseType: dbType,
         objectType,
         schema: node.schema,
-        oldName: node.label,
+        oldName: objectName,
         newName,
       });
       await api.executeQuery(node.connectionId, node.database, sql, node.schema);
     }
-    toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
+    toast(t("contextMenu.renameObjectSuccess", { oldName: objectName, newName }), 3000);
     showRenameObjectDialog.value = false;
     await refreshTableList(node);
   } catch (e: any) {
@@ -4679,7 +4681,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
       </div>
       <DialogFooter>
         <Button variant="outline" @click="showRenameObjectDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!renameObjectName.trim() || renameObjectName.trim() === node.label" @click="confirmRenameObject">
+        <Button :disabled="!renameObjectName.trim() || renameObjectName.trim() === (node.objectName || node.label)" @click="confirmRenameObject">
           {{ t("contextMenu.renameObject") }}
         </Button>
       </DialogFooter>

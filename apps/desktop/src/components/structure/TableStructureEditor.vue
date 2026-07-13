@@ -617,6 +617,7 @@ function cloneDraftValue<T>(value: T): T {
 
 function createCurrentDraft(initialized = true): TableStructureEditorDraft {
   return {
+    dirty: hasPendingStructureChanges(),
     activeTab: activeTab.value as TableStructureEditorDraft["activeTab"],
     newTableName: newTableName.value,
     tableComment: tableComment.value,
@@ -1441,7 +1442,7 @@ async function copyPreviewSql() {
 }
 
 async function applyChanges() {
-  if (!canApply.value || !props.connectionId || !props.database) return;
+  if (!canApply.value || !props.connectionId || !props.database) return false;
   saving.value = true;
   errorMessage.value = "";
   const sql = previewSqlText.value;
@@ -1466,15 +1467,19 @@ async function applyChanges() {
       postSaveRefreshing.value = true;
       skipNextRefreshVersion = true;
       emit("saved", tableComment.value !== originalTableComment.value);
-      void refreshStructureAfterSave(refreshScope);
+      await refreshStructureAfterSave(refreshScope);
     }
+    return true;
   } catch (e: any) {
     errorMessage.value = e?.message || String(e);
     await recordStructureHistory(sql, startedAt, false, undefined, errorMessage.value);
+    return false;
   } finally {
     saving.value = false;
   }
 }
+
+defineExpose({ applyChanges });
 
 function addItemForActiveTab(): boolean {
   if (activeTab.value === "columns" && canAddColumn.value) {

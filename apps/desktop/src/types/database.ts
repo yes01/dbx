@@ -396,6 +396,8 @@ export interface OwnerInfo {
 
 export interface QueryResult {
   columns: string[];
+  /** Set only for synthesized query execution failures. */
+  execution_error?: true;
   /**
    * Database type name for each column, parallel to `columns`. Optional and may
    * be shorter/empty when a driver cannot supply types (schemaless stores,
@@ -408,6 +410,8 @@ export interface QueryResult {
    */
   column_sortables?: boolean[];
   rows: (string | number | boolean | null)[][];
+  /** Original MongoDB documents, present for document-browser grid results. */
+  mongo_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
   truncated?: boolean;
@@ -560,6 +564,8 @@ export interface TreeNode {
   nacosNamespaceName?: string;
   schema?: string;
   tableName?: string;
+  objectName?: string;
+  signature?: string;
   tableType?: string;
   comment?: string | null;
   objectCount?: number;
@@ -581,6 +587,7 @@ export interface TreeNode {
 export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
 
 export interface TableStructureEditorDraft {
+  dirty?: boolean;
   activeTab: TableInfoTab;
   newTableName: string;
   tableComment: string;

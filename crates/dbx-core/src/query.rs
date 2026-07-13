@@ -3,6 +3,7 @@ use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Nai
 #[cfg(feature = "duckdb-bundled")]
 use duckdb::types::{TimeUnit, Value, ValueRef};
 use mysql_async::prelude::Queryable;
+use serde::Serialize;
 use sqlparser::ast::{visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement};
 use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
@@ -39,6 +40,36 @@ pub enum PoolErrorAction {
     Keep,
     Discard,
     ReconnectAndRetry,
+}
+
+/// Client-facing multi-statement result. Only synthesized MySQL execution
+/// failures carry `execution_error`, so a real column named `Error` stays valid.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecuteMultiResult {
+    #[serde(flatten)]
+    pub result: db::QueryResult,
+    #[serde(skip_serializing_if = "is_false")]
+    pub execution_error: bool,
+}
+
+impl ExecuteMultiResult {
+    fn execution_error(result: db::QueryResult) -> Self {
+        Self { result, execution_error: true }
+    }
+
+    fn into_query_result(self) -> db::QueryResult {
+        self.result
+    }
+}
+
+impl From<db::QueryResult> for ExecuteMultiResult {
+    fn from(result: db::QueryResult) -> Self {
+        Self { result, execution_error: false }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Unified database operation execution budget.
@@ -95,12 +126,14 @@ impl DbOperationBudget {
 /// Uses config_for_pool_key to correctly resolve configs when pool_key includes
 /// a database suffix (e.g., "prod:app" -> config stored under "prod").
 pub async fn check_read_only_for_connection(state: &AppState, pool_key: &str, sql: &str) -> Result<(), String> {
-    let conn_name = {
+    let read_only_connection = {
         let configs = state.configs.read().await;
-        crate::connection::config_for_pool_key(pool_key, &configs).filter(|c| c.read_only).map(|c| c.name.clone())
+        crate::connection::config_for_pool_key(pool_key, &configs)
+            .filter(|c| c.read_only)
+            .map(|c| (c.name.clone(), c.db_type))
     };
-    if let Some(name) = conn_name {
-        crate::query_execution_sql::check_read_only(sql, &name)?;
+    if let Some((name, database_type)) = read_only_connection {
+        crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
     }
     Ok(())
 }
@@ -111,13 +144,15 @@ pub async fn check_read_only_for_connection_multi(
     pool_key: &str,
     statements: &[impl AsRef<str>],
 ) -> Result<(), String> {
-    let conn_name = {
+    let read_only_connection = {
         let configs = state.configs.read().await;
-        crate::connection::config_for_pool_key(pool_key, &configs).filter(|c| c.read_only).map(|c| c.name.clone())
+        crate::connection::config_for_pool_key(pool_key, &configs)
+            .filter(|c| c.read_only)
+            .map(|c| (c.name.clone(), c.db_type))
     };
-    if let Some(name) = conn_name {
+    if let Some((name, database_type)) = read_only_connection {
         for sql in statements {
-            crate::query_execution_sql::check_read_only(sql.as_ref(), &name)?;
+            crate::query_execution_sql::check_read_only(sql.as_ref(), &name, database_type)?;
         }
     }
     Ok(())
@@ -1026,18 +1061,18 @@ pub async fn do_execute(
     let _activity_touch = state.pool_activity_touch(pool_key);
 
     let query_timeout = resolve_query_timeout(options.timeout_secs);
-    let (_duckdb_attached_names, conn_name_if_readonly) = {
+    let (_duckdb_attached_names, read_only_connection) = {
         let configs = state.configs.read().await;
         let config = crate::connection::config_for_pool_key(pool_key, &configs);
         let attached = config
             .map(|c| c.attached_databases.iter().map(|db| db.name.clone()).collect::<Vec<_>>())
             .unwrap_or_default();
-        let conn_name = config.filter(|c| c.read_only).map(|c| c.name.clone());
-        (attached, conn_name)
+        let connection = config.filter(|c| c.read_only).map(|c| (c.name.clone(), c.db_type));
+        (attached, connection)
     };
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
-    if let Some(name) = conn_name_if_readonly {
-        crate::query_execution_sql::check_read_only(sql, &name)?;
+    if let Some((name, database_type)) = read_only_connection {
+        crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
     }
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let connections = state.connections.read().await;
@@ -1676,6 +1711,20 @@ pub async fn execute_multi_core_with_options(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<Vec<db::QueryResult>, String> {
+    execute_multi_core_with_options_for_client(state, connection_id, database, sql, schema, cancel_token, options)
+        .await
+        .map(|results| results.into_iter().map(ExecuteMultiResult::into_query_result).collect())
+}
+
+pub async fn execute_multi_core_with_options_for_client(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+) -> Result<Vec<ExecuteMultiResult>, String> {
     // Reject MongoDB queries that fall through to the generic executor.
     if connection_is_mongodb(state, connection_id).await {
         return Err("Use MongoDB-specific commands".to_string());
@@ -1700,7 +1749,9 @@ pub async fn execute_multi_core_with_options(
     };
 
     if is_sqlserver {
-        return execute_multi_sqlserver(state, &pool_key, sql, cancel_token, options).await;
+        return execute_multi_sqlserver(state, &pool_key, sql, cancel_token, options)
+            .await
+            .map(|results| results.into_iter().map(Into::into).collect());
     }
 
     let is_turso = {
@@ -1713,7 +1764,7 @@ pub async fn execute_multi_core_with_options(
         let result =
             execute_sql_statement_with_options(state, connection_id, database, sql, schema, cancel_token, options)
                 .await?;
-        return Ok(vec![result]);
+        return Ok(vec![result.into()]);
     }
 
     let db_type = connection_database_type(state, connection_id).await;
@@ -1722,7 +1773,7 @@ pub async fn execute_multi_core_with_options(
         |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
     );
     if statements.is_empty() {
-        return Ok(vec![empty_query_result(0)]);
+        return Ok(vec![empty_query_result(0).into()]);
     }
 
     let mysql_pool = {
@@ -1745,7 +1796,7 @@ pub async fn execute_multi_core_with_options(
             options,
         )
         .await?;
-        return Ok(vec![result]);
+        return Ok(vec![result.into()]);
     }
 
     if let Some((pool, mode)) = mysql_pool {
@@ -1769,7 +1820,7 @@ pub async fn execute_multi_core_with_options(
     let mut results = Vec::with_capacity(statements.len());
     for stmt in &statements {
         if is_canceled(&cancel_token) {
-            results.push(error_query_result(canceled_error()));
+            results.push(ExecuteMultiResult::execution_error(error_query_result(canceled_error())));
             break;
         }
         match execute_sql_statement_with_options(
@@ -1783,9 +1834,9 @@ pub async fn execute_multi_core_with_options(
         )
         .await
         {
-            Ok(r) => results.push(r),
+            Ok(r) => results.push(r.into()),
             Err(e) => {
-                results.push(error_query_result(e));
+                results.push(error_query_result(e).into());
             }
         }
     }
@@ -1803,7 +1854,7 @@ async fn execute_multi_mysql(
     statements: &[String],
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
-) -> Result<Vec<db::QueryResult>, String> {
+) -> Result<Vec<ExecuteMultiResult>, String> {
     let query_timeout = resolve_query_timeout(options.timeout_secs);
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
     let bare = mode == crate::connection::MysqlMode::Bare;
@@ -1823,14 +1874,14 @@ async fn execute_multi_mysql(
             {
                 state.remove_pool_by_key(pool_key).await;
             }
-            return Ok(vec![error_query_result(err)]);
+            return Ok(vec![ExecuteMultiResult::execution_error(error_query_result(err))]);
         }
     };
     let mut results = Vec::with_capacity(statements.len());
 
     for stmt in statements {
         if is_canceled(&cancel_token) {
-            results.push(error_query_result(canceled_error()));
+            results.push(ExecuteMultiResult::execution_error(error_query_result(canceled_error())));
             break;
         }
 
@@ -1841,14 +1892,14 @@ async fn execute_multi_mysql(
         )
         .await
         {
-            Ok(result) => results.push(result),
+            Ok(result) => results.push(result.into()),
             Err(err) => {
                 let action = pool_error_action(db_type, &err);
-                results.push(error_query_result(err));
+                results.push(ExecuteMultiResult::execution_error(error_query_result(err)));
                 if matches!(action, PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
                     state.remove_pool_by_key(pool_key).await;
-                    break;
                 }
+                break;
             }
         }
     }
@@ -3468,5 +3519,17 @@ mod tests {
 
         assert_eq!(normalized.rows[0][0], serde_json::json!("2041797190226354178"));
         assert_eq!(normalized.rows[0][1], serde_json::json!([1, "2041797190226354178"]));
+    }
+
+    #[test]
+    fn execute_multi_result_marks_only_synthesized_errors() {
+        let success = serde_json::to_value(ExecuteMultiResult::from(empty_query_result(0))).unwrap();
+        assert!(success.get("execution_error").is_none());
+
+        let failure =
+            serde_json::to_value(ExecuteMultiResult::execution_error(error_query_result("failed".to_string())))
+                .unwrap();
+        assert_eq!(failure.get("execution_error"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(failure.get("columns"), Some(&serde_json::json!(["Error"])));
     }
 }

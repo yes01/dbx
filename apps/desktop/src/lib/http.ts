@@ -536,8 +536,8 @@ export async function completionAssistantSearch(request: CompletionAssistantRequ
   return post("/api/schema/completion-assistant", request);
 }
 
-export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind): Promise<ObjectSource> {
-  return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType })}`);
+export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string): Promise<ObjectSource> {
+  return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, signature })}`);
 }
 
 export async function getColumns(connectionId: string, database: string, schema: string, table: string): Promise<ColumnInfo[]> {
@@ -1817,8 +1817,8 @@ export async function mongoUpdateDocument(connectionId: string, database: string
   return post("/api/mongo/update-document", { connectionId, database, collection, id, docJson });
 }
 
-export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean): Promise<{ affected_rows: number }> {
-  return post("/api/mongo/update-documents", { connectionId, database, collection, filterJson, updateJson, many });
+export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean, optionsJson?: string): Promise<{ affected_rows: number }> {
+  return post("/api/mongo/update-documents", { connectionId, database, collection, filterJson, updateJson, many, optionsJson });
 }
 
 export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: string): Promise<number> {

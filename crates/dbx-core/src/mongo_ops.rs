@@ -557,12 +557,14 @@ pub async fn mongo_update_documents_core(
     filter_json: &str,
     update_json: &str,
     many: bool,
+    options_json: Option<&str>,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
-            mongo_driver::update_documents(client, database, collection, filter_json, update_json, many).await
+            mongo_driver::update_documents(client, database, collection, filter_json, update_json, many, options_json)
+                .await
         }
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support bulk updateOne/updateMany writes".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),

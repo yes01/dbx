@@ -576,8 +576,8 @@ export async function completionAssistantSearch(request: CompletionAssistantRequ
   return invoke("completion_assistant_search", { request });
 }
 
-export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind): Promise<ObjectSource> {
-  return invoke("get_object_source", { connectionId, database, schema, name, objectType });
+export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string): Promise<ObjectSource> {
+  return invoke("get_object_source", { connectionId, database, schema, name, objectType, signature });
 }
 
 export async function listSchemas(connectionId: string, database: string, applyVisibleFilter = false): Promise<string[]> {
@@ -1600,7 +1600,7 @@ export async function mongoUpdateDocument(connectionId: string, database: string
   return invoke("mongo_update_document", { connectionId, database, collection, id, docJson });
 }
 
-export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean): Promise<{ affected_rows: number }> {
+export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean, optionsJson?: string): Promise<{ affected_rows: number }> {
   const affectedRows = await invoke<number>("mongo_update_documents", {
     connectionId,
     database,
@@ -1608,6 +1608,7 @@ export async function mongoUpdateDocuments(connectionId: string, database: strin
     filterJson,
     updateJson,
     many,
+    optionsJson,
   });
   return { affected_rows: affectedRows };
 }

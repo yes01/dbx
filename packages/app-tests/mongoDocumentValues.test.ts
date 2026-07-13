@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongoDocumentValues.ts";
+import { buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongoDocumentValues.ts";
 
 test("parses Mongo shell ISODate literals as extended JSON dates", () => {
   assert.deepEqual(parseMongoDocumentInputValue('ISODate("2026-06-10T13:59:31.287Z")'), {
@@ -36,6 +36,31 @@ test("builds Mongo grid updates with set and unset operators", () => {
   });
 });
 
+test("preserves JSON-looking and typed-looking strings in existing Mongo fields", () => {
+  const original = {
+    _id: "1",
+    answer: '{"action":"New"}',
+    numericText: "42",
+    booleanText: "true",
+    profile: { role: "admin" },
+  };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, '{"action":"Updated"}'],
+    [2, "43"],
+    [3, "false"],
+    [4, '{"role":"maintainer"}'],
+  ]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "answer", "numericText", "booleanText", "profile"], original), {
+    $set: {
+      answer: '{"action":"Updated"}',
+      numericText: "43",
+      booleanText: "false",
+      profile: { role: "maintainer" },
+    },
+  });
+});
+
 test("builds Mongo inserts with parsed date values", () => {
   assert.deepEqual(buildMongoInsertDocument(["ignored", 'new Date("2026-06-10T13:59:31.287Z")'], ["_id", "createdAt"]), {
     createdAt: { $date: "2026-06-10T13:59:31.287Z" },
@@ -60,6 +85,29 @@ test("builds Mongo copy inserts without primary keys when requested", () => {
   assert.deepEqual(buildMongoCopyInsertDocument(["6743e4bfa3f6f84bc3fff6c8", "done"], ["_id", "status"], { excludePrimaryKeys: true }), {
     status: "done",
   });
+});
+
+test("projects original Mongo values and applies only explicit copy edits", () => {
+  const original = {
+    _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
+    numericText: "123",
+    booleanText: "true",
+    profile: { role: "admin" },
+    hidden: "not selected",
+  };
+
+  assert.deepEqual(
+    buildMongoCopyDocumentFromOriginal(original, ["ignored", "456", '{"role":"maintainer"}'], ["numericText", "booleanText", "profile"], [false, true, false]),
+    {
+      numericText: "123",
+      booleanText: "456",
+      profile: { role: "admin" },
+    },
+  );
+  assert.deepEqual(
+    buildMongoCopyDocumentFromOriginal(original, ["ignored", "ignored"], ["_id", "numericText"], [false, false], { excludePrimaryKeys: true }),
+    { numericText: "123" },
+  );
 });
 
 test("formats extended JSON dates as Mongo shell ISODate literals", () => {

@@ -32,6 +32,7 @@ test("read-only commands are not mutating", () => {
   assert.equal(isRedisMutatingCommand("SCAN 0"), false);
   assert.equal(isRedisMutatingCommand("SELECT 1"), false);
   assert.equal(isRedisMutatingCommand("INFO"), false);
+  assert.equal(isRedisMutatingCommand("ZRANDMEMBER leaderboard 2 WITHSCORES"), false);
 });
 
 test("read-only subcommands are not mutating", () => {
@@ -57,6 +58,7 @@ test("resolveRedisCommandSpec resolves subcommand then main", () => {
   const main = resolveRedisCommandSpec(["GET"]);
   assert.ok(main);
   assert.equal(main?.group, "string");
+  assert.equal(resolveRedisCommandSpec(["ZRANDMEMBER"])?.group, "zset");
 });
 
 test("normal writes do not require confirmation but destructive commands do", () => {

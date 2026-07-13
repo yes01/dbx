@@ -448,7 +448,7 @@ async function openSource(row: ObjectBrowserRow) {
   sourceSaveError.value = "";
   sourceLoading.value = true;
   try {
-    const result = await api.getObjectSource(props.connection.id, props.database, row.schema || selectedSchema.value || props.database, row.name, row.type as ObjectSourceKind);
+    const result = await api.getObjectSource(props.connection.id, props.database, row.schema || selectedSchema.value || props.database, row.name, row.type as ObjectSourceKind, row.signature || undefined);
     const editable = await api.buildEditableObjectSource({
       databaseType: effectiveDatabaseType.value,
       objectType: row.type as ObjectSourceKind,
@@ -577,7 +577,7 @@ async function confirmRename() {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
     if (supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind)) {
-      const source = await api.getObjectSource(props.connection.id, props.database, schema, row.name, row.type as ObjectSourceKind);
+      const source = await api.getObjectSource(props.connection.id, props.database, schema, row.name, row.type as ObjectSourceKind, row.signature || undefined);
       const statements = await buildRoutineRenameObjectSourceStatements({
         databaseType: effectiveDatabaseType.value,
         objectType: row.type as ObjectSourceKind,
@@ -621,6 +621,7 @@ async function confirmDrop() {
             objectType: row.type,
             schema: row.schema || selectedSchema.value,
             name: row.name,
+            signature: row.signature,
           });
     await api.executeQuery(props.connection.id, props.database, sql);
     const successKey = row.type === "VIEW" ? "contextMenu.dropViewSuccess" : row.type === "PROCEDURE" ? "contextMenu.dropProcedureSuccess" : row.type === "FUNCTION" ? "contextMenu.dropFunctionSuccess" : "contextMenu.dropTableSuccess";
