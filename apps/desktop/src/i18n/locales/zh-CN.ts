@@ -2975,13 +2975,6 @@ export default {
     supportInfoOperatingSystem: "操作系统",
     supportInfoArchitecture: "系统架构",
     supportInfoUnknown: "未知",
-    community: "社区",
-    qqGroup: "QQ 群",
-    wechatGroup: "微信交流群",
-    wechatGroupInvite: "腾讯文档邀请",
-    project: "项目",
-    openSource: "开源仓库",
-    officialDocs: "官方文档",
   },
   driverStore: {
     progressJreExtract: "解压 JRE...",

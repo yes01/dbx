@@ -2539,13 +2539,6 @@ export default {
     supportInfoOperatingSystem: "Sistema operacional",
     supportInfoArchitecture: "Arquitetura",
     supportInfoUnknown: "Desconhecido",
-    community: "Comunidade",
-    qqGroup: "Grupo do QQ",
-    wechatGroup: "Grupo do WeChat",
-    wechatGroupInvite: "Convite do Tencent Docs",
-    project: "Projeto",
-    openSource: "Repositório de código aberto",
-    officialDocs: "Documentação oficial",
   },
   driverStore: {
     progressJreExtract: "Extraindo JRE...",

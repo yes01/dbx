@@ -2953,13 +2953,6 @@ export default {
     supportInfoOperatingSystem: "Operating System",
     supportInfoArchitecture: "Architecture",
     supportInfoUnknown: "Unknown",
-    community: "Community",
-    qqGroup: "QQ Group",
-    wechatGroup: "WeChat Group",
-    wechatGroupInvite: "Tencent Docs invite",
-    project: "Project",
-    openSource: "Open-source repository",
-    officialDocs: "Official docs",
   },
   driverStore: {
     progressJreExtract: "Extracting JRE...",

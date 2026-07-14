@@ -2784,13 +2784,6 @@ export default {
     supportInfoOperatingSystem: "オペレーティングシステム",
     supportInfoArchitecture: "アーキテクチャ",
     supportInfoUnknown: "不明",
-    community: "コミュニティ",
-    qqGroup: "QQグループ",
-    wechatGroup: "WeChatグループ",
-    wechatGroupInvite: "Tencent Docs招待",
-    project: "プロジェクト",
-    openSource: "オープンソースリポジトリ",
-    officialDocs: "公式ドキュメント",
   },
   driverStore: {
     progressJreExtract: "JREを展開中...",
